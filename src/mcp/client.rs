@@ -293,6 +293,15 @@ impl McpClient {
             .is_some_and(|value| value.starts_with("text/event-stream"));
         let text = response.text().await.unwrap_or_default();
 
+        debug!(
+            server = %self.server.name,
+            method,
+            status = status.as_u16(),
+            streaming,
+            bytes = text.len(),
+            "MCP response"
+        );
+
         let envelope = if streaming {
             last_event(&text).ok_or_else(|| McpError::Protocol {
                 server: self.server.name.clone(),
@@ -320,9 +329,19 @@ impl McpClient {
             });
         }
 
+        // An envelope with neither half is almost never the MCP server: it is
+        // whatever sits in front of it — a gateway 404, an ingress that never
+        // routed the request, a proxy answering its own JSON. The server then has
+        // nothing in its log and the client has nothing to go on, so the status
+        // and the body go in the message; they are the only things that name the
+        // culprit.
         parsed.result.ok_or_else(|| McpError::Protocol {
             server: self.server.name.clone(),
-            message: format!("{method} answered neither a result nor an error"),
+            message: format!(
+                "{method} answered {status} with neither a result nor an error — \
+                 usually something in front of the server answering instead of it: {}",
+                snippet(&scrub.text(&envelope))
+            ),
         })
     }
 
@@ -528,6 +547,21 @@ pub fn encode_header_value(value: &str) -> String {
     } else {
         format!("=?base64?{}?=", BASE64.encode(value.as_bytes()))
     }
+}
+
+/// A body fragment short enough to sit inside an error message.
+///
+/// Whitespace is collapsed and the tail is cut: the point is to identify who
+/// answered, and a gateway says that in its first few words.
+fn snippet(body: &str) -> String {
+    const MAX: usize = 200;
+
+    let collapsed = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut text: String = collapsed.chars().take(MAX).collect();
+    if collapsed.chars().count() > MAX {
+        text.push('…');
+    }
+    format!("`{text}`")
 }
 
 /// Pulls the last `data:` payload out of an SSE body.
@@ -789,6 +823,17 @@ mod tests {
         let mirrored = mirror_headers(&params, &json!({"flag": false, "count": -7}));
         assert_eq!(mirrored[0].1, "false");
         assert_eq!(mirrored[1].1, "-7");
+    }
+
+    #[test]
+    fn a_body_in_an_error_message_is_collapsed_and_cut() {
+        assert_eq!(
+            snippet("{\n  \"message\": \"no Route matched\"\n}"),
+            "`{ \"message\": \"no Route matched\" }`"
+        );
+        let long = snippet(&"x".repeat(500));
+        assert!(long.ends_with("…`"));
+        assert!(long.chars().count() < 250);
     }
 
     #[test]

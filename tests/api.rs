@@ -3484,6 +3484,34 @@ async fn the_api_lists_servers_and_asks_one_what_it_offers() {
 }
 
 #[tokio::test]
+async fn a_gateway_answering_instead_of_the_server_says_so_with_its_status_and_body() {
+    // The failure this is about: the MCP server logs nothing and sees nothing,
+    // because whatever sits in front of it answered. The message has to carry the
+    // status and the body, or there is no way to tell that from a broken server.
+    let front = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(404).set_body_json(json!({"message": "no Route matched"})),
+        )
+        .mount(&front)
+        .await;
+
+    let harness = Harness::start(&[(
+        "mcp.yaml",
+        format!(
+            "servers:\n  - name: weather\n    url: {}/mcp\n",
+            front.uri()
+        ),
+    )])
+    .await;
+
+    let answer = harness.get("/api/mcp/weather/tools").await;
+    let message = answer["message"].as_str().unwrap();
+    assert!(message.contains("404"), "{message}");
+    assert!(message.contains("no Route matched"), "{message}");
+}
+
+#[tokio::test]
 async fn templated_headers_reach_the_mcp_server_and_never_come_back_out() {
     let mcp = mcp_server(
         weather_tool(),
