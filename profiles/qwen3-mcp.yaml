@@ -1,0 +1,66 @@
+# Agent mode against a real MCP server.
+#
+# Same model, same loop as qwen3-native.yaml — but the tools are not declared
+# here. They are fetched from the `dev` server at the start of the run and
+# **really called**, which is the difference between checking that the model
+# emits well-formed calls and checking that tool calling works.
+#
+# The tool declarations the model sees come from the server's own `tools/list`,
+# so a schema change there shows up here without touching this file.
+#
+# The OpenAI-compatible endpoint on purpose: on Ollama, qwen3:0.6b calls tools
+# reliably through `/v1/chat/completions` and only sporadically through its own
+# `/api/chat`. Same model, same weights — the difference is in how each endpoint
+# templates the tool declarations into the prompt, and it is exactly the sort of
+# thing you would want a tool like this to tell you.
+---
+name: qwen3-mcp
+kind: chat
+url: http://127.0.0.1:11434/v1/chat/completions
+timeout_ms: 300000
+
+request:
+  template: |
+    {
+      "model": "qwen3:0.6b-q4_K_M",
+      "messages": {{ messages | tojson }},
+      {% if tools %}"tools": {{ tools | tojson }},{% endif %}
+      "reasoning_effort": "none",
+      "max_tokens": {{ params.max_tokens | default(256) }}
+    }
+
+decode:
+  content:
+    - $.choices[0].message.content
+    - $.message.content
+  tool_calls:
+    - $.choices[0].message.tool_calls
+    - $.message.tool_calls
+  finish_reason:
+    - $.choices[0].finish_reason
+    - $.done_reason
+  usage:
+    - $.usage
+    - $
+
+agent:
+  stop_when:
+    no_tool_calls: true
+    finish_reason_in:
+      - stop
+      - end_turn
+  max_iterations: 6
+  max_duration_ms: 600000
+
+# Everything this server advertises. A `tools:` list in mcp.yaml would narrow it.
+mcp:
+  - dev
+
+# A simulated tool of the same name would win over the server's, which is how you
+# stub exactly one tool of an otherwise live server:
+#
+# tools:
+#   - name: explode
+#     schema:
+#       type: object
+#     response: '{"ok": true}'

@@ -1,0 +1,1059 @@
+//! Agent mode: a `kind: chat` profile, run in a loop.
+//!
+//! Render, call, decode; if the stop condition is not met, answer the tool calls
+//! with their simulated results, feed them back, and go round again. There is no
+//! third payload format and no second profile — `POST /api/call` runs one turn of
+//! exactly the same thing.
+//!
+//! # What is being checked
+//!
+//! Not that the model does useful work. That it emits tool calls matching the
+//! schema it was given, and that it knows what to do with a result. The tools are
+//! simulated: a fixed string, or a Rhai script that can at least look at the
+//! arguments. Nothing is executed.
+//!
+//! # Never a silent loop
+//!
+//! Every way out is named. The one worth spelling out is
+//! [`StopOutcome::PredicateNeverEvaluable`]: a backend that never emits a
+//! `finish_reason` would let a profile stopping on `finish_reason_in` run to
+//! `max_iterations` and look like a slow agent. It is not — the configured
+//! predicate could never be evaluated even once, and that is what gets reported.
+
+use std::collections::HashSet;
+use std::time::{Duration, Instant};
+
+use jsonschema::Validator;
+use rhai::Scope;
+use schemars::JsonSchema;
+use serde::Serialize;
+use serde_json::Value;
+use tracing::{debug, info, warn};
+
+use crate::config::Config;
+use crate::decode::Decoded;
+use crate::exec::{CallInput, CallOutcome, ExecError, Runner};
+use crate::mcp::{McpCredentials, McpError, McpTool};
+use crate::message::{Message, Role, ToolCall};
+use crate::profile::{AgentSpec, Profile, ProfileKind, StopWhen, ToolResponse, ToolSpec};
+use crate::script::ScriptError;
+
+/// Turns allowed when the profile says nothing.
+const DEFAULT_MAX_ITERATIONS: u32 = 10;
+
+/// Wall-clock ceiling when the profile says nothing. Generous: a small model on
+/// a CPU is slow, and a timeout that fires on a working agent is worse than one
+/// that fires late.
+const DEFAULT_MAX_DURATION: Duration = Duration::from_secs(300);
+
+/// Why the loop stopped. Every variant is a complete explanation.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+// `rename_all` renames the *variants*; the struct-variant fields need
+// `rename_all_fields` as well, or `at_turn` goes out snake_case.
+#[serde(
+    tag = "outcome",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum StopOutcome {
+    /// A configured predicate held.
+    Stopped {
+        /// Which one.
+        reason: StopReason,
+    },
+    /// The turn budget ran out with the predicates evaluable but never true.
+    MaxIterations {
+        /// The budget.
+        limit: u32,
+    },
+    /// The time budget ran out.
+    Deadline {
+        /// How long the loop had run.
+        after_ms: u64,
+    },
+    /// The model asked for the same thing twice — a loop, not progress.
+    RepeatedCall {
+        /// Tool that was called again with identical arguments.
+        tool: String,
+        /// Turn it happened on.
+        at_turn: u32,
+    },
+    /// The configured stop condition could never be evaluated, not even once.
+    ///
+    /// The loop is not slow — it is unfalsifiable. Almost always a backend that
+    /// does not report `finish_reason` at all.
+    PredicateNeverEvaluable {
+        /// The predicate that never had anything to work with.
+        predicate: &'static str,
+        /// Turns that went by.
+        turns: u32,
+    },
+}
+
+/// Which predicate ended the loop.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(
+    tag = "predicate",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum StopReason {
+    /// The turn produced no tool call.
+    NoToolCalls,
+    /// `finish_reason` was one of the terminal values.
+    FinishReason {
+        /// The value that matched.
+        value: String,
+    },
+}
+
+/// What the loop decided at the end of a turn.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(
+    tag = "decision",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum Decision {
+    /// Tool results were fed back and another turn follows.
+    Continue {
+        /// How many tools answered.
+        tools: usize,
+    },
+    /// The loop ended here.
+    Stop {
+        /// Why.
+        stop: StopOutcome,
+    },
+}
+
+/// One simulated tool call: what the model asked for, and what it got back.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolInvocation {
+    /// The call, as the model emitted it.
+    pub call: ToolCall,
+    /// Where the answer came from. `simulated` means nothing happened outside
+    /// this process; `mcp` means it did.
+    pub source: ToolSource,
+    /// MCP server that ran it, when one did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    /// Round trip to that server, in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
+    /// The tool ran and reported a problem (`isError`). Not a failure of `mire`,
+    /// and not a failure of the loop — a result the model is meant to react to,
+    /// exactly like a `4xx` from an endpoint under test.
+    pub reported_error: bool,
+    /// Why the arguments do not match the declared schema. Empty means they do —
+    /// which is one of the two things agent mode exists to check.
+    pub schema_errors: Vec<String>,
+    /// What was fed back to the model.
+    pub result: String,
+    /// Set when the tool could not answer at all: unknown name, or a script that
+    /// failed. The model still gets told, so it has a chance to recover.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Where a tool's answer came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ToolSource {
+    /// Declared in the profile. Nothing is executed.
+    Simulated,
+    /// Declared by an MCP server, and really called.
+    Mcp,
+}
+
+/// One turn: the whole exchange, plus what was decided about it.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Turn {
+    /// 1-based turn number.
+    pub index: u32,
+    /// The request, the response and the decode — the same shape `POST /api/call`
+    /// returns, credentials already masked.
+    pub call: Box<CallOutcome>,
+    /// Tools answered at the end of this turn.
+    pub tools: Vec<ToolInvocation>,
+    /// Continue, or stop and why.
+    pub decision: Decision,
+}
+
+/// Everything one agent run produced.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Trace {
+    /// Profile that ran.
+    pub profile: String,
+    /// Auth provider that ran.
+    pub auth: String,
+    /// Every turn, in order.
+    pub turns: Vec<Turn>,
+    /// How it ended.
+    pub stop: StopOutcome,
+    /// Wall-clock time for the whole loop.
+    pub duration_ms: u64,
+}
+
+/// What one agent run needs.
+#[derive(Debug, Default)]
+pub struct AgentInput {
+    /// The single-turn input. `dry_run` is ignored: a loop that sends nothing has
+    /// nothing to loop on.
+    pub call: CallInput,
+    /// Turn budget, overriding the profile's.
+    pub max_iterations: Option<u32>,
+}
+
+/// Why an agent run could not be performed at all.
+#[derive(Debug, thiserror::Error)]
+pub enum AgentError {
+    /// Agent mode is a way of running a chat profile, and only a chat profile.
+    #[error("profile `{profile}` is `kind: embedding`; agent mode runs a `kind: chat` profile")]
+    NotChat {
+        /// The profile that was asked for.
+        profile: String,
+    },
+
+    /// A turn failed. Whatever went wrong on turn one goes wrong on turn two.
+    #[error(transparent)]
+    Turn(#[from] ExecError),
+
+    /// The profile's MCP servers could not be resolved before the loop started.
+    ///
+    /// Only setup failures land here — a tool that fails *during* the loop is fed
+    /// back to the model, because recovering from it is what is being tested.
+    #[error(transparent)]
+    Mcp(#[from] McpError),
+}
+
+/// Runs the loop, handing each turn to `on_turn` as it completes.
+///
+/// The callback is what makes the API able to stream: turns arrive as they
+/// happen rather than after the run.
+///
+/// # Errors
+///
+/// Fails when the profile is not a chat profile, or when an exchange itself
+/// fails. A model that misbehaves is a [`StopOutcome`], not an error.
+pub async fn run(
+    runner: &Runner,
+    mut input: AgentInput,
+    mut on_turn: impl FnMut(&Turn),
+) -> Result<Trace, AgentError> {
+    let Prepared {
+        profile,
+        spec,
+        limit,
+        deadline,
+        tools,
+    } = prepare(runner, &mut input).await?;
+
+    let started = Instant::now();
+    let mut messages = input.call.messages.clone();
+    let mut turns: Vec<Turn> = Vec::new();
+    let mut seen_calls: HashSet<String> = HashSet::new();
+    let mut predicate_ever_evaluable = spec.stop_when.no_tool_calls;
+    let mut auth_name = String::new();
+
+    let stop = loop {
+        let index = u32::try_from(turns.len()).unwrap_or(u32::MAX) + 1;
+
+        if let Some(outcome) = budget_exhausted(
+            started,
+            deadline,
+            index,
+            limit,
+            predicate_ever_evaluable,
+            &spec.stop_when,
+        ) {
+            break outcome;
+        }
+
+        let outcome = runner
+            .call(CallInput {
+                messages: messages.clone(),
+                dry_run: false,
+                ..clone_input(&input.call)
+            })
+            .await?;
+        auth_name.clone_from(&outcome.auth);
+
+        let completion = completion_of(&outcome);
+
+        if completion.finish_reason.is_some() && !spec.stop_when.finish_reason_in.is_empty() {
+            predicate_ever_evaluable = true;
+        }
+
+        // Stop before spending a turn answering tools nobody will read.
+        if let Some(reason) = should_stop(&spec.stop_when, &completion) {
+            let turn = Turn {
+                index,
+                call: Box::new(outcome),
+                tools: Vec::new(),
+                decision: Decision::Stop {
+                    stop: StopOutcome::Stopped {
+                        reason: reason.clone(),
+                    },
+                },
+            };
+            on_turn(&turn);
+            turns.push(turn);
+            break StopOutcome::Stopped { reason };
+        }
+
+        // The model wants tools. Answer them, and watch for it asking twice.
+        let repeated = detect_repeat(&mut seen_calls, &completion.tool_calls);
+
+        let invocations = invoke_tools(&tools, &completion.tool_calls, index).await;
+        let decision = repeated.as_ref().map_or(
+            Decision::Continue {
+                tools: invocations.len(),
+            },
+            |tool| Decision::Stop {
+                stop: StopOutcome::RepeatedCall {
+                    tool: tool.clone(),
+                    at_turn: index,
+                },
+            },
+        );
+
+        let turn = Turn {
+            index,
+            call: Box::new(outcome),
+            tools: invocations,
+            decision,
+        };
+        on_turn(&turn);
+
+        if let Some(tool) = repeated {
+            warn!(profile = %profile.name, %tool, turn = index, "the model asked for the same thing twice");
+            turns.push(turn);
+            break StopOutcome::RepeatedCall {
+                tool,
+                at_turn: index,
+            };
+        }
+
+        feed_back(&mut messages, &completion, &turn.tools);
+        debug!(profile = %profile.name, turn = index, tools = turn.tools.len(), "continuing");
+        turns.push(turn);
+    };
+
+    info!(
+        profile = %profile.name,
+        turns = turns.len(),
+        outcome = ?std::mem::discriminant(&stop),
+        duration_ms = elapsed_ms(started),
+        "agent run finished"
+    );
+
+    Ok(Trace {
+        profile: profile.name.clone(),
+        auth: auth_name,
+        turns,
+        stop,
+        duration_ms: elapsed_ms(started),
+    })
+}
+
+/// Appends the assistant turn and one message per tool result, which is what
+/// the next turn's template renders.
+fn feed_back(
+    messages: &mut Vec<Message>,
+    completion: &crate::decode::Completion,
+    tools: &[ToolInvocation],
+) {
+    messages.push(Message {
+        role: Role::Assistant,
+        content: completion.content.clone(),
+        tool_calls: completion.tool_calls.clone(),
+        tool_call_id: None,
+    });
+    for invocation in tools {
+        messages.push(Message {
+            role: Role::Tool,
+            content: Some(invocation.result.clone()),
+            tool_calls: Vec::new(),
+            tool_call_id: invocation.call.id.clone(),
+        });
+    }
+}
+
+/// The budget checks that run before a turn is even attempted.
+fn budget_exhausted(
+    started: Instant,
+    deadline: Duration,
+    index: u32,
+    limit: u32,
+    predicate_ever_evaluable: bool,
+    stop_when: &StopWhen,
+) -> Option<StopOutcome> {
+    if started.elapsed() >= deadline {
+        return Some(StopOutcome::Deadline {
+            after_ms: elapsed_ms(started),
+        });
+    }
+    if index > limit {
+        return Some(if predicate_ever_evaluable {
+            StopOutcome::MaxIterations { limit }
+        } else {
+            StopOutcome::PredicateNeverEvaluable {
+                predicate: describe_predicate(stop_when),
+                turns: limit,
+            }
+        });
+    }
+    None
+}
+
+/// What the loop needs, resolved once.
+struct Prepared {
+    profile: std::sync::Arc<Profile>,
+    spec: AgentSpec,
+    limit: u32,
+    deadline: Duration,
+    tools: Tools,
+}
+
+/// Everything needed to answer a tool call, from either source.
+struct Tools {
+    profile: std::sync::Arc<Profile>,
+    /// One entry per offered tool, simulated and live alike: a real server's
+    /// `inputSchema` is checked exactly like a declared one.
+    validators: Vec<(String, Option<Validator>)>,
+    live: Vec<McpTool>,
+    config: std::sync::Arc<Config>,
+}
+
+impl Tools {
+    /// Every name the model may call, for the message when it invents one.
+    fn known(&self) -> Vec<&str> {
+        self.profile
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .chain(self.live.iter().map(|tool| tool.name.as_str()))
+            .collect()
+    }
+
+    fn validator(&self, name: &str) -> Option<&Validator> {
+        self.validators
+            .iter()
+            .find(|(candidate, _)| candidate == name)
+            .and_then(|(_, validator)| validator.as_ref())
+    }
+}
+
+/// Resolves the profile, the budgets and the tools, or explains why the run
+/// cannot happen.
+///
+/// Listing the MCP tools happens here, once, rather than per turn: a server that
+/// is unreachable should stop the run before the first prompt is spent, and the
+/// model must be offered the same tools on every turn.
+async fn prepare(runner: &Runner, input: &mut AgentInput) -> Result<Prepared, AgentError> {
+    let config = runner.config().snapshot();
+    let profile = config
+        .profiles
+        .get(&input.call.profile)
+        .ok_or_else(|| ExecError::UnknownProfile(input.call.profile.clone()))?
+        .clone();
+
+    if profile.kind != ProfileKind::Chat {
+        return Err(AgentError::NotChat {
+            profile: profile.name.clone(),
+        });
+    }
+
+    let mut live = Vec::new();
+    for server in &profile.mcp {
+        let client = config
+            .mcp
+            .get(server)
+            .ok_or_else(|| McpError::UnknownServer(server.clone()))?;
+        let credentials = McpCredentials::resolve(&config.registry, client.server()).await?;
+        let listed = client.list_tools(&credentials).await?;
+        info!(profile = %profile.name, %server, tools = listed.len(), "MCP tools offered");
+        live.extend(listed);
+    }
+
+    let spec = profile.agent.clone().unwrap_or_else(default_spec);
+    let validators = compile_validators(&profile.tools, &live);
+
+    // The live tools go straight into the render context, so every turn offers
+    // the model the same set.
+    input.call.extra_tools = live
+        .iter()
+        // A simulated tool of the same name wins, so declaring it twice would
+        // just confuse the model about which schema applies.
+        .filter(|tool| !profile.tools.iter().any(|spec| spec.name == tool.name))
+        .map(declare)
+        .collect();
+
+    Ok(Prepared {
+        limit: input.max_iterations.unwrap_or(spec.max_iterations),
+        deadline: spec
+            .max_duration_ms
+            .map_or(DEFAULT_MAX_DURATION, Duration::from_millis),
+        tools: Tools {
+            profile: profile.clone(),
+            validators,
+            live,
+            config,
+        },
+        profile,
+        spec,
+    })
+}
+
+/// Looks up the auth provider an MCP server names.
+/// One MCP tool, in the `OpenAI` function shape the templates already speak.
+fn declare(tool: &McpTool) -> Value {
+    serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": tool.description.clone().unwrap_or_default(),
+            "parameters": without_transport_keywords(&tool.input_schema),
+        },
+    })
+}
+
+/// Strips MCP's own schema extensions before the schema reaches the model.
+///
+/// `x-mcp-header` says how a parameter is mirrored into an HTTP header. That is
+/// the client's business and the server's; it is noise in a prompt, and prompt
+/// noise is not free on a small model. JSON Schema tolerates unknown keywords,
+/// which is exactly why nothing would have complained.
+fn without_transport_keywords(schema: &Value) -> Value {
+    match schema {
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .filter(|(key, _)| key.as_str() != "x-mcp-header")
+                .map(|(key, value)| (key.clone(), without_transport_keywords(value)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(without_transport_keywords).collect()),
+        other => other.clone(),
+    }
+}
+
+/// The decoded completion of a turn, or an empty one when the endpoint did not
+/// answer with a chat completion at all.
+///
+/// A turn with nothing decodable is not a crash: it is a model that answered
+/// something this profile cannot read, and the loop should stop on it rather
+/// than pretend.
+fn completion_of(outcome: &CallOutcome) -> crate::decode::Completion {
+    match outcome.response.as_ref().and_then(|r| r.decoded.as_ref()) {
+        Some(Decoded::Completion(completion)) => completion.clone(),
+        _ => crate::decode::Completion::default(),
+    }
+}
+
+/// Records this turn's calls and reports the first one already seen.
+///
+/// Keyed on name *and* arguments, so asking about two different cities is
+/// progress and asking about the same one twice is a loop.
+fn detect_repeat(seen: &mut HashSet<String>, calls: &[ToolCall]) -> Option<String> {
+    let mut repeated = None;
+    for call in calls {
+        if !seen.insert(fingerprint(call)) && repeated.is_none() {
+            repeated = Some(call.name.clone());
+        }
+    }
+    repeated
+}
+
+fn default_spec() -> AgentSpec {
+    AgentSpec {
+        stop_when: StopWhen::default(),
+        max_iterations: DEFAULT_MAX_ITERATIONS,
+        max_duration_ms: None,
+    }
+}
+
+/// `CallInput` is not `Clone` because it holds a credential; the loop needs the
+/// same input every turn, so it is rebuilt field by field on purpose.
+fn clone_input(input: &CallInput) -> CallInput {
+    CallInput {
+        profile: input.profile.clone(),
+        auth: input.auth.clone(),
+        messages: Vec::new(),
+        input: input.input.clone(),
+        params: input.params.clone(),
+        model: input.model.clone(),
+        token: input.token.clone(),
+        dry_run: false,
+        include_vectors: false,
+        repeat: 1,
+        tolerance: input.tolerance,
+        extra_tools: input.extra_tools.clone(),
+        // The loop reads tool calls out of a decoded answer, and a streamed
+        // answer does not reassemble them. Agent mode calls whole.
+        stream: false,
+    }
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Names the configured predicate, for the report that says it never fired.
+fn describe_predicate(stop_when: &StopWhen) -> &'static str {
+    if stop_when.finish_reason_in.is_empty() {
+        "stop_when"
+    } else {
+        "stop_when.finish_reason_in"
+    }
+}
+
+/// Applies the configured predicates. Combined with OR: the first that holds wins.
+fn should_stop(stop_when: &StopWhen, completion: &crate::decode::Completion) -> Option<StopReason> {
+    if let Some(reason) = &completion.finish_reason
+        && stop_when
+            .finish_reason_in
+            .iter()
+            .any(|value| value == reason)
+    {
+        return Some(StopReason::FinishReason {
+            value: reason.clone(),
+        });
+    }
+    if stop_when.no_tool_calls && completion.tool_calls.is_empty() {
+        return Some(StopReason::NoToolCalls);
+    }
+    None
+}
+
+/// A call's identity, for spotting the model asking for the same thing twice.
+fn fingerprint(call: &ToolCall) -> String {
+    format!(
+        "{}({})",
+        call.name,
+        serde_json::to_string(&call.arguments).unwrap_or_default()
+    )
+}
+
+/// Compiles every offered tool's argument schema once per run, from both sources.
+fn compile_validators(tools: &[ToolSpec], live: &[McpTool]) -> Vec<(String, Option<Validator>)> {
+    let declared = tools.iter().map(|tool| (tool.name.clone(), &tool.schema));
+    let served = live
+        .iter()
+        .map(|tool| (tool.name.clone(), &tool.input_schema));
+
+    declared
+        .chain(served)
+        .map(|(name, schema)| {
+            let validator = jsonschema::validator_for(schema).ok();
+            if validator.is_none() {
+                warn!(tool = %name, "the tool's argument schema is not usable, arguments will not be checked");
+            }
+            (name, validator)
+        })
+        .collect()
+}
+
+/// Answers every tool call the model made, from whichever source declared it.
+///
+/// A simulated tool wins over a live one of the same name: that is how you stub
+/// exactly one tool of an otherwise real server.
+async fn invoke_tools(tools: &Tools, calls: &[ToolCall], turn: u32) -> Vec<ToolInvocation> {
+    let mut invocations = Vec::with_capacity(calls.len());
+
+    for call in calls {
+        // Arguments that do not match are reported *and still answered*: the
+        // model gets a chance to correct itself, and a real server gets to have
+        // its own opinion about them.
+        let schema_errors = tools
+            .validator(&call.name)
+            .map(|validator| {
+                validator
+                    .iter_errors(&call.arguments)
+                    .map(|error| format!("{}: {error}", error.instance_path()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if let Some(spec) = tools.profile.tools.iter().find(|t| t.name == call.name) {
+            invocations.push(simulated(spec, call, turn, schema_errors));
+        } else if let Some(tool) = tools.live.iter().find(|t| t.name == call.name) {
+            invocations.push(live(tools, tool, call, schema_errors).await);
+        } else {
+            let message = format!(
+                "no tool named `{}` is declared; this profile offers {:?}",
+                call.name,
+                tools.known()
+            );
+            invocations.push(ToolInvocation {
+                call: call.clone(),
+                source: ToolSource::Simulated,
+                server: None,
+                latency_ms: None,
+                reported_error: false,
+                schema_errors,
+                result: format!("{{\"error\": {}}}", json_string(&message)),
+                error: Some(message),
+            });
+        }
+    }
+
+    invocations
+}
+
+/// A tool the profile declares. Nothing leaves this process.
+fn simulated(
+    spec: &ToolSpec,
+    call: &ToolCall,
+    turn: u32,
+    schema_errors: Vec<String>,
+) -> ToolInvocation {
+    let (result, error) = match answer(spec, call, turn) {
+        Ok(result) => (result, None),
+        Err(failure) => {
+            let message = failure.to_string();
+            (
+                format!("{{\"error\": {}}}", json_string(&message)),
+                Some(message),
+            )
+        }
+    };
+
+    ToolInvocation {
+        call: call.clone(),
+        source: ToolSource::Simulated,
+        server: None,
+        latency_ms: None,
+        reported_error: false,
+        schema_errors,
+        result,
+        error,
+    }
+}
+
+/// A tool on a real MCP server. This one has effects.
+async fn live(
+    tools: &Tools,
+    tool: &McpTool,
+    call: &ToolCall,
+    schema_errors: Vec<String>,
+) -> ToolInvocation {
+    let mut invocation = ToolInvocation {
+        call: call.clone(),
+        source: ToolSource::Mcp,
+        server: Some(tool.server.clone()),
+        latency_ms: None,
+        reported_error: false,
+        schema_errors,
+        result: String::new(),
+        error: None,
+    };
+
+    let outcome = async {
+        let client = tools
+            .config
+            .mcp
+            .get(&tool.server)
+            .ok_or_else(|| McpError::UnknownServer(tool.server.clone()))?;
+        let credentials = McpCredentials::resolve(&tools.config.registry, client.server()).await?;
+        client.call_tool(tool, &call.arguments, &credentials).await
+    }
+    .await;
+
+    match outcome {
+        Ok(result) => {
+            invocation.latency_ms = Some(result.latency_ms);
+            // The server's own `isError` is a result, not a failure: reacting to
+            // it is exactly what agent mode is checking the model can do.
+            invocation.reported_error = result.is_error;
+            invocation.result = result.text;
+        }
+        Err(failure) => {
+            let message = failure.to_string();
+            warn!(tool = %call.name, server = %tool.server, %message, "MCP call failed");
+            invocation.result = format!("{{\"error\": {}}}", json_string(&message));
+            invocation.error = Some(message);
+        }
+    }
+
+    invocation
+}
+
+/// Produces one tool's result.
+fn answer(spec: &ToolSpec, call: &ToolCall, turn: u32) -> Result<String, ScriptError> {
+    match spec.answer() {
+        Some(ToolResponse::Static(response)) => Ok(response.to_owned()),
+        Some(ToolResponse::Script(script)) => {
+            let mut scope = Scope::new();
+            scope.push_dynamic("arguments", crate::script::to_dynamic(&call.arguments)?);
+            scope.push("name", call.name.clone());
+            scope.push("turn", i64::from(turn));
+
+            let returned = script.run(&mut scope)?;
+            if returned.is_string() {
+                return returned
+                    .into_string()
+                    .map_err(|found| ScriptError::WrongShape {
+                        found: found.to_owned(),
+                        expected: "a string, a map or an array",
+                    });
+            }
+            let value: Value = crate::script::from_dynamic(&returned, "a map or an array")?;
+            Ok(value.to_string())
+        }
+        // Validation rejects this at load; reaching it means a profile arrived
+        // some other way.
+        None => Err(ScriptError::WrongShape {
+            found: "nothing".to_owned(),
+            expected: "a `response` or a `script`",
+        }),
+    }
+}
+
+fn json_string(text: &str) -> String {
+    serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::decode::Completion;
+
+    fn completion(finish: Option<&str>, tools: &[&str]) -> Completion {
+        Completion {
+            content: None,
+            tool_calls: tools
+                .iter()
+                .map(|name| ToolCall {
+                    id: None,
+                    name: (*name).to_owned(),
+                    arguments: serde_json::json!({}),
+                    arguments_as_text: false,
+                })
+                .collect(),
+            finish_reason: finish.map(str::to_owned),
+            usage: None,
+        }
+    }
+
+    #[test]
+    fn the_default_is_to_stop_when_there_are_no_tool_calls() {
+        let stop_when = StopWhen::default();
+
+        assert!(matches!(
+            should_stop(&stop_when, &completion(None, &[])),
+            Some(StopReason::NoToolCalls)
+        ));
+        assert!(should_stop(&stop_when, &completion(None, &["get_weather"])).is_none());
+    }
+
+    #[test]
+    fn a_terminal_finish_reason_stops_the_loop_even_with_tool_calls_pending() {
+        let stop_when = StopWhen {
+            no_tool_calls: false,
+            finish_reason_in: vec!["stop".to_owned(), "end_turn".to_owned()],
+        };
+
+        let stopped = should_stop(&stop_when, &completion(Some("end_turn"), &["get_weather"]));
+        assert!(matches!(
+            stopped,
+            Some(StopReason::FinishReason { value }) if value == "end_turn"
+        ));
+        // A reason outside the list is not terminal.
+        assert!(should_stop(&stop_when, &completion(Some("length"), &[])).is_none());
+    }
+
+    #[test]
+    fn the_predicate_name_is_reported_when_it_never_had_anything_to_evaluate() {
+        let only_finish_reason = StopWhen {
+            no_tool_calls: false,
+            finish_reason_in: vec!["stop".to_owned()],
+        };
+        assert_eq!(
+            describe_predicate(&only_finish_reason),
+            "stop_when.finish_reason_in"
+        );
+    }
+
+    #[test]
+    fn identical_calls_share_a_fingerprint_and_different_arguments_do_not() {
+        let paris = ToolCall {
+            id: Some("a".to_owned()),
+            name: "get_weather".to_owned(),
+            arguments: serde_json::json!({"city": "Paris"}),
+            arguments_as_text: false,
+        };
+        let paris_again = ToolCall {
+            // A different id is still the same request.
+            id: Some("b".to_owned()),
+            ..paris.clone()
+        };
+        let lyon = ToolCall {
+            arguments: serde_json::json!({"city": "Lyon"}),
+            ..paris.clone()
+        };
+
+        assert_eq!(fingerprint(&paris), fingerprint(&paris_again));
+        assert_ne!(fingerprint(&paris), fingerprint(&lyon));
+    }
+
+    fn weather_profile(response: &str) -> Profile {
+        let yaml = format!(
+            r"
+name: agent
+kind: chat
+url: https://models.internal/v1
+request:
+  template: '{{}}'
+tools:
+  - name: get_weather
+    schema:
+      type: object
+      properties:
+        city:
+          type: string
+      required:
+        - city
+    {response}
+"
+        );
+        serde_yaml_ng::from_str(&yaml).unwrap()
+    }
+
+    /// The dispatch context for a profile with no MCP servers.
+    fn simulated_only(profile: Profile) -> Tools {
+        let profile = std::sync::Arc::new(profile);
+        Tools {
+            validators: compile_validators(&profile.tools, &[]),
+            live: Vec::new(),
+            config: std::sync::Arc::new(Config::default()),
+            profile,
+        }
+    }
+
+    #[test]
+    fn a_declared_tool_carries_no_transport_keywords() {
+        let tool = McpTool {
+            name: "execute_sql".to_owned(),
+            title: None,
+            description: Some("Runs SQL".to_owned()),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "region": {"type": "string", "x-mcp-header": "Region"},
+                    "query": {"type": "string"},
+                },
+            }),
+            annotations: None,
+            server: "db".to_owned(),
+        };
+
+        let declared = declare(&tool);
+        let rendered = declared.to_string();
+        // The mirroring is still honoured on the wire — it just does not belong
+        // in a prompt.
+        assert!(!rendered.contains("x-mcp-header"), "{rendered}");
+        assert_eq!(declared["function"]["name"], "execute_sql");
+        assert_eq!(
+            declared["function"]["parameters"]["properties"]["region"]["type"],
+            "string"
+        );
+    }
+
+    #[tokio::test]
+    async fn arguments_are_checked_against_the_declared_schema() {
+        let tools = simulated_only(weather_profile(r#"response: '{"temp": 21}'"#));
+
+        let good = ToolCall {
+            id: None,
+            name: "get_weather".to_owned(),
+            arguments: serde_json::json!({"city": "Paris"}),
+            arguments_as_text: false,
+        };
+        let bad = ToolCall {
+            arguments: serde_json::json!({"town": 12}),
+            ..good.clone()
+        };
+
+        let invocations = invoke_tools(&tools, &[good, bad], 1).await;
+        assert_eq!(invocations[0].source, ToolSource::Simulated);
+        assert!(invocations[0].schema_errors.is_empty());
+        assert_eq!(invocations[0].result, r#"{"temp": 21}"#);
+
+        assert!(!invocations[1].schema_errors.is_empty());
+        // The model still gets an answer, so it has a chance to correct itself.
+        assert!(invocations[1].error.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_tool_the_profile_never_declared_is_reported_and_answered() {
+        let tools = simulated_only(weather_profile(r#"response: '{"temp": 21}'"#));
+
+        let invocations = invoke_tools(
+            &tools,
+            &[ToolCall {
+                id: None,
+                name: "launch_missiles".to_owned(),
+                arguments: serde_json::json!({}),
+                arguments_as_text: false,
+            }],
+            1,
+        )
+        .await;
+
+        assert!(
+            invocations[0]
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("launch_missiles")
+        );
+        assert!(invocations[0].result.contains("error"));
+    }
+
+    #[tokio::test]
+    async fn a_tool_can_answer_from_a_script() {
+        let tools = simulated_only(weather_profile(
+            "script: '`{\"city\": \"${arguments.city}\", \"turn\": ${turn}}`'",
+        ));
+
+        let invocations = invoke_tools(
+            &tools,
+            &[ToolCall {
+                id: None,
+                name: "get_weather".to_owned(),
+                arguments: serde_json::json!({"city": "Lyon"}),
+                arguments_as_text: false,
+            }],
+            3,
+        )
+        .await;
+
+        assert_eq!(invocations[0].result, r#"{"city": "Lyon", "turn": 3}"#);
+        assert!(invocations[0].error.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_failing_tool_script_answers_with_the_error_rather_than_nothing() {
+        let tools = simulated_only(weather_profile("script: 'arguments.no_such_method()'"));
+
+        let invocations = invoke_tools(
+            &tools,
+            &[ToolCall {
+                id: None,
+                name: "get_weather".to_owned(),
+                arguments: serde_json::json!({"city": "Lyon"}),
+                arguments_as_text: false,
+            }],
+            1,
+        )
+        .await;
+
+        assert!(invocations[0].error.is_some());
+        assert!(invocations[0].result.contains("error"));
+    }
+}

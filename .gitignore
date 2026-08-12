@@ -1,0 +1,8 @@
+/target
+**/*.rs.bk
+
+# UI build artefacts (embedded into the binary at build time)
+/ui/node_modules
+/ui/dist
+
+.DS_Store

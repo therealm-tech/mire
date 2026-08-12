@@ -1,0 +1,17 @@
+# Findings that are decisions rather than oversights.
+#
+# One entry only, and it stays that way: anything here is a check somebody turned
+# off, so each needs a reason that survives being read a year later.
+---
+misconfigurations:
+  - id: AVD-DS-0026
+    paths:
+      - Dockerfile
+    statement: >-
+      No HEALTHCHECK, deliberately. The runtime image is distroless/static: it
+      holds the binary, a certificate bundle and nothing else — no shell and no
+      HTTP client to run a probe with. The alternatives are to put a shell back,
+      which undoes the point of the base image, or to probe with
+      `mire --version`, which proves the binary starts and says nothing about
+      whether the server answers. The API already exposes `/healthz`; point the
+      orchestrator at it, since it has a client already.

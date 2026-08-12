@@ -1,0 +1,8 @@
+# Saves an `export` when running anything through cargo.
+#
+# Not a secret: `mire-dev-secret` is the development constant declared in
+# dev/keycloak/realm-mire.json and quoted in the README, for the Keycloak that
+# docker-compose.yaml starts on localhost. It buys access to nothing else.
+# A real credential belongs in your shell, or in a file `auth.yaml` points at.
+[env]
+OIDC_CLIENT_SECRET = "mire-dev-secret"

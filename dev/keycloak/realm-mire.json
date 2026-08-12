@@ -1,0 +1,68 @@
+{
+  "realm": "mire",
+  "enabled": true,
+  "displayName": "mire (development)",
+  "accessTokenLifespan": 300,
+  "sslRequired": "none",
+  "clients": [
+    {
+      "clientId": "mire-workload",
+      "name": "mire workload identity",
+      "description": "Confidential client with service accounts enabled, so client_credentials works. Development only: the secret is a constant.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "mire-dev-secret",
+      "attributes": {
+        "access.token.lifespan": "300"
+      }
+    },
+    {
+      "clientId": "mire-ui",
+      "name": "mire browser login",
+      "description": "Public client for the authorization code + PKCE flow. No secret: mire runs from a directory of YAML files and has none to keep, which is what PKCE is for.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "bearerOnly": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://127.0.0.1:8787/*",
+        "http://localhost:8787/*"
+      ],
+      "webOrigins": [
+        "+"
+      ],
+      "attributes": {
+        "access.token.lifespan": "300",
+        "pkce.code.challenge.method": "S256"
+      }
+    }
+  ],
+  "users": [
+    {
+      "username": "mire",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Mire",
+      "lastName": "Development",
+      "email": "mire@mire.invalid",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "mire",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}

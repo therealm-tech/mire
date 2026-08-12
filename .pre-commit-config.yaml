@@ -1,0 +1,90 @@
+---
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+        # A lockfile is legitimately large and legitimately versioned.
+        exclude: ^ui/package-lock\.json$
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all -- --check
+        language: system
+        types:
+          - rust
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --all-targets -- -D warnings
+        language: system
+        types:
+          - rust
+        pass_filenames: false
+
+      - id: cargo-test
+        name: cargo test
+        entry: cargo test
+        language: system
+        types:
+          - rust
+        pass_filenames: false
+
+      - id: hadolint
+        name: hadolint
+        entry: hadolint
+        language: system
+        files: ^Dockerfile$
+
+      # Catches the container-security misconfigurations hadolint does not: root
+      # user, writable filesystem, secrets in build args.
+      #
+      # Every severity. What is waived is waived in `.trivyignore.yaml`, in one
+      # place, with the reasoning attached — `--ignorefile` is explicit because
+      # trivy does not pick the file up on its own.
+      - id: trivy-config
+        name: trivy config
+        entry: trivy config --exit-code 1 --ignorefile .trivyignore.yaml
+        language: system
+        files: ^Dockerfile$
+
+      - id: actionlint
+        name: actionlint
+        entry: actionlint
+        language: system
+        files: ^\.github/workflows/.*\.ya?ml$
+
+      # Run from `ui/`, like the two hooks below, because that is where the
+      # Biome configuration lives. Invoked from the repository root instead,
+      # Biome 2 sees `ui/biome.json` as a nested root project and refuses to
+      # start — the front end is a subproject of a Rust repository, not a
+      # workspace member.
+      - id: biome
+        name: biome check
+        entry: npm --prefix ui run lint
+        language: system
+        files: ^ui/.*\.(ts|tsx|json)$
+        pass_filenames: false
+
+      # A blocking gate, on the same footing as the linter.
+      - id: ui-typecheck
+        name: tsc --noEmit
+        entry: npm --prefix ui run typecheck
+        language: system
+        files: ^ui/.*\.(ts|tsx|json)$
+        pass_filenames: false
+
+      - id: ui-test
+        name: vitest
+        entry: npm --prefix ui test
+        language: system
+        files: ^ui/.*\.(ts|tsx)$
+        pass_filenames: false

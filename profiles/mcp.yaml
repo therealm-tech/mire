@@ -1,0 +1,170 @@
+# MCP servers, referenced by name from a profile's `mcp:` list.
+#
+# This is the one place in `mire` where a run has effects outside the process:
+# a tool the model calls here is really executed, on a real server. It is opt-in
+# per profile and never implied.
+#
+# `mire` speaks revision 2026-07-28 of the Streamable HTTP transport — no
+# `initialize` handshake, no session header, one POST per request. Everything
+# goes through the same HTTP client as the model endpoints, so `--ca-bundle` and
+# the auth registry apply here exactly as they do there.
+---
+servers:
+  # The server in docker-compose.yaml. Three tools, each showing one thing:
+  #
+  #   get_weather  the ordinary case — and it carries an `x-mcp-header`
+  #                annotation, so watch `Units` appear as `Mcp-Param-Units`
+  #   slow_echo    answers as an SSE stream, progress first
+  #   explode      always answers `isError: true`, which is a *result* the model
+  #                is meant to react to rather than a failure of the run
+  # `tools:` restricts what the model may reach. Leaving it out — the default —
+  # offers whatever the server advertises, which is what you want when you point
+  # `mire` at a server you meant to point it at.
+  #
+  # It is narrowed here for a reason worth knowing: qwen3:0.6b calls a tool
+  # reliably when it is offered one, and starts answering from memory when it is
+  # offered three. That is a fact about a 523 MB model, not about MCP — delete
+  # the two lines below and watch it happen. `/api/mcp/dev/tools` always lists
+  # everything the server advertises, restriction or not.
+  - name: dev
+    url: http://127.0.0.1:11436/mcp
+    timeout_ms: 15000
+    tools:
+      - get_weather
+
+  # Name them when you are pointing at something that can delete things and you
+  # only meant to read.
+
+  # ---------------------------------------------------------------------------
+  # Every auth workflow, commented out. Delete what you do not need.
+  #
+  # Two placements, and they are orthogonal to the kind of credential:
+  #
+  #   auth: <provider>           the provider decides where its credential goes,
+  #                              and a 401 refreshes it and replays once
+  #   {{ auth["<provider>"] }}   you decide, in any header, anywhere in the value
+  #
+  # Every kind below works with either. Prefer `auth:` — it is one word and the
+  # replay is free. Reach for the template when the *placement* is the problem,
+  # not the credential.
+  #
+  # The provider names are the ones in auth.yaml. Everything here is a name
+  # pointing at that file; no credential is ever written in this one.
+  # ---------------------------------------------------------------------------
+
+  # --- 1. Nothing at all -----------------------------------------------------
+  #
+  # Not an omission — a test. The question is "is this server actually
+  # protected?", and the answer you want is a 401. Servers are anonymous by
+  # default, so naming it is how you say you meant it.
+  #
+  # - name: files-anonymous
+  #   url: https://mcp.internal/mcp
+  #   auth: anonymous
+
+  # --- 2. A static token from the environment --------------------------------
+  #
+  # The quickest thing that gets you past a door. `static-token` reads
+  # MODEL_TOKEN; the value never appears in this file, in a log, or in any API
+  # response.
+  #
+  # - name: files-token
+  #   url: https://mcp.internal/mcp
+  #   auth: static-token
+
+  # --- 3. A projected service account token ----------------------------------
+  #
+  # What a pod actually holds. Declare `workload-token` in auth.yaml (it is
+  # already there, commented) pointing at
+  # /var/run/secrets/kubernetes.io/serviceaccount/token: the file is re-read on
+  # every call, so rotation is a non-event and nothing has to restart.
+  #
+  # - name: files-sa
+  #   url: https://mcp.internal/mcp
+  #   auth: workload-token
+
+  # --- 4. A workload identity ------------------------------------------------
+  #
+  # A real client_credentials exchange: `mire` discovers the token endpoint,
+  # fetches an access token, caches it and renews it before it expires. This
+  # answers "what does the pod get?".
+  #
+  # - name: files-workload
+  #   url: https://mcp.internal/mcp
+  #   auth: keycloak-workload
+
+  # --- 5. You, through your browser ------------------------------------------
+  #
+  # The other half of that question: "what do *I* get?". Sign in from the auth
+  # panel first — until there is a session, a call to this server answers
+  # `409 not_signed_in` and **nothing is sent**, rather than going out
+  # half-authenticated and coming back with a confusing 401.
+  #
+  # - name: files-as-me
+  #   url: https://mcp.internal/mcp
+  #   auth: keycloak-user
+
+  # --- 6. The same credentials, placed by hand -------------------------------
+  #
+  # For the server that wants the token somewhere `auth:` would never put it.
+  # `auth` is the registry itself, keyed by provider name, each entry the bare
+  # token that provider would produce — so everything above is available here,
+  # including inside a larger value.
+  #
+  # Write the bracket form: `auth.keycloak-workload` parses as a subtraction.
+  #
+  # - name: files-api-key
+  #   url: https://mcp.internal/mcp
+  #   headers:
+  #     x-api-key: '{{ auth["keycloak-workload"] }}'
+  #
+  # - name: files-custom-scheme
+  #   url: https://mcp.internal/mcp
+  #   headers:
+  #     authorization: 'Custom tenant=acme token={{ auth["keycloak-user"] }}'
+
+  # --- 7. No registry at all -------------------------------------------------
+  #
+  # A value straight from the process environment, for a key that is not really
+  # an identity. `env` is read fresh on every request, like everything else here.
+  #
+  # An undefined variable is an **error**, not an empty header: `Authorization:
+  # Bearer ` is the kind of thing that looks fine locally and fails somewhere
+  # unhelpful. Use `| default(...)` where a header really is optional.
+  #
+  # - name: files-key
+  #   url: https://mcp.internal/mcp
+  #   headers:
+  #     x-api-key: "{{ env.FILES_API_KEY }}"
+  #     x-tenant: "{{ env.TENANT | default('dev') }}"
+
+  # --- 8. Both at once -------------------------------------------------------
+  #
+  # Templated headers are applied first and the `auth:` provider last, so on a
+  # name collision the named provider wins — it is the more specific statement,
+  # and it should not be silently overwritten by a hand-written header.
+  #
+  # Only the providers actually named get resolved. Asking for a token costs an
+  # exchange and can fail, and neither belongs to a server that never asked.
+  #
+  # - name: files
+  #   url: https://mcp.internal/mcp
+  #   auth: keycloak-workload
+  #   headers:
+  #     x-tenant: "{{ env.TENANT | default('dev') }}"
+  #   tools:
+  #     - read_file
+  #     - list_directory
+
+  # --- The move this is all for ----------------------------------------------
+  #
+  # Declare the same URL several times under different names and point a profile
+  # at each in turn. Anonymous should fail, the workload identity should pass,
+  # and you should be able to say which one your service actually uses.
+  #
+  # - name: files-anonymous
+  #   url: https://mcp.internal/mcp
+  #   auth: anonymous
+  # - name: files-workload
+  #   url: https://mcp.internal/mcp
+  #   auth: keycloak-workload

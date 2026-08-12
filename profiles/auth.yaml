@@ -1,0 +1,94 @@
+# Auth providers, referenced by name from a profile's `auth:` field.
+#
+# This file never contains a credential — only where to find one. It is safe to
+# commit. `anonymous` always exists, whether or not it is declared here, so the
+# two providers below are the whole matrix against the local stack: point any
+# guarded profile at each of them in turn.
+#
+# The shapes you would actually deploy with are at the bottom, commented out —
+# a live entry that cannot resolve is just a broken choice in the UI.
+---
+providers:
+  # Any non-empty credential gets past the gateway, which only checks presence.
+  # Real endpoints will not be so forgiving — that is the point of also having
+  # the OIDC provider below.
+  #
+  #   export MODEL_TOKEN=anything
+  - name: static-token
+    kind: token
+    value:
+      env: MODEL_TOKEN
+    allowed_hosts:
+      - 127.0.0.1
+
+  # A real client_credentials exchange against the Keycloak in the compose
+  # stack. `mire` discovers the token endpoint, fetches an access token, caches
+  # it, and renews it 60s before it expires.
+  #
+  #   export OIDC_CLIENT_SECRET=mire-dev-secret
+  #
+  # The secret is a development constant declared in
+  # dev/keycloak/realm-mire.json; it still does not go in this file.
+  - name: keycloak-workload
+    kind: oidc
+    issuer: http://127.0.0.1:8080/realms/mire
+    client_id: mire-workload
+    client_secret:
+      env: OIDC_CLIENT_SECRET
+    scope:
+      - openid
+
+  # The other half of the question. `keycloak-workload` answers "what does the
+  # pod get?"; this answers "what do I get?" — a browser opens, you sign in as
+  # mire / mire, and the access token is yours rather than a service account's.
+  #
+  # No secret: this is a public client, and PKCE is what makes that safe.
+  #
+  # The callback is worked out from the URL your browser is on, so this works
+  # unchanged behind a notebook proxy. Keycloak has `http://127.0.0.1:8787/*`
+  # registered; if you run `mire` on another port or host, add it to the
+  # `mire-ui` client in dev/keycloak/realm-mire.json — a redirect URI the
+  # identity provider does not know about is refused, by design.
+  - name: keycloak-user
+    kind: oidc_browser
+    issuer: http://127.0.0.1:8080/realms/mire
+    client_id: mire-ui
+    scope:
+      - openid
+      - profile
+
+  # ---------------------------------------------------------------------------
+  # For a real cluster. Uncomment, adjust, delete the rest.
+  # ---------------------------------------------------------------------------
+
+  # A projected service account token, re-read from disk on every call so
+  # rotation is picked up without restarting.
+  #
+  # - name: workload-token
+  #   kind: token
+  #   value:
+  #     file: /var/run/secrets/kubernetes.io/serviceaccount/token
+
+  # No source declared: the UI prompts for the value, and it is never stored.
+  # `allowed_hosts` is optional and off by default; it is here to show how to
+  # pin a credential to one host.
+  #
+  # - name: pasted
+  #   kind: token
+  #   allowed_hosts:
+  #     - models.internal
+
+  # The one that reproduces what a pod actually does: the projected service
+  # account token is presented as an RFC 7523 client assertion, and re-read from
+  # disk on every exchange so rotation is a non-event.
+  #
+  # Add `token_endpoint:` to skip discovery when an IdP's well-known document is
+  # wrong or unreachable.
+  #
+  # - name: oidc-workload
+  #   kind: oidc
+  #   issuer: https://idp.internal/realms/models
+  #   client_id: mire
+  #   client_assertion:
+  #     file: /var/run/secrets/kubernetes.io/serviceaccount/token
+  #   audience: https://models.internal

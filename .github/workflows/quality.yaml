@@ -1,0 +1,134 @@
+name: quality
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+# One quality run per ref: a new push supersedes the one still in flight.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # `pre-commit` is the whole gate, not a subset of it: the hooks already run
+  # `cargo fmt`, `cargo clippy`, `cargo test`, `tsc --noEmit`, `vitest`,
+  # `hadolint`, `trivy config` and `actionlint`. Running any of those again as a
+  # separate job would double the bill to test the same thing twice — and would
+  # let CI and a local `pre-commit run` drift apart, which is the failure this
+  # arrangement exists to prevent.
+  pre-commit:
+    name: pre-commit
+    runs-on: ubuntu-24.04
+    steps:
+      - name: check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: install the Rust toolchain
+        run: rustup component add rustfmt clippy
+
+      - name: cache cargo build artifacts
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+
+      - name: set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      # The UI hooks (`tsc --noEmit`, `vitest`) run against the checkout, not a
+      # container, so the dependencies have to be there before pre-commit starts.
+      - name: install the UI dependencies
+        run: npm --prefix ui ci
+
+      - name: set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+
+      # The three tools the `language: system` hooks expect on PATH. Pinned to
+      # the versions the repository was last verified against: a linter that
+      # upgrades itself turns CI red on code nobody touched, and a bump should be
+      # a diff somebody chose to make.
+      - name: install hadolint
+        env:
+          HADOLINT_VERSION: "2.14.0"
+        run: |
+          sudo curl -fsSL -o /usr/local/bin/hadolint \
+            "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-Linux-x86_64"
+          sudo chmod +x /usr/local/bin/hadolint
+
+      - name: install trivy
+        env:
+          TRIVY_VERSION: "0.70.0"
+        run: |
+          curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin trivy
+
+      - name: install actionlint
+        env:
+          ACTIONLINT_VERSION: "1.7.12"
+        run: |
+          curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin actionlint
+
+      - name: install pre-commit
+        run: pipx install pre-commit
+
+      - name: run pre-commit
+        run: pre-commit run --all-files --show-diff-on-failure
+
+  trivy:
+    name: trivy
+    permissions:
+      contents: read
+      # Publishing the SARIF report to the Security tab.
+      security-events: write
+    runs-on: ubuntu-24.04
+    steps:
+      - name: check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # Two passes on purpose. The Security tab gets everything actionable at
+      # every severity; the build gate below only trips on HIGH/CRITICAL. One
+      # pass cannot do both: `limit-severities-for-sarif` defaults to false, so
+      # a SARIF run ignores `severity` and would fail the build on a LOW.
+      - name: scan the repository
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # 0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          # Advisories without a released fix are noise nobody can action;
+          # they would bury the dashboard under the base image's backlog.
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          format: sarif
+          output: trivy-fs.sarif
+          exit-code: "0"
+
+      - name: publish the findings
+        # Only a fork or Dependabot pull request lacks the token to upload, and
+        # both arrive as `pull_request`. Reporting happens from push events.
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: github/codeql-action/upload-sarif@d1ba80a13dd99fba24a470575428917156a28b43  # v4.37.5
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+
+      - name: fail on high and critical findings
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # 0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          format: table
+          exit-code: "1"

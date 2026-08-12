@@ -1,0 +1,32 @@
+# Ollama's native embedding endpoint.
+#
+# The vectors arrive under `$.embeddings` as a list of lists, not under
+# `$.data[*].embedding` — so the OpenAI path is kept first in the cascade
+# precisely to watch it miss and the second one win. Point this same profile at
+# `/v1/embeddings` instead and the first path takes over, unchanged.
+#
+# nomic-embed-text:v1.5 returns 768 dimensions, and `expect.dimensions` is what
+# turns that into a check rather than a number you have to eyeball.
+---
+name: nomic-embed
+kind: embedding
+url: http://127.0.0.1:11434/api/embed
+timeout_ms: 60000
+
+request:
+  template: |
+    {
+      "model": "nomic-embed-text:v1.5",
+      "input": {{ input | tojson }}
+    }
+
+decode:
+  vectors:
+    - $.data[*].embedding
+    - $.embeddings
+  usage:
+    - $.usage
+    - $
+
+expect:
+  dimensions: 768

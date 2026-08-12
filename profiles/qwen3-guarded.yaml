@@ -1,0 +1,36 @@
+# The same model, behind the gateway that requires a credential.
+#
+# This is the profile to replay across all three auth modes — the central move
+# of this tool, and two clicks in the UI:
+#
+#   anonymous          -> 401, and that is a pass: the route is protected
+#   static-token       -> 200
+#   keycloak-workload  -> 200, with a token really fetched from Keycloak
+#
+# One profile, three answers, nothing duplicated.
+---
+name: qwen3-guarded
+kind: chat
+url: http://127.0.0.1:11435/v1/chat/completions
+auth: keycloak-workload
+timeout_ms: 120000
+
+request:
+  template: |
+    {
+      "model": "qwen3:0.6b-q4_K_M",
+      "messages": {{ messages | tojson }},
+      "reasoning_effort": "none",
+      "max_tokens": {{ params.max_tokens | default(256) }}
+    }
+
+decode:
+  content:
+    - $.choices[0].message.content
+    - $.message.content
+  finish_reason:
+    - $.choices[0].finish_reason
+    - $.done_reason
+  usage:
+    - $.usage
+    - $

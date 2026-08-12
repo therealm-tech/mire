@@ -1,0 +1,36 @@
+# Everything the image build has no business reading.
+#
+# `target/` alone is several gigabytes: without this file it is uploaded to the
+# daemon on every build, and `cargo chef`'s whole point — a dependency layer that
+# survives a source change — is lost to a context that changes every time.
+
+# Build artefacts. The image builds its own.
+/target
+/ui/node_modules
+/ui/dist
+
+# Version control and tooling.
+/.git
+/.github
+/.pre-commit-config.yaml
+
+# Local configuration that may hold credentials. `.cargo/config.toml` is the one
+# that matters: it is a plain file with environment variables in it.
+/.cargo
+
+# The development stack: a model runtime, an identity provider and an MCP server
+# for a laptop. None of it belongs in a release image.
+/dev
+/docker-compose.yaml
+
+# Profiles are mounted at runtime, not baked in — see the Dockerfile.
+/profiles
+
+# Docs and editor leftovers. The licence travels with the release tarball, which
+# CI takes from the checkout — the image has no use for it.
+/README.md
+/LICENSE
+/Dockerfile
+/.dockerignore
+**/.DS_Store
+**/*.rs.bk

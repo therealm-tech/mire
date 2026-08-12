@@ -1,0 +1,62 @@
+# How GitHub writes the release notes.
+#
+# Read by the "Generate release notes" button and by `gh release create
+# --generate-notes`, which is what `.github/workflows/release.yaml` calls. It
+# sorts **merged pull requests** into sections; commits pushed straight to `main`
+# never appear, whatever this file says.
+#
+# The name has to be `release.yml`. GitHub documents that spelling and only that
+# one, so this is the one YAML file in the repository that does not get the
+# `.yaml` extension.
+#
+# Categories are matched **in order** and a pull request lands in the first one
+# that fits. That is why `security` sits above `bug`: a security fix is a
+# security note first and a bug fix second.
+---
+changelog:
+  exclude:
+    labels:
+      # For the pull request that is genuinely not news: a typo in a comment, a
+      # CI tweak nobody downstream can observe. Reach for it rarely — "boring"
+      # and "not worth telling anyone" are different things.
+      - ignore-for-release
+
+  categories:
+    - title: Security
+      labels:
+        - security
+
+    - title: Features
+      labels:
+        - feature
+        - enhancement
+
+    - title: Fixes
+      labels:
+        - bug
+        - fix
+
+    # Worth its own section in a tool whose whole surface is a YAML file: a
+    # profile key that changed name is a release note, not an implementation
+    # detail.
+    - title: Configuration and profiles
+      labels:
+        - profiles
+        - config
+
+    - title: Documentation
+      labels:
+        - documentation
+
+    # Not excluded, and deliberately so. This tool exists to be pointed at
+    # production endpoints with real credentials; a bumped dependency is
+    # something a reader may want to see, not noise to hide.
+    - title: Dependencies
+      labels:
+        - dependencies
+
+    # Everything unlabelled. Without a catch-all the notes quietly omit whatever
+    # nobody thought to label, which is the worst failure mode a changelog has.
+    - title: Other changes
+      labels:
+        - "*"
