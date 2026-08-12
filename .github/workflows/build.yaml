@@ -93,14 +93,16 @@ jobs:
         id: name
         env:
           VERSION: ${{ inputs.version }}
+          MACHINE: ${{ matrix.machine }}
         # A release names them after the tag; anything else after the commit, so
         # a `workflow_dispatch` artefact is still traceable to what built it.
+        # This is also the name of the tarball the release job packs.
         run: |
           version="$VERSION"
           if [ -z "$version" ]; then
             version="$(git rev-parse --short HEAD)"
           fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "name=mire-${version}-linux-${MACHINE}" >> "$GITHUB_OUTPUT"
 
       - name: log in to GHCR
         if: ${{ inputs.push }}
@@ -128,10 +130,12 @@ jobs:
       # The released binary is the one out of the released image, not a second
       # build that happens to use the same source. It is statically linked
       # against musl, so it runs on whatever the notebook is running.
+      # Loose files, not a tarball: `upload-artifact` zips whatever it is given,
+      # so packing here would ship a zip wrapped around a tarball. The release
+      # job packs the `.tar.gz` from these, and publishes it unwrapped.
       - name: take the binary out of the image
         env:
           REF: ${{ env.IMAGE }}:ci-${{ matrix.arch }}
-          NAME: mire-${{ steps.name.outputs.version }}-linux-${{ matrix.machine }}
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -141,13 +145,11 @@ jobs:
           docker rm "$container" > /dev/null
           file dist/mire
           cp LICENSE dist/LICENSE
-          ( cd dist && tar -czf "${NAME}.tar.gz" mire LICENSE && rm mire LICENSE )
-          ( cd dist && sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256" )
 
       - name: upload the binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: mire-${{ matrix.arch }}
+          name: ${{ steps.name.outputs.name }}
           path: dist/*
           retention-days: 1
           if-no-files-found: error

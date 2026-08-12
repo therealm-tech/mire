@@ -851,7 +851,8 @@ which release it is. What comes out:
 * `ghcr.io/therealm-tech/mire:X.Y.Z` and `:latest`, a multi-arch manifest over
   `linux/amd64` and `linux/arm64`, each built on its own native runner. No QEMU.
 * `mire-X.Y.Z-linux-x86_64.tar.gz` and `mire-X.Y.Z-linux-aarch64.tar.gz` on the
-  GitHub Release, each with a `.sha256`.
+  GitHub Release — the binary and `LICENSE`, nothing else — each with its
+  `.sha256` published next to it rather than packed inside.
 
 The binaries are **taken out of the images**, not built a second time from the
 same source: what you download is what was scanned and published. They are
