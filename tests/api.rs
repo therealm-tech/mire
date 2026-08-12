@@ -1636,7 +1636,7 @@ async fn an_explicit_token_endpoint_skips_discovery() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn the_ui_is_served_at_the_root_with_a_matching_base_href() {
+async fn without_a_base_path_the_ui_is_served_with_no_base_tag_at_all() {
     let harness = Harness::start(&[]).await;
 
     let response = harness.raw("/").await;
@@ -1645,8 +1645,12 @@ async fn the_ui_is_served_at_the_root_with_a_matching_base_href() {
         response.headers()["content-type"],
         "text/html; charset=utf-8"
     );
+    // No tag on purpose. `<base href="/">` would be right here and wrong behind
+    // a proxy that strips its prefix before forwarding — and the same binary has
+    // to serve both. Left alone, the bundle's relative URLs resolve against the
+    // document's own URL, which is correct in both places.
     let html = response.text().await.unwrap();
-    assert!(html.contains(r#"<base href="/">"#), "{html}");
+    assert!(!html.contains("<base "), "{html}");
 }
 
 #[tokio::test]
@@ -1656,7 +1660,28 @@ async fn an_unknown_path_falls_back_to_the_ui_rather_than_404() {
     // A client-side route the server has never heard of.
     let response = harness.raw("/some/deep/client/route").await;
     assert_eq!(response.status(), 200);
-    assert!(response.text().await.unwrap().contains("<base href="));
+    assert_eq!(
+        response.headers()["content-type"],
+        "text/html; charset=utf-8"
+    );
+}
+
+#[tokio::test]
+async fn a_missing_asset_404s_instead_of_being_dressed_up_as_the_ui() {
+    let harness = Harness::start(&[]).await;
+
+    // What a document and a bundle that disagree ask for. Answering the SPA
+    // fallback would make this a `200 text/html`, which reaches the developer as
+    // "expected a JavaScript module, got text/html" and names nothing useful.
+    let response = harness.raw("/assets/index-DoesNotExist.js").await;
+    assert_eq!(response.status(), 404);
+    assert_ne!(
+        response.headers()["content-type"],
+        "text/html; charset=utf-8"
+    );
+
+    // The directory itself is not an asset, so it stays a client-side route.
+    assert_eq!(harness.raw("/assets").await.status(), 200);
 }
 
 #[tokio::test]

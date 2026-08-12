@@ -36,7 +36,7 @@ also an environment variable:
 | `--profiles` | `PROFILES_DIR` | `./profiles` | Directory of profile YAML files |
 | `--host` | `HOST` | `127.0.0.1` | Listen address; widening it is deliberate |
 | `--port` | `PORT` | `8787` | Listen port |
-| `--base-path` | `BASE_PATH` | *(none)* | Path prefix, for a proxied notebook |
+| `--base-path` | `BASE_PATH` | *(none)* | Path prefix, when a proxy forwards one — see [below](#from-a-notebook-behind-a-path-proxy) |
 | `--public-url` | `PUBLIC_URL` | *(none)* | Origin the browser sees, for the OIDC callback |
 | `--ca-bundle` | `CA_BUNDLE` | *(none)* | PEM bundle of extra trusted CAs |
 | `--log-filter` | `LOG_FILTER` | `info` | `tracing` filter, e.g. `mire=debug` |
@@ -80,19 +80,47 @@ instead — that is the same check, run by something that already has a client.
 ### From a notebook behind a path proxy
 
 Notebook proxies serve you at something like
-`/notebook/<namespace>/<name>/proxy/8787/`. Tell `mire` about it and every route
-— API, docs, and later the UI — moves under that prefix:
+`/notebook/<namespace>/<name>/proxy/8787/`, and they come in two kinds. **Which
+one you have decides whether you want `--base-path`, and getting it wrong is the
+one configuration mistake that produces a genuinely cryptic error** — so find out
+first:
+
+```sh
+mire --profiles ./profiles --log-filter 'mire=debug,tower_http=debug'
+```
+
+Load the page through the proxy and read the `uri=` field of the request log.
+
+**If the prefix is forwarded** (`uri=/notebook/my-namespace/my-notebook/proxy/8787/`),
+tell `mire` about it and every route moves under it:
 
 ```sh
 mire --profiles ./profiles --base-path /notebook/my-namespace/my-notebook/proxy/8787
 ```
 
-Everything moves together — API, `/docs`, `/healthz` and the UI. The bundle
-itself never learns the prefix: it is built with relative asset URLs, and the
-server injects a matching `<base href>` into `index.html` on the way out, so the
-UI's own `fetch` calls resolve under the prefix too. Both `…/8787` and `…/8787/`
-serve the page, because proxies disagree about the trailing slash. Hitting the
-root without the prefix redirects you to it rather than 404-ing.
+Everything moves together — API, `/docs`, `/healthz` and the UI. The server
+injects a matching `<base href>` into `index.html`, so the bundle's relative
+asset URLs and the UI's own `fetch` calls resolve under the prefix. Both
+`…/8787` and `…/8787/` serve the page, because proxies disagree about the
+trailing slash. Hitting the root without the prefix redirects you to it rather
+than 404-ing.
+
+**If the prefix is stripped** (`uri=/` — Kubeflow's notebook proxy does this),
+`mire` really is mounted at the root: use **no** `--base-path` at all. Setting
+one then hides every route behind a prefix the proxy has already removed, and
+you get a redirect to a URL the proxy strips again. With no prefix configured,
+no `<base href>` is injected either, and that is what makes it work: the
+bundle's URLs are relative, so they resolve against the document's own URL —
+the prefixed one your browser is on — and come back through the proxy. This
+needs the page URL to end in a slash (`…/proxy/8787/`, not `…/proxy/8787`);
+such proxies redirect to add it, but if yours does not, use the slash.
+
+The symptom of getting this backwards is
+`Failed to load module script: … MIME type of "text/html"`. It means the browser
+resolved `assets/index-<hash>.js` to somewhere that is not `mire` — usually the
+cluster root, where the ingress answers with its own HTML page. The `uri=` log
+tells you in one line: no request for the asset at all means it never reached
+`mire`.
 
 If the proxy needs to reach `mire` on something other than loopback, widen the
 listen address explicitly with `--host 0.0.0.0`. That is a choice, not a default.
