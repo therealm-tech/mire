@@ -1,6 +1,6 @@
 [package]
 name = "mire"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.85"
 description = "Test-pattern generator for model endpoints: a known signal in, a look at what comes out"
