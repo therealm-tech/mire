@@ -79,7 +79,7 @@ function Verdict({ stop }: { stop: StopOutcome }) {
 /** One turn, closed by default: a timeline you can read before you dig. */
 function TurnCard({ turn }: { turn: Turn }) {
   const [open, setOpen] = useState(false)
-  const decoded = turn.call.response?.decoded
+  const decoded = turn.call.response.decoded
   const content = decoded?.kind === 'completion' ? decoded.content : null
   const failedSchema = turn.tools.some((tool) => tool.schemaErrors.length > 0)
   const failedTool = turn.tools.some((tool) => tool.error)
@@ -95,11 +95,11 @@ function TurnCard({ turn }: { turn: Turn }) {
         <span className="font-medium text-sm">
           {open ? '▾' : '▸'} Turn {turn.index}
         </span>
-        <Badge tone={turn.call.response && turn.call.response.http.status < 300 ? 'good' : 'bad'}>
-          {turn.call.response?.http.status ?? '—'}
+        <Badge tone={turn.call.response.http.status < 300 ? 'good' : 'bad'}>
+          {turn.call.response.http.status}
         </Badge>
         <span className="text-stone-500 text-xs dark:text-stone-400">
-          {turn.call.response?.http.latencyMs ?? 0} ms
+          {turn.call.response.http.latencyMs} ms
         </span>
         {turn.tools.length > 0 ? (
           <Badge tone={failedTool ? 'bad' : failedSchema ? 'warn' : 'neutral'}>

@@ -201,8 +201,7 @@ pub struct Trace {
 /// What one agent run needs.
 #[derive(Debug, Default)]
 pub struct AgentInput {
-    /// The single-turn input. `dry_run` is ignored: a loop that sends nothing has
-    /// nothing to loop on.
+    /// The single-turn input.
     pub call: CallInput,
     /// Turn budget, overriding the profile's.
     pub max_iterations: Option<u32>,
@@ -276,7 +275,6 @@ pub async fn run(
         let outcome = runner
             .call(CallInput {
                 messages: messages.clone(),
-                dry_run: false,
                 ..clone_input(&input.call)
             })
             .await?;
@@ -549,7 +547,7 @@ fn without_transport_keywords(schema: &Value) -> Value {
 /// something this profile cannot read, and the loop should stop on it rather
 /// than pretend.
 fn completion_of(outcome: &CallOutcome) -> crate::decode::Completion {
-    match outcome.response.as_ref().and_then(|r| r.decoded.as_ref()) {
+    match outcome.response.decoded.as_ref() {
         Some(Decoded::Completion(completion)) => completion.clone(),
         _ => crate::decode::Completion::default(),
     }
@@ -588,7 +586,6 @@ fn clone_input(input: &CallInput) -> CallInput {
         params: input.params.clone(),
         model: input.model.clone(),
         token: input.token.clone(),
-        dry_run: false,
         include_vectors: false,
         repeat: 1,
         tolerance: input.tolerance,

@@ -137,9 +137,12 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   carries a dot for its session state, and a **Sign in** button that says who you
   are once you are back.
 - **Request.** A prompt for a chat profile, one text per line for an embedding
-  one. **Dry run** renders without sending; **Send** goes out. `Ctrl`/`Cmd`+
-  `Enter` sends too — a bare `Enter` still means a newline, because the box is
-  where a multi-line system prompt gets pasted.
+  one. **Send** goes out; for a chat profile it is always the
+  [loop](#agent-mode), because a profile with no tools stops on turn one and
+  that is the same one turn a single call would have made. **Stream** is the
+  exception: one turn, read chunk by chunk. `Ctrl`/`Cmd`+`Enter` sends too — a
+  bare `Enter` still means a newline, because the box is where a multi-line
+  system prompt gets pasted.
 - **Conversation**, for chat profiles — see [below](#having-a-conversation).
 - **Rendered request**, with a *Copy as curl* button and credentials masked.
 - **Response.** The decoded content, tool calls, finish reason and usage, then
@@ -173,20 +176,18 @@ and editing it is the point — dropping the model's last answer and asking agai
 is how you find out whether it only said that because it had already said it.
 **New conversation** clears the lot.
 
-Three things follow from where the history lives, each of which is a decision:
+Two things follow from where the history lives, each of which is a decision:
 
-- **A dry run changes nothing.** It renders the next turn with the history
-  attached so you can read what would go out, and records neither the question
-  nor an answer. Nothing was sent, so nothing happened.
 - **An empty box resends the conversation unchanged.** After removing a turn,
   that is how you replay it. It is also how you ask the same history of a
   different profile or a different credential — switch, send, compare.
-- **Chat mode does not answer tool calls.** If the model asks for one, the turn
-  is recorded as it came, tool call included, and the panel says so: most
-  endpoints refuse the next turn until that call has a result. Providing it is
-  what [agent mode](#agent-mode) is. Agent mode reads the same conversation and
-  appends the answer it finished on, so the two modes share one history rather
-  than each keeping their own.
+- **Only the answer the run finished on rejoins the history.** The tool calls in
+  between and their results stay in the trace: they are what the run was about,
+  and replaying them into the next request without their results is how you get a
+  `400` from an endpoint that was working fine. A tool call that *does* land in
+  the history — from a **Stream**, which does not loop, or from a run that
+  stopped on one — is flagged in the panel, because most endpoints refuse the
+  next turn until it has a result.
 
 ## A stack to point it at
 
@@ -424,15 +425,15 @@ run until its own config is perfect.
 The token values themselves are read on **every** call, not cached: a rotated
 service account token file is picked up on the next request.
 
-### Check what you are about to send
+### See exactly what was sent
 
-`dryRun` renders the request and hands it back with its `curl` equivalent,
-without sending anything. This is the thing you paste into a ticket:
+Every call hands back the request it made, with its `curl` equivalent. This is
+the thing you paste into a ticket:
 
 ```sh
 curl -s localhost:8787/api/call \
   -H 'content-type: application/json' \
-  -d '{"profile": "qwen3-chat", "prompt": "ping", "dryRun": true}' | jq -r .curl
+  -d '{"profile": "qwen3-chat", "prompt": "ping"}' | jq -r .curl
 ```
 
 Credentials are masked in the `curl` export, in the request view, and in every
@@ -854,11 +855,16 @@ Agent mode is not a third payload format and not a second profile. It is the sam
 is not met, answer the tool calls with their simulated results, feed them back,
 go round again. `POST /api/call` runs one turn of exactly the same thing.
 
-It starts from the same [conversation](#having-a-conversation) chat mode built,
-and when it stops it appends the answer it finished on. The turns in between —
-the tool calls and their results — stay in the trace: they are what the run was
-about, and replaying them into the next request without their results is how you
-get a `400` from an endpoint that was working fine.
+Which is why the UI has no separate chat mode: **Send** is the loop, always. A
+profile that declares no tool stops on turn one, and turn one is the single call
+a chat mode would have made — one button, one shape of answer, one less thing to
+choose before you have any evidence.
+
+It runs on the [conversation](#having-a-conversation) in the browser, and when it
+stops it appends the answer it finished on. The turns in between — the tool calls
+and their results — stay in the trace: they are what the run was about, and
+replaying them into the next request without their results is how you get a `400`
+from an endpoint that was working fine.
 
 ```yaml
 agent:

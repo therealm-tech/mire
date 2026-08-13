@@ -22,14 +22,6 @@ export function ResponsePanel({
   expectUnauthorized: boolean
 }) {
   const response = outcome.response
-  if (!response) {
-    return (
-      <Panel title="Response">
-        <p className="text-stone-500 text-sm dark:text-stone-400">Dry run — nothing was sent.</p>
-      </Panel>
-    )
-  }
-
   const { http, decoded, decode } = response
   const tone = statusTone(http.status, expectUnauthorized)
   const protectedAsExpected = expectUnauthorized && (http.status === 401 || http.status === 403)

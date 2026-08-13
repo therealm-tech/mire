@@ -177,9 +177,9 @@ fn call_routes() -> ApiRouter<AppState> {
                 op.summary("Run one call")
                     .description(
                         "Renders the request, authenticates it, sends it and decodes the \
-                         answer. With `dryRun`, stops after rendering and returns the \
-                         request plus its curl equivalent. A 4xx or 5xx from the endpoint \
-                         is a successful call — read `response.http.status`.\n\n\
+                         answer. The rendered request and its curl equivalent come back \
+                         alongside the response, credentials masked. A 4xx or 5xx from the \
+                         endpoint is a successful call — read `response.http.status`.\n\n\
                          For `kind: embedding`, the answer is judged on its shape and \
                          vectors are summarised, never returned whole; `includeVectors` \
                          opts into the full payload and `repeat: 2` enables the \

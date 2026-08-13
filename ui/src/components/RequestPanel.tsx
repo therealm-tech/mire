@@ -15,10 +15,8 @@ export function RequestPanel({
   onRepeat,
   onIncludeVectors,
   onMaxIterations,
-  onDryRun,
   onSend,
   onStream,
-  onLoop,
 }: {
   profile: ProfileSummary
   prompt: string
@@ -34,10 +32,9 @@ export function RequestPanel({
   onRepeat: (value: number) => void
   onIncludeVectors: (value: boolean) => void
   onMaxIterations: (value: number) => void
-  onDryRun: () => void
+  /** A chat profile always goes through the loop; an embedding one never does. */
   onSend: () => void
   onStream: () => void
-  onLoop: () => void
 }) {
   const embedding = profile.kind === 'embedding'
 
@@ -103,16 +100,13 @@ export function RequestPanel({
             disabled={busy}
             onClick={onSend}
             className="rounded bg-stone-900 px-3 py-1.5 font-medium text-sm text-stone-50 disabled:opacity-50 dark:bg-stone-100 dark:text-stone-900"
+            title={
+              embedding
+                ? undefined
+                : 'Run the profile in a loop, answering its tools. A profile with none stops on turn one.'
+            }
           >
             Send
-          </button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={onDryRun}
-            className="rounded border border-stone-300 px-3 py-1.5 text-sm disabled:opacity-50 dark:border-stone-700"
-          >
-            Dry run
           </button>
 
           {embedding ? null : (
@@ -122,18 +116,9 @@ export function RequestPanel({
                 disabled={busy}
                 onClick={onStream}
                 className="rounded border border-stone-300 px-3 py-1.5 text-sm disabled:opacity-50 dark:border-stone-700"
-                title="Ask the endpoint to stream, and read it chunk by chunk"
+                title="One turn, read chunk by chunk. Tool calls do not reassemble in a stream, so this one does not loop."
               >
                 Stream
-              </button>
-              <button
-                type="button"
-                disabled={busy}
-                onClick={onLoop}
-                className="rounded border border-stone-300 px-3 py-1.5 text-sm disabled:opacity-50 dark:border-stone-700"
-                title="Run the profile in a loop, answering its simulated tools"
-              >
-                Run agent
               </button>
               <label className="flex items-center gap-1.5 pb-1 text-xs">
                 max turns

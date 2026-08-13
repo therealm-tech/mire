@@ -40,7 +40,6 @@ function completion(status: number) {
   return {
     profile: 'chat',
     auth: 'anonymous',
-    dryRun: false,
     request: {
       method: 'POST',
       url: 'https://models.internal/v1/chat/completions',
@@ -65,6 +64,62 @@ function completion(status: number) {
   }
 }
 
+/**
+ * A turn that answered and asked for nothing, which is what a chat profile with
+ * no tools produces: the loop stops on turn one.
+ */
+function answerTurn(status: number, content: string | null = 'pong') {
+  const call = completion(status)
+  return {
+    index: 1,
+    call: {
+      ...call,
+      response: { ...call.response, decoded: { ...call.response.decoded, content } },
+    },
+    tools: [],
+    decision: {
+      decision: 'stop',
+      stop: { outcome: 'stopped', reason: { predicate: 'noToolCalls' } },
+    },
+  }
+}
+
+/**
+ * The event stream `POST /api/agent` emits: one `turn` per turn, then the trace.
+ *
+ * Every chat send goes through this now, so the tests speak it too rather than
+ * the single-shot shape the UI no longer asks for.
+ */
+function agentStream(turns: ReturnType<typeof answerTurn>[]): string {
+  const trace = {
+    profile: 'chat',
+    auth: 'anonymous',
+    turns,
+    stop: { outcome: 'stopped', reason: { predicate: 'noToolCalls' } },
+    durationMs: 120,
+  }
+
+  return [
+    ...turns.flatMap((turn) => [
+      'event: turn',
+      `data: ${JSON.stringify({ event: 'turn', ...turn })}`,
+      '',
+    ]),
+    'event: done',
+    `data: ${JSON.stringify({ event: 'done', ...trace })}`,
+    '',
+    '',
+  ].join('\n')
+}
+
+/** An SSE response, as `mire` serves both streaming endpoints. */
+function sse(text: string): Response {
+  return new Response(text, {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  })
+}
+
 /** The `<section>` a titled panel renders, for assertions scoped to one panel. */
 function panel(title: string): HTMLElement {
   const heading = screen.getByRole('heading', { name: title })
@@ -75,13 +130,19 @@ function panel(title: string): HTMLElement {
   return section
 }
 
-/** Answers each route with a canned payload, like `mire` would. */
+/**
+ * Answers each route with a canned payload, like `mire` would. A string payload
+ * is served as an event stream, which is what the two streaming routes return.
+ */
 function mockApi(routes: Record<string, unknown>) {
   return vi.fn((input: RequestInfo | URL) => {
     const url = String(input)
     const match = Object.entries(routes).find(([suffix]) => url.endsWith(suffix))
     if (!match) {
       throw new Error(`unexpected fetch: ${url}`)
+    }
+    if (typeof match[1] === 'string') {
+      return Promise.resolve(sse(match[1]))
     }
     return Promise.resolve(
       new Response(JSON.stringify(match[1]), {
@@ -140,7 +201,11 @@ describe('App', () => {
     const user = userEvent.setup()
     vi.stubGlobal(
       'fetch',
-      mockApi({ 'api/profiles': PROFILES, 'api/auth': AUTH, 'api/call': completion(401) }),
+      mockApi({
+        'api/profiles': PROFILES,
+        'api/auth': AUTH,
+        'api/agent': agentStream([answerTurn(401, null)]),
+      }),
     )
     render(<App />)
 
@@ -159,7 +224,11 @@ describe('App', () => {
     const user = userEvent.setup()
     vi.stubGlobal(
       'fetch',
-      mockApi({ 'api/profiles': PROFILES, 'api/auth': AUTH, 'api/call': completion(200) }),
+      mockApi({
+        'api/profiles': PROFILES,
+        'api/auth': AUTH,
+        'api/agent': agentStream([answerTurn(200)]),
+      }),
     )
     render(<App />)
 
@@ -219,14 +288,49 @@ describe('describeStop', () => {
 })
 
 describe('agent mode', () => {
-  it('offers a loop for a chat profile and not for an embedding one', async () => {
+  it('offers the loop controls for a chat profile and not for an embedding one', async () => {
     const user = userEvent.setup()
     render(<App />)
 
-    expect(await screen.findByRole('button', { name: 'Run agent' })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Stream' })).toBeInTheDocument()
+    expect(screen.getByLabelText(/max turns/)).toBeInTheDocument()
+
+    // There is no second turn of an embedding, so there is nothing to loop.
+    await user.click(screen.getByRole('button', { name: /embed/ }))
+    expect(screen.queryByRole('button', { name: 'Stream' })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(/max turns/)).not.toBeInTheDocument()
+  })
+
+  it('sends a chat profile through the loop and an embedding one straight out', async () => {
+    const user = userEvent.setup()
+    const urls: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input)
+        urls.push(url)
+        if (url.endsWith('api/profiles')) {
+          return Promise.resolve(Response.json(PROFILES))
+        }
+        if (url.endsWith('api/auth')) {
+          return Promise.resolve(Response.json(AUTH))
+        }
+        if (url.endsWith('api/agent')) {
+          return Promise.resolve(sse(agentStream([answerTurn(200)])))
+        }
+        return Promise.resolve(Response.json(completion(200)))
+      }),
+    )
+
+    render(<App />)
+
+    // There is one send button, and for a chat profile it is the loop.
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(urls.some((url) => url.endsWith('api/agent'))).toBe(true))
 
     await user.click(screen.getByRole('button', { name: /embed/ }))
-    expect(screen.queryByRole('button', { name: 'Run agent' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(urls.some((url) => url.endsWith('api/call'))).toBe(true))
   })
 
   it('shows the text as it streams, then the timings once it is done', async () => {
@@ -381,7 +485,7 @@ describe('agent mode', () => {
     )
 
     render(<App />)
-    await user.click(await screen.findByRole('button', { name: 'Run agent' }))
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /Turn 1/ })).toBeInTheDocument()
@@ -620,7 +724,7 @@ describe('browser login', () => {
 })
 
 describe('conversation', () => {
-  /** Records every `api/call` body, so a test can assert what went out. */
+  /** Records every `api/agent` body, so a test can assert what went out. */
   function recordingApi(answers: string[]) {
     const sent: Array<Record<string, unknown>> = []
     let turn = 0
@@ -633,13 +737,11 @@ describe('conversation', () => {
       if (url.endsWith('api/auth')) {
         return Promise.resolve(Response.json(AUTH))
       }
-      if (url.endsWith('api/call')) {
+      if (url.endsWith('api/agent')) {
         sent.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
-        const answer = completion(200)
-        const decoded = answer.response.decoded
-        decoded.content = answers[turn] ?? 'pong'
+        const answer = answers[turn] ?? 'pong'
         turn += 1
-        return Promise.resolve(Response.json(answer))
+        return Promise.resolve(sse(agentStream([answerTurn(200, answer)])))
       }
       throw new Error(`unexpected fetch: ${url}`)
     })
@@ -692,25 +794,6 @@ describe('conversation', () => {
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     await waitFor(() => expect(screen.getByRole('textbox', { name: /message/i })).toHaveValue(''))
-  })
-
-  it('shows a dry run without recording it as a turn', async () => {
-    const { fetchMock, sent } = recordingApi(['pong'])
-    vi.stubGlobal('fetch', fetchMock)
-
-    const user = userEvent.setup()
-    render(<App />)
-
-    await type(user, 'would this work?')
-    await user.click(await screen.findByRole('button', { name: 'Dry run' }))
-    await waitFor(() => expect(sent).toHaveLength(1))
-
-    // It went out with the turn attached, so you can see what it would carry…
-    expect(sent[0]?.messages).toEqual([{ role: 'user', content: 'would this work?' }])
-    expect(sent[0]?.dryRun).toBe(true)
-    // …but nothing was sent, so nothing is remembered and the box is untouched.
-    expect(screen.queryByRole('heading', { name: 'Conversation' })).not.toBeInTheDocument()
-    expect(screen.getByRole('textbox', { name: /message/i })).toHaveValue('would this work?')
   })
 
   it('drops a turn that is removed, and sends what is left', async () => {

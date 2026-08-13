@@ -245,8 +245,7 @@ pub struct CallbackQuery {
 #[schemars(extend("example" = serde_json::json!({
     "profile": "mistral-small",
     "auth": "anonymous",
-    "prompt": "ping",
-    "dryRun": false
+    "prompt": "ping"
 })))]
 #[serde(rename_all = "camelCase")]
 pub struct CallRequest {
@@ -283,11 +282,6 @@ pub struct CallRequest {
     /// echoed back.
     #[serde(default)]
     pub token: Option<Secret>,
-
-    /// Render the request and return it — with its `curl` equivalent — without
-    /// sending anything.
-    #[serde(default)]
-    pub dry_run: bool,
 
     /// Ask the endpoint to stream. `kind: chat`, and `POST /api/call/stream`
     /// only.
@@ -342,7 +336,6 @@ impl From<CallRequest> for CallInput {
             params: request.params,
             model: request.model,
             token: request.token,
-            dry_run: request.dry_run,
             stream: request.stream,
             include_vectors: request.include_vectors,
             repeat: request.repeat,
@@ -390,10 +383,11 @@ mod tests {
     }
 
     #[test]
-    fn dry_run_is_camel_case_on_the_wire() {
+    fn a_multi_word_field_is_camel_case_on_the_wire() {
         let request: CallRequest =
-            serde_json::from_value(serde_json::json!({"profile": "p", "dryRun": true})).unwrap();
-        assert!(request.dry_run);
+            serde_json::from_value(serde_json::json!({"profile": "p", "includeVectors": true}))
+                .unwrap();
+        assert!(request.include_vectors);
     }
 }
 
@@ -406,8 +400,9 @@ mod tests {
     "maxIterations": 6
 })))]
 pub struct AgentRequest {
-    /// Everything a single call needs. `dryRun`, `includeVectors`, `repeat` and
-    /// `tolerance` are ignored: a loop that sends nothing has nothing to loop on.
+    /// Everything a single call needs. `includeVectors`, `repeat` and
+    /// `tolerance` are ignored: they belong to `kind: embedding`, and agent mode
+    /// runs a chat profile.
     #[serde(flatten)]
     #[validate(nested)]
     pub call: CallRequest,

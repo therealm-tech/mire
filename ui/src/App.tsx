@@ -49,7 +49,7 @@ function withPrompt(history: Message[], prompt: string): Message[] {
  * message on the next request that the endpoint never actually produced.
  */
 function assistantTurn(outcome: CallOutcome): Message | null {
-  const decoded = outcome.response?.decoded
+  const decoded = outcome.response.decoded
   if (decoded?.kind !== 'completion') {
     return null
   }
@@ -198,58 +198,50 @@ export function App() {
       .catch((error: unknown) => setLoginError(String(error)))
   }, [])
 
-  const run = useCallback(
-    (dryRun: boolean) => {
-      if (!profile) {
-        return
-      }
-      setBusy(true)
-      setCallError(null)
-      setLive(null)
-      setTurns([])
-      setTrace(null)
+  /**
+   * One embedding call. There is no second turn of an embedding, so this is the
+   * only mode that does not go through the loop.
+   */
+  const embed = useCallback(() => {
+    if (!profile) {
+      return
+    }
+    setBusy(true)
+    setCallError(null)
+    setLive(null)
+    setTurns([])
+    setTrace(null)
 
-      const body: CallRequest = { profile: profile.name, auth: selectedAuth, dryRun }
-      const sent = withPrompt(messages, prompt)
-      if (profile.kind === 'embedding') {
-        body.input = input.split('\n').filter((line) => line.trim().length > 0)
-        body.repeat = repeat
-        body.includeVectors = includeVectors
-      } else {
-        body.messages = sent
-      }
-      if (token.length > 0) {
-        body.token = token
-      }
+    const body: CallRequest = {
+      profile: profile.name,
+      auth: selectedAuth,
+      input: input.split('\n').filter((line) => line.trim().length > 0),
+      repeat,
+      includeVectors,
+    }
+    if (token.length > 0) {
+      body.token = token
+    }
 
-      call(body)
-        .then((result) => {
-          setOutcome(result)
-          // A dry run sent nothing, so it changes nothing: it shows what the
-          // next turn *would* carry, which is the question it is there to answer.
-          if (!dryRun && profile.kind !== 'embedding') {
-            const answer = assistantTurn(result)
-            setMessages(answer ? [...sent, answer] : sent)
-            setPrompt('')
-          }
-          logger.info('call.done', {
-            profile: result.profile,
-            auth: result.auth,
-            status: result.response?.http.status ?? null,
-          })
+    call(body)
+      .then((result) => {
+        setOutcome(result)
+        logger.info('call.done', {
+          profile: result.profile,
+          auth: result.auth,
+          status: result.response.http.status,
         })
-        .catch((error: unknown) => {
-          if (error instanceof ApiError) {
-            setCallError(error)
-            setOutcome(null)
-          } else {
-            logger.error('call.failed', { message: String(error) })
-          }
-        })
-        .finally(() => setBusy(false))
-    },
-    [profile, selectedAuth, token, prompt, messages, input, repeat, includeVectors],
-  )
+      })
+      .catch((error: unknown) => {
+        if (error instanceof ApiError) {
+          setCallError(error)
+          setOutcome(null)
+        } else {
+          logger.error('call.failed', { message: String(error) })
+        }
+      })
+      .finally(() => setBusy(false))
+  }, [profile, selectedAuth, token, input, repeat, includeVectors])
 
   const stream = useCallback(() => {
     if (!profile) {
@@ -309,7 +301,12 @@ export function App() {
       .finally(() => setBusy(false))
   }, [profile, selectedAuth, token, prompt, messages])
 
-  const loop = useCallback(() => {
+  /**
+   * A chat profile, run in a loop. This is what **Send** does, whether or not the
+   * profile declares a single tool: a profile with nothing to call stops on turn
+   * one, which is the same one turn a plain call would have made.
+   */
+  const send = useCallback(() => {
     if (!profile) {
       return
     }
@@ -335,6 +332,10 @@ export function App() {
       switch (event.event) {
         case 'turn':
           setTurns((current) => [...current, event])
+          // The rendered request, the decode trace and the raw body are the point
+          // of this tool, and they belong to a turn rather than to a run — so the
+          // panels below follow the latest one as it lands.
+          setOutcome(event.call)
           break
         case 'done': {
           setTrace(event)
@@ -447,10 +448,8 @@ export function App() {
               onIncludeVectors={setIncludeVectors}
               maxIterations={maxIterations}
               onMaxIterations={setMaxIterations}
-              onDryRun={() => run(true)}
-              onSend={() => run(false)}
+              onSend={profile.kind === 'embedding' ? embed : send}
               onStream={stream}
-              onLoop={loop}
             />
           ) : (
             <Panel title="Request">
@@ -460,7 +459,7 @@ export function App() {
             </Panel>
           )}
 
-          {busy && live === null ? <Spinner label="Calling…" /> : null}
+          {busy && live === null && turns.length === 0 ? <Spinner label="Calling…" /> : null}
 
           {live === null ? null : (
             <Panel

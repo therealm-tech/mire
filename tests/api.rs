@@ -274,8 +274,14 @@ fn openai_response() -> Value {
 }
 
 #[tokio::test]
-async fn a_dry_run_renders_the_request_and_sends_nothing() {
+async fn a_call_hands_back_the_request_it_sent_and_its_curl() {
     let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_response()))
+        .mount(&server)
+        .await;
+
     let harness = Harness::start(&[(
         "chat.yaml",
         openai_profile(&format!("{}/v1/chat/completions", server.uri())),
@@ -283,12 +289,10 @@ async fn a_dry_run_renders_the_request_and_sends_nothing() {
     .await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "chat", "prompt": "ping", "dryRun": true}))
+        .call(json!({"profile": "chat", "prompt": "ping"}))
         .await;
 
     assert_eq!(status, 200);
-    assert_eq!(body["dryRun"], true);
-    assert!(body["response"].is_null(), "nothing should have been sent");
     let rendered = body["request"]["body"].as_str().unwrap();
     assert_eq!(
         serde_json::from_str::<Value>(rendered).unwrap(),
@@ -304,10 +308,9 @@ async fn a_dry_run_renders_the_request_and_sends_nothing() {
         "{}",
         body["curl"]
     );
-    assert!(
-        server.received_requests().await.unwrap().is_empty(),
-        "a dry run must not touch the endpoint"
-    );
+    // What the endpoint actually received is what was handed back.
+    let received = &server.received_requests().await.unwrap()[0];
+    assert_eq!(std::str::from_utf8(&received.body).unwrap(), rendered);
 }
 
 #[tokio::test]
@@ -626,7 +629,7 @@ async fn an_unknown_profile_is_a_404_and_an_unknown_provider_too() {
     assert_eq!(body["code"], "unknown_profile");
 
     let (status, _, body) = harness
-        .call(json!({"profile": "chat", "auth": "nope", "dryRun": true}))
+        .call(json!({"profile": "chat", "auth": "nope"}))
         .await;
     assert_eq!(status, 404);
     assert_eq!(body["code"], "unknown_auth_provider");
@@ -644,7 +647,7 @@ request:
     let harness = Harness::start(&[("broken.yaml", profile.to_owned())]).await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "broken", "prompt": "ping", "dryRun": true}))
+        .call(json!({"profile": "broken", "prompt": "ping"}))
         .await;
 
     assert_eq!(status, 422);
@@ -775,7 +778,7 @@ async fn a_reloaded_provider_is_immediately_usable_on_a_call() {
 
     // Before the edit, the provider does not exist.
     let (status, _, body) = harness
-        .call(json!({"profile": "chat", "auth": "pasted", "dryRun": true}))
+        .call(json!({"profile": "chat", "auth": "pasted"}))
         .await;
     assert_eq!(status, 404);
     assert_eq!(body["code"], "unknown_auth_provider");
@@ -1142,14 +1145,20 @@ async fn a_hole_in_a_vector_fails_the_finiteness_check() {
 
 #[tokio::test]
 async fn a_single_string_input_is_accepted_and_rendered_as_a_list() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(embedding_response(1, 4)))
+        .mount(&server)
+        .await;
+
     let harness = Harness::start(&[(
         "embed.yaml",
-        embedding_profile("https://models.internal/v1/embeddings", None),
+        embedding_profile(&format!("{}/v1/embeddings", server.uri()), None),
     )])
     .await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "embed", "input": "just one", "dryRun": true}))
+        .call(json!({"profile": "embed", "input": "just one"}))
         .await;
 
     assert_eq!(status, 200);
@@ -1799,14 +1808,20 @@ decode:
 
 #[tokio::test]
 async fn a_request_script_builds_the_body() {
-    let harness = Harness::start(&[(
-        "scripted.yaml",
-        scripted_profile("https://models.internal/v1"),
-    )])
-    .await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "segments": [{"kind": "text", "value": "pong"}],
+            "complete": true,
+            "counters": {"inbound": 1, "outbound": 1}
+        })))
+        .mount(&server)
+        .await;
+
+    let harness = Harness::start(&[("scripted.yaml", scripted_profile(&server.uri()))]).await;
 
     let (status, text, body) = harness
-        .call(json!({"profile": "scripted", "prompt": "ping", "dryRun": true}))
+        .call(json!({"profile": "scripted", "prompt": "ping"}))
         .await;
 
     assert_eq!(status, 200, "{text}");
@@ -1908,7 +1923,7 @@ request:
     let harness = Harness::start(&[("broken.yaml", profile.to_owned())]).await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "broken-script", "prompt": "ping", "dryRun": true}))
+        .call(json!({"profile": "broken-script", "prompt": "ping"}))
         .await;
 
     assert_eq!(status, 422);
@@ -3425,6 +3440,12 @@ async fn a_simulated_tool_shadows_a_live_one_of_the_same_name() {
 #[tokio::test]
 async fn an_unreachable_server_fails_the_run_before_a_prompt_is_spent() {
     let endpoint = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_response()))
+        .mount(&endpoint)
+        .await;
+
     let harness = Harness::start(&[
         (
             "mcp.yaml",
@@ -3440,9 +3461,10 @@ async fn an_unreachable_server_fails_the_run_before_a_prompt_is_spent() {
 
     // A plain call does not need the MCP server at all.
     let (status, _, _) = harness
-        .call(json!({"profile": "chat", "prompt": "go", "dryRun": true}))
+        .call(json!({"profile": "chat", "prompt": "go"}))
         .await;
     assert_eq!(status, 200);
+    let before = endpoint.received_requests().await.unwrap().len();
 
     let (_, events) = harness
         .agent(json!({"profile": "chat", "prompt": "go"}))
@@ -3456,7 +3478,7 @@ async fn an_unreachable_server_fails_the_run_before_a_prompt_is_spent() {
     );
     let failed = &events[0].1;
     assert_eq!(failed["code"], "mcp_unreachable");
-    assert!(endpoint.received_requests().await.unwrap().is_empty());
+    assert_eq!(endpoint.received_requests().await.unwrap().len(), before);
 }
 
 #[tokio::test]
@@ -4351,16 +4373,6 @@ request:
         .await;
     assert_eq!(status, 422);
     assert_eq!(body["code"], "not_a_chat_profile");
-
-    // A dry run answers before anything is sent, so streaming it is theatre.
-    let (status, body) = harness
-        .post(
-            "/api/call/stream",
-            json!({"profile": "chat", "prompt": "hi", "dryRun": true}),
-        )
-        .await;
-    assert_eq!(status, 422);
-    assert_eq!(body["code"], "dry_run_does_not_stream");
 
     let (status, body) = harness
         .post("/api/call/stream", json!({"profile": "nope"}))

@@ -477,7 +477,7 @@ pub async fn call(
 ///
 /// # Errors
 ///
-/// `404` for an unknown profile, `422` for an embedding profile or a dry run.
+/// `404` for an unknown profile, `422` for an embedding profile.
 pub async fn call_stream(
     State(state): State<AppState>,
     Json(request): Json<CallRequest>,
@@ -507,16 +507,6 @@ pub async fn call_stream(
             ),
         ));
     }
-    // A dry run produces its whole answer before anything is sent, so streaming
-    // it would be theatre. Saying so beats a one-event stream.
-    if request.dry_run {
-        return Err(ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "dry_run_does_not_stream",
-            "a dry run sends nothing, so there is nothing to stream — use POST /api/call",
-        ));
-    }
-
     let (sender, mut receiver) = mpsc::unbounded_channel::<StreamEvent>();
     let runner = state.runner.clone();
     let mut input: CallInput = request.into();

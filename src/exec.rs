@@ -45,8 +45,6 @@ pub struct CallInput {
     pub model: Option<String>,
     /// Credential typed in the UI, for a provider that declares no source.
     pub token: Option<Secret>,
-    /// Render and return the request without sending it.
-    pub dry_run: bool,
     /// Attach the full vectors to an embedding response. Off by default, and it
     /// has to stay that way: nobody wants 1024 floats they did not ask for.
     pub include_vectors: bool,
@@ -126,15 +124,13 @@ pub struct CallOutcome {
     pub profile: String,
     /// Auth provider that ran.
     pub auth: String,
-    /// Whether the request was actually sent.
-    pub dry_run: bool,
-    /// The rendered request.
+    /// The rendered request, as it went on the wire — this is the half you paste
+    /// into a ticket, and it comes back whatever the endpoint answered.
     pub request: RequestView,
     /// The `curl` equivalent, ready to paste into a ticket.
     pub curl: String,
-    /// The response. `None` on a dry run.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub response: Option<ResponseView>,
+    /// What came back.
+    pub response: ResponseView,
     /// `true` when a `401` triggered one credential refresh and replay.
     pub retried_after_unauthorized: bool,
 }
@@ -212,19 +208,6 @@ impl Runner {
         let view = request_view(&request, &redactor);
         let curl = request.to_curl(&redactor);
 
-        if input.dry_run {
-            debug!(profile = %profile.name, auth = %auth_name, "dry run");
-            return Ok(CallOutcome {
-                profile: profile.name.clone(),
-                auth: auth_name,
-                dry_run: true,
-                request: view,
-                curl,
-                response: None,
-                retried_after_unauthorized: false,
-            });
-        }
-
         let mut raw = transport::send(&self.client, &request, profile.timeout()).await?;
         let mut retried = false;
 
@@ -251,6 +234,7 @@ impl Runner {
             latency_ms = raw.latency.as_millis(),
             "call completed"
         );
+        log_refusal(&profile.name, raw.status, &redactor.text(&raw.body));
 
         let (mut response, first_vectors) = response_view(
             profile,
@@ -272,10 +256,9 @@ impl Runner {
         Ok(CallOutcome {
             profile: profile.name.clone(),
             auth: auth_name,
-            dry_run: false,
             request: view,
             curl,
-            response: Some(response),
+            response,
             retried_after_unauthorized: retried,
         })
     }
@@ -396,16 +379,18 @@ impl Runner {
             chunks = streamed.view.chunks,
             "streamed call completed"
         );
+        // Already redacted by the accumulator, and for a refusal it is the whole
+        // body: an endpoint that says no says it in one shot, not in frames.
+        log_refusal(&profile.name, status, &streamed.body_text);
 
         let response = streamed_response(status, response_headers, started, streamed);
 
         Ok(CallOutcome {
             profile: profile.name.clone(),
             auth: auth_name,
-            dry_run: false,
             request: view,
             curl,
-            response: Some(response),
+            response,
             retried_after_unauthorized: retried,
         })
     }
@@ -643,6 +628,42 @@ fn streamed_response(
         decoded: Some(Decoded::Completion(streamed.completion)),
         decode: streamed.decode,
         stream: Some(streamed.view),
+    }
+}
+
+/// How much of a refused body reaches the log.
+///
+/// Long enough for the endpoint's own sentence — "maximum context length is
+/// 32768 tokens, however you requested 61402" — short enough that a gateway
+/// answering an HTML error page does not take the journal with it.
+const REFUSAL_EXCERPT: usize = 512;
+
+/// Puts the endpoint's own words in the log when it says no.
+///
+/// The body is on the trace either way, but a `status=400` alone is a question,
+/// not an answer, and whoever is reading the log is reading it precisely because
+/// they do not have the trace open. Not an error: a refusal is still an answer,
+/// so this is a `warn`, and the run carries on.
+fn log_refusal(profile: &str, status: u16, body: &str) {
+    if status < 400 {
+        return;
+    }
+    warn!(
+        %profile,
+        status,
+        body = %excerpt(body, REFUSAL_EXCERPT),
+        "the endpoint refused the call"
+    );
+}
+
+/// First `limit` characters of `text`, on one line, with an ellipsis when there
+/// was more. Counts characters, not bytes: a body is not always ASCII, and
+/// slicing one mid-codepoint would panic.
+fn excerpt(text: &str, limit: usize) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match text.char_indices().nth(limit) {
+        Some((at, _)) => format!("{}…", &text[..at]),
+        None => text,
     }
 }
 

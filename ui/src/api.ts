@@ -211,7 +211,6 @@ const responseViewSchema = z.object({
 export const callOutcomeSchema = z.object({
   profile: z.string(),
   auth: z.string(),
-  dryRun: z.boolean(),
   request: z.object({
     method: z.string(),
     url: z.string(),
@@ -219,7 +218,7 @@ export const callOutcomeSchema = z.object({
     body: z.string(),
   }),
   curl: z.string(),
-  response: responseViewSchema.optional(),
+  response: responseViewSchema,
   retriedAfterUnauthorized: z.boolean(),
 })
 
@@ -332,7 +331,6 @@ export interface CallRequest {
   messages?: Message[]
   input?: string[]
   token?: string
-  dryRun?: boolean
   includeVectors?: boolean
   repeat?: number
   /** Told to the template as `stream`. `POST /api/call/stream` forces it on. */

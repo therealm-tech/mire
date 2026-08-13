@@ -90,8 +90,10 @@ export function ConversationPanel({
                   </p>
                 ))}
                 <p className="text-amber-700 text-xs dark:text-amber-500">
-                  Chat mode does not answer tool calls. Most endpoints refuse the next turn until
-                  this one has a result — “Run agent” is the loop that provides it.
+                  Nothing answered this call — the run stopped on it, or it came back from a stream,
+                  which does not loop. The loop only answers calls it made itself, and most
+                  endpoints refuse the next turn until this one has a result: remove it to ask
+                  again.
                 </p>
               </div>
             ) : null}
