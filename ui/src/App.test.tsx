@@ -165,8 +165,10 @@ describe('App', () => {
 
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
+    // Scoped: the answer also joins the conversation, which is a different
+    // panel making a different claim about the same text.
     await waitFor(() => {
-      expect(screen.getByText('pong')).toBeInTheDocument()
+      expect(within(panel('Response')).getByText('pong')).toBeInTheDocument()
     })
     expect(screen.getByRole('button', { name: 'Copy as curl' })).toBeInTheDocument()
     // The masked credential is what the UI was handed, and what it shows.
@@ -388,7 +390,8 @@ describe('agent mode', () => {
     expect(screen.getByRole('button', { name: 'Export trace' })).toBeInTheDocument()
 
     // A closed card still says what the turn did; the detail is behind the click.
-    expect(screen.getByText(/get_weather/)).toBeInTheDocument()
+    // Scoped to the trace: the conversation panel names the same tool call.
+    expect(within(panel('Agent')).getByText(/get_weather/)).toBeInTheDocument()
     expect(screen.queryByText(/arguments match the schema/i)).not.toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: /Turn 1/ }))
@@ -613,5 +616,159 @@ describe('browser login', () => {
 
     expect(await screen.findByRole('button', { name: 'Sign in' })).toBeInTheDocument()
     expect(screen.queryByText('gleroy')).not.toBeInTheDocument()
+  })
+})
+
+describe('conversation', () => {
+  /** Records every `api/call` body, so a test can assert what went out. */
+  function recordingApi(answers: string[]) {
+    const sent: Array<Record<string, unknown>> = []
+    let turn = 0
+
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('api/profiles')) {
+        return Promise.resolve(Response.json(PROFILES))
+      }
+      if (url.endsWith('api/auth')) {
+        return Promise.resolve(Response.json(AUTH))
+      }
+      if (url.endsWith('api/call')) {
+        sent.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+        const answer = completion(200)
+        const decoded = answer.response.decoded
+        decoded.content = answers[turn] ?? 'pong'
+        turn += 1
+        return Promise.resolve(Response.json(answer))
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+
+    return { fetchMock, sent }
+  }
+
+  /** The message box, once the configuration has landed and it exists. */
+  async function type(user: ReturnType<typeof userEvent.setup>, text: string) {
+    const box = await screen.findByRole('textbox', { name: /message/i })
+    await user.clear(box)
+    await user.type(box, text)
+  }
+
+  it('carries the whole exchange into the next turn', async () => {
+    const { fetchMock, sent } = recordingApi(['Paris is the capital.', 'About 2.1 million.'])
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await type(user, 'Capital of France?')
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(sent).toHaveLength(1))
+
+    // Turn one is just the question.
+    expect(sent[0]?.messages).toEqual([{ role: 'user', content: 'Capital of France?' }])
+
+    await type(user, 'And its population?')
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(sent).toHaveLength(2))
+
+    // Turn two carries what came before it — which is the whole feature, and
+    // the reason `mire` needs no session of its own to hold a conversation.
+    expect(sent[1]?.messages).toEqual([
+      { role: 'user', content: 'Capital of France?' },
+      { role: 'assistant', content: 'Paris is the capital.' },
+      { role: 'user', content: 'And its population?' },
+    ])
+  })
+
+  it('empties the box on success so the next turn starts clean', async () => {
+    const { fetchMock } = recordingApi(['pong'])
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await type(user, 'hello')
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    await waitFor(() => expect(screen.getByRole('textbox', { name: /message/i })).toHaveValue(''))
+  })
+
+  it('shows a dry run without recording it as a turn', async () => {
+    const { fetchMock, sent } = recordingApi(['pong'])
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await type(user, 'would this work?')
+    await user.click(await screen.findByRole('button', { name: 'Dry run' }))
+    await waitFor(() => expect(sent).toHaveLength(1))
+
+    // It went out with the turn attached, so you can see what it would carry…
+    expect(sent[0]?.messages).toEqual([{ role: 'user', content: 'would this work?' }])
+    expect(sent[0]?.dryRun).toBe(true)
+    // …but nothing was sent, so nothing is remembered and the box is untouched.
+    expect(screen.queryByRole('heading', { name: 'Conversation' })).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: /message/i })).toHaveValue('would this work?')
+  })
+
+  it('drops a turn that is removed, and sends what is left', async () => {
+    const { fetchMock, sent } = recordingApi(['first answer', 'second answer'])
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await type(user, 'one')
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(sent).toHaveLength(1))
+
+    // Removing the model's answer asks the far more interesting question:
+    // does it still say that if it never said it the first time?
+    await user.click(screen.getByRole('button', { name: 'Remove turn 2' }))
+
+    await type(user, 'two')
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(sent).toHaveLength(2))
+
+    expect(sent[1]?.messages).toEqual([
+      { role: 'user', content: 'one' },
+      { role: 'user', content: 'two' },
+    ])
+  })
+
+  it('starts over when the conversation is reset', async () => {
+    const { fetchMock, sent } = recordingApi(['pong', 'pong'])
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await type(user, 'one')
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(sent).toHaveLength(1))
+    expect(screen.getByRole('heading', { name: 'Conversation' })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'New conversation' }))
+    expect(screen.queryByRole('heading', { name: 'Conversation' })).not.toBeInTheDocument()
+
+    await type(user, 'two')
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(sent).toHaveLength(2))
+
+    expect(sent[1]?.messages).toEqual([{ role: 'user', content: 'two' }])
+  })
+
+  it('never offers a conversation for an embedding profile', async () => {
+    const { fetchMock } = recordingApi(['pong'])
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: /embed/ }))
+    // There is no such thing as a second turn of an embedding.
+    expect(screen.queryByRole('heading', { name: 'Conversation' })).not.toBeInTheDocument()
   })
 })

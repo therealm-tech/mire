@@ -86,6 +86,29 @@ const toolCallSchema = z.object({
   arguments: z.unknown(),
 })
 
+export type ToolCall = z.infer<typeof toolCallSchema>
+
+/**
+ * One conversation turn, as `Message` on the server.
+ *
+ * Sent back verbatim on the next call: `mire` holds no conversation of its own,
+ * so the whole history travels in the body every time. That is what keeps the
+ * `curl` export of turn five a reproduction of turn five rather than of a
+ * session that no longer exists.
+ */
+export interface Message {
+  role: 'system' | 'user' | 'assistant' | 'tool'
+  content?: string
+  /**
+   * Handed back in the normalised shape the response decoded to. The server
+   * reads either that or the nested wire shape, so this is understood — but the
+   * *encoding* of `arguments` is not preserved, which is one more reason a
+   * conversation that reached a tool call belongs in agent mode.
+   */
+  toolCalls?: ToolCall[]
+  toolCallId?: string
+}
+
 const completionSchema = z.object({
   kind: z.literal('completion'),
   content: z.string().nullable(),
@@ -305,6 +328,8 @@ export interface CallRequest {
   profile: string
   auth: string
   prompt?: string
+  /** The conversation so far. Takes precedence over `prompt` on the server. */
+  messages?: Message[]
   input?: string[]
   token?: string
   dryRun?: boolean

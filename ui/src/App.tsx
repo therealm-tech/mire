@@ -10,6 +10,7 @@ import {
   fetchAuth,
   fetchProfiles,
   logout,
+  type Message,
   type ProfilesResponse,
   runAgent,
   startLogin,
@@ -19,6 +20,7 @@ import {
 } from './api'
 import { AgentPanel } from './components/AgentPanel'
 import { AuthSelector } from './components/AuthSelector'
+import { ConversationPanel } from './components/ConversationPanel'
 import { ProfileList } from './components/ProfileList'
 import { Badge, Panel, Spinner } from './components/primitives'
 import { RenderedRequest, RequestPanel } from './components/RequestPanel'
@@ -26,6 +28,43 @@ import { ResponsePanel } from './components/ResponsePanel'
 import { logger } from './logger'
 
 const ANONYMOUS = 'anonymous'
+
+/**
+ * The turn about to be sent, appended to what came before.
+ *
+ * A blank box is not an empty turn: it means "send the conversation as it
+ * stands", which is how you retry a turn after removing one, or ask the same
+ * history of a different profile.
+ */
+function withPrompt(history: Message[], prompt: string): Message[] {
+  const text = prompt.trim()
+  return text.length === 0 ? history : [...history, { role: 'user', content: text }]
+}
+
+/**
+ * The model's turn, as the decoder saw it.
+ *
+ * `null` when there is nothing to record — a call that failed, or answered
+ * neither text nor a tool call. Appending an empty assistant turn would put a
+ * message on the next request that the endpoint never actually produced.
+ */
+function assistantTurn(outcome: CallOutcome): Message | null {
+  const decoded = outcome.response?.decoded
+  if (decoded?.kind !== 'completion') {
+    return null
+  }
+
+  const toolCalls = decoded.toolCalls
+  if (!decoded.content && toolCalls.length === 0) {
+    return null
+  }
+
+  return {
+    role: 'assistant',
+    ...(decoded.content ? { content: decoded.content } : {}),
+    ...(toolCalls.length > 0 ? { toolCalls } : {}),
+  }
+}
 
 /** How long to wait for someone to get through their identity provider. */
 const LOGIN_TIMEOUT_MS = 180_000
@@ -81,6 +120,7 @@ export function App() {
   const [token, setToken] = useState('')
 
   const [prompt, setPrompt] = useState('ping')
+  const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('one\ntwo')
   const [repeat, setRepeat] = useState(1)
   const [includeVectors, setIncludeVectors] = useState(false)
@@ -170,12 +210,13 @@ export function App() {
       setTrace(null)
 
       const body: CallRequest = { profile: profile.name, auth: selectedAuth, dryRun }
+      const sent = withPrompt(messages, prompt)
       if (profile.kind === 'embedding') {
         body.input = input.split('\n').filter((line) => line.trim().length > 0)
         body.repeat = repeat
         body.includeVectors = includeVectors
       } else {
-        body.prompt = prompt
+        body.messages = sent
       }
       if (token.length > 0) {
         body.token = token
@@ -184,6 +225,13 @@ export function App() {
       call(body)
         .then((result) => {
           setOutcome(result)
+          // A dry run sent nothing, so it changes nothing: it shows what the
+          // next turn *would* carry, which is the question it is there to answer.
+          if (!dryRun && profile.kind !== 'embedding') {
+            const answer = assistantTurn(result)
+            setMessages(answer ? [...sent, answer] : sent)
+            setPrompt('')
+          }
           logger.info('call.done', {
             profile: result.profile,
             auth: result.auth,
@@ -200,7 +248,7 @@ export function App() {
         })
         .finally(() => setBusy(false))
     },
-    [profile, selectedAuth, token, prompt, input, repeat, includeVectors],
+    [profile, selectedAuth, token, prompt, messages, input, repeat, includeVectors],
   )
 
   const stream = useCallback(() => {
@@ -216,7 +264,8 @@ export function App() {
     // never produces a token is visibly a stream that never produced a token.
     setLive('')
 
-    const body: CallRequest = { profile: profile.name, auth: selectedAuth, prompt }
+    const sent = withPrompt(messages, prompt)
+    const body: CallRequest = { profile: profile.name, auth: selectedAuth, messages: sent }
     if (token.length > 0) {
       body.token = token
     }
@@ -229,14 +278,22 @@ export function App() {
         case 'delta':
           setLive((current) => (current ?? '') + event.text)
           break
-        case 'done':
+        case 'done': {
           setOutcome(event)
+          // The `done` event carries the same decoded answer the non-streaming
+          // endpoint returns, so the conversation is built from that rather than
+          // from the deltas: one source of truth, and it survives a stream whose
+          // last chunk arrived in a shape the delta reader skipped.
+          const answer = assistantTurn(event)
+          setMessages(answer ? [...sent, answer] : sent)
+          setPrompt('')
           logger.info('stream.done', {
             status: event.response?.http.status ?? null,
             ttftMs: event.response?.http.ttftMs ?? null,
             chunks: event.response?.stream?.chunks ?? null,
           })
           break
+        }
         case 'failed':
           setCallError(new ApiError(500, { code: event.code, message: event.message }))
           break
@@ -250,7 +307,7 @@ export function App() {
         }
       })
       .finally(() => setBusy(false))
-  }, [profile, selectedAuth, token, prompt])
+  }, [profile, selectedAuth, token, prompt, messages])
 
   const loop = useCallback(() => {
     if (!profile) {
@@ -263,10 +320,11 @@ export function App() {
     setTurns([])
     setTrace(null)
 
+    const sent = withPrompt(messages, prompt)
     const body: AgentRequest = {
       profile: profile.name,
       auth: selectedAuth,
-      prompt,
+      messages: sent,
       maxIterations,
     }
     if (token.length > 0) {
@@ -278,10 +336,18 @@ export function App() {
         case 'turn':
           setTurns((current) => [...current, event])
           break
-        case 'done':
+        case 'done': {
           setTrace(event)
+          // Only the answer it finished on rejoins the conversation. The turns
+          // in between are tool calls and their results; they are in the trace,
+          // and replaying them without the results would break the next call.
+          const last = event.turns.at(-1)
+          const answer = last ? assistantTurn(last.call) : null
+          setMessages(answer ? [...sent, answer] : sent)
+          setPrompt('')
           logger.info('agent.done', { turns: event.turns.length, stop: event.stop.outcome })
           break
+        }
         case 'failed':
           setCallError(new ApiError(500, { code: event.code, message: event.message }))
           break
@@ -295,7 +361,7 @@ export function App() {
         }
       })
       .finally(() => setBusy(false))
-  }, [profile, selectedAuth, token, prompt, maxIterations])
+  }, [profile, selectedAuth, token, prompt, messages, maxIterations])
 
   if (loadError) {
     return (
@@ -355,10 +421,22 @@ export function App() {
         </div>
 
         <div className="space-y-4">
+          {profile && profile.kind !== 'embedding' ? (
+            <ConversationPanel
+              messages={messages}
+              busy={busy}
+              onRemove={(index) =>
+                setMessages((current) => current.filter((_, position) => position !== index))
+              }
+              onReset={() => setMessages([])}
+            />
+          ) : null}
+
           {profile ? (
             <RequestPanel
               profile={profile}
               prompt={prompt}
+              turns={messages.length}
               input={input}
               repeat={repeat}
               includeVectors={includeVectors}

@@ -4,6 +4,7 @@ import { Code, CopyButton, Field, Panel } from './primitives'
 export function RequestPanel({
   profile,
   prompt,
+  turns,
   input,
   repeat,
   includeVectors,
@@ -21,6 +22,8 @@ export function RequestPanel({
 }: {
   profile: ProfileSummary
   prompt: string
+  /** Turns already in the conversation, so the box can say what it is joining. */
+  turns: number
   input: string
   repeat: number
   includeVectors: boolean
@@ -73,11 +76,22 @@ export function RequestPanel({
             </div>
           </>
         ) : (
-          <Field label="Message">
+          <Field label={turns === 0 ? 'Message' : `Next message (${turns} before it)`}>
             <textarea
               value={prompt}
               onChange={(event) => onPrompt(event.target.value)}
+              onKeyDown={(event) => {
+                // The box stays multi-line, so a bare Enter has to keep meaning
+                // "newline". The modifier is what sends, as everywhere else.
+                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !busy) {
+                  event.preventDefault()
+                  onSend()
+                }
+              }}
               rows={4}
+              placeholder={
+                turns === 0 ? undefined : 'Leave empty to resend the conversation unchanged'
+              }
               className="w-full rounded border border-stone-300 bg-white px-2 py-1 text-sm dark:border-stone-700 dark:bg-stone-950"
             />
           </Field>

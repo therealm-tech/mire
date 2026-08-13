@@ -137,7 +137,10 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   carries a dot for its session state, and a **Sign in** button that says who you
   are once you are back.
 - **Request.** A prompt for a chat profile, one text per line for an embedding
-  one. **Dry run** renders without sending; **Send** goes out.
+  one. **Dry run** renders without sending; **Send** goes out. `Ctrl`/`Cmd`+
+  `Enter` sends too — a bare `Enter` still means a newline, because the box is
+  where a multi-line system prompt gets pasted.
+- **Conversation**, for chat profiles — see [below](#having-a-conversation).
 - **Rendered request**, with a *Copy as curl* button and credentials masked.
 - **Response.** The decoded content, tool calls, finish reason and usage, then
   the decode trace — which path matched, which missed, what was tried — and the
@@ -150,6 +153,40 @@ A credential typed into the UI lives in that tab and nowhere else: it is sent
 with the call and never stored, never logged, never echoed back. A credential
 `mire` fetched for you never reaches the tab at all — the browser sees a
 username, the granted scopes and a countdown.
+
+### Having a conversation
+
+A chat profile keeps its turns. Send, get an answer, ask a follow-up: the
+question goes out with everything that came before it, and the **Conversation**
+panel shows exactly what that is.
+
+**The conversation lives in the browser, not in `mire`.** There is no session,
+no identifier, nothing to expire. The whole history travels in the body of every
+request, which is what keeps the promise the rest of this tool makes: the *Copy
+as curl* of turn five reproduces turn five, in a shell, tomorrow, on a machine
+that never had the tab open. A server-side conversation would turn that button
+into a lie.
+
+That is also why the panel is a list of turns with a **Remove** on each rather
+than a chat bubble log. It is the `messages` array the next request will carry,
+and editing it is the point — dropping the model's last answer and asking again
+is how you find out whether it only said that because it had already said it.
+**New conversation** clears the lot.
+
+Three things follow from where the history lives, each of which is a decision:
+
+- **A dry run changes nothing.** It renders the next turn with the history
+  attached so you can read what would go out, and records neither the question
+  nor an answer. Nothing was sent, so nothing happened.
+- **An empty box resends the conversation unchanged.** After removing a turn,
+  that is how you replay it. It is also how you ask the same history of a
+  different profile or a different credential — switch, send, compare.
+- **Chat mode does not answer tool calls.** If the model asks for one, the turn
+  is recorded as it came, tool call included, and the panel says so: most
+  endpoints refuse the next turn until that call has a result. Providing it is
+  what [agent mode](#agent-mode) is. Agent mode reads the same conversation and
+  appends the answer it finished on, so the two modes share one history rather
+  than each keeping their own.
 
 ## A stack to point it at
 
@@ -816,6 +853,12 @@ Agent mode is not a third payload format and not a second profile. It is the sam
 `kind: chat` profile, run in a loop: render, call, decode; if the stop condition
 is not met, answer the tool calls with their simulated results, feed them back,
 go round again. `POST /api/call` runs one turn of exactly the same thing.
+
+It starts from the same [conversation](#having-a-conversation) chat mode built,
+and when it stops it appends the answer it finished on. The turns in between —
+the tool calls and their results — stay in the trace: they are what the run was
+about, and replaying them into the next request without their results is how you
+get a `400` from an endpoint that was working fine.
 
 ```yaml
 agent:
