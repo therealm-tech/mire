@@ -191,17 +191,19 @@ that never had the tab open. A server-side conversation would turn that button
 into a lie.
 
 So the transcript is not a log *of* the `messages` array — it **is** the array,
-laid out. Every turn keeps its **Remove**, because editing the history is the
-point: dropping the model's last answer and asking again is how you find out
-whether it only said that because it had already said it. **New conversation**
-clears the lot.
+laid out. The last turn keeps a **Retry**, because asking again is the point:
+dropping the model's last answer and putting the question back on the wire is
+how you find out whether it only said that because it had already said it.
+**New conversation** clears the lot.
 
 Three things follow, each of which is a decision:
 
-- **An empty box resends the conversation unchanged.** After removing a turn,
-  that is how you replay it. It is also how you ask the same history of a
-  different profile — and since the identity is the profile's, that is how you
-  ask it as somebody else too: switch, send, compare.
+- **Only the last turn can be run again, and an empty box sends nothing.**
+  **Retry** on an answer drops it and asks the question underneath it again;
+  **Retry** on a question — which is what a failed call leaves behind — sends it
+  as it stands. Either way whatever followed it goes too, and **Send** stays
+  greyed out until there is something to say, so no request ever leaves without
+  the transcript showing what it carried.
 - **Only the answer the run finished on rejoins the history.** The tool calls in
   between and their results stay out of it: replaying them into the next request
   without their results is how you get a `400` from an endpoint that was working
@@ -212,8 +214,8 @@ Three things follow, each of which is a decision:
   bubble, because most endpoints refuse the next turn until it has a result.
 - **Nothing waits for the endpoint.** The question appears the moment you press
   Enter, tool calls appear as the loop makes them, streamed text appears as it
-  arrives. A call that fails leaves the question in the history, so an empty box
-  and a second **Send** is the retry.
+  arrives. A call that fails leaves the question in the history, which is
+  exactly what **Retry** picks back up.
 
 ### Reading the traffic
 

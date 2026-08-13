@@ -12,9 +12,11 @@ import { Badge, Panel } from './primitives'
  * answer on the left, and the tool calls a run made in between sit where they
  * happened rather than in a panel somewhere else.
  *
- * Editing the history is still the point, so every turn keeps its **Remove**.
- * Dropping the model's last answer and asking again is how you find out whether
- * it only said that because it had already said it.
+ * The last turn keeps a **Retry**, and only the last one: a call that failed
+ * left the question in the transcript, and pressing **Send** on an empty box to
+ * get it out again is a thing nobody guessed. On a question it asks it again; on
+ * an answer it drops that answer first, which is how you find out whether the
+ * model only said that because it had already said it.
  */
 export function ChatPanel({
   items,
@@ -27,7 +29,7 @@ export function ChatPanel({
   onMaxIterations,
   onSend,
   onStream,
-  onRemove,
+  onRetry,
   onReset,
 }: {
   items: ChatItem[]
@@ -41,11 +43,15 @@ export function ChatPanel({
   onMaxIterations: (value: number) => void
   onSend: () => void
   onStream: () => void
-  onRemove: (id: string) => void
+  onRetry: (id: string) => void
   onReset: () => void
 }) {
   const positions = messagePositions(items)
   const turns = positions.size
+
+  // Only the last turn can be asked again: anything earlier has answers after
+  // it, and re-running from the middle would silently drop them.
+  const last = [...items].reverse().find((item) => item.kind === 'message')?.id ?? null
 
   // Following the answer as it is written is the whole reason this is a
   // transcript rather than a list, so the view keeps its end in sight.
@@ -95,7 +101,7 @@ export function ChatPanel({
                 message={item.message}
                 position={positions.get(item.id) ?? 0}
                 busy={busy}
-                onRemove={() => onRemove(item.id)}
+                {...(item.id === last ? { onRetry: () => onRetry(item.id) } : {})}
               />
             ) : item.kind === 'activity' ? (
               <Activity key={item.id} turn={item.turn} tools={item.tools} />
@@ -156,12 +162,13 @@ function Bubble({
   message,
   position,
   busy,
-  onRemove,
+  onRetry,
 }: {
   message: Message
   position: number
   busy: boolean
-  onRemove: () => void
+  /** Absent on every turn but the last, which is the only one that can be run again. */
+  onRetry?: () => void
 }) {
   const mine = message.role === 'user'
   const aside = message.role === 'system' || message.role === 'tool'
@@ -172,15 +179,22 @@ function Bubble({
         <span className="text-stone-500 text-xs dark:text-stone-400">
           {ROLE_LABELS[message.role]}
         </span>
-        <button
-          type="button"
-          disabled={busy}
-          onClick={onRemove}
-          aria-label={`Remove turn ${position}`}
-          className="text-stone-400 text-xs disabled:opacity-50 hover:text-stone-700 hover:underline dark:hover:text-stone-200"
-        >
-          Remove
-        </button>
+        {onRetry === undefined ? null : (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onRetry}
+            aria-label={`Retry turn ${position}`}
+            title={
+              mine
+                ? 'Send the conversation again, ending on this message.'
+                : 'Drop this answer and ask the same question again.'
+            }
+            className="text-stone-400 text-xs disabled:opacity-50 hover:text-stone-700 hover:underline dark:hover:text-stone-200"
+          >
+            Retry
+          </button>
+        )}
       </div>
 
       <div
@@ -213,8 +227,8 @@ function Bubble({
             ))}
             <p className="text-amber-700 text-xs dark:text-amber-500">
               Nothing answered this call — the run stopped on it, or it came back from a stream,
-              which does not loop. Most endpoints refuse the next turn until it has a result: remove
-              it to ask again.
+              which does not loop. Most endpoints refuse the next turn until it has a result:
+              <strong> Retry</strong> drops this turn and asks again.
             </p>
           </div>
         ) : null}
@@ -313,6 +327,10 @@ function Composer({
   onSend: () => void
   onStream: () => void
 }) {
+  // An empty box is nothing to say, not an instruction to send the history
+  // again — that is what **Retry** is for, and it says which turn it repeats.
+  const empty = prompt.trim().length === 0
+
   return (
     <div className="space-y-2 border-stone-200 border-t pt-3 dark:border-stone-800">
       <textarea
@@ -323,7 +341,7 @@ function Composer({
           // Enter sends, Shift+Enter starts a line — which is what everybody's
           // fingers already do. The modifier still sends, for the pasted system
           // prompt that arrives with its own newlines.
-          if (event.key !== 'Enter' || busy) {
+          if (event.key !== 'Enter' || busy || empty) {
             return
           }
           if (event.shiftKey) {
@@ -336,7 +354,7 @@ function Composer({
         placeholder={
           turns === 0
             ? 'Ask something. Enter sends, Shift+Enter starts a line.'
-            : 'Leave empty to resend the conversation unchanged'
+            : 'Ask something else, or retry the last turn above.'
         }
         className="w-full resize-y rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm dark:border-stone-700 dark:bg-stone-950"
       />
@@ -344,7 +362,7 @@ function Composer({
       <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
-          disabled={busy}
+          disabled={busy || empty}
           onClick={onSend}
           className="rounded-lg bg-stone-900 px-4 py-1.5 font-medium text-sm text-stone-50 disabled:opacity-50 dark:bg-stone-100 dark:text-stone-900"
           title="Run the profile in a loop, answering its tools. A profile with none stops on turn one."
@@ -353,7 +371,7 @@ function Composer({
         </button>
         <button
           type="button"
-          disabled={busy}
+          disabled={busy || empty}
           onClick={onStream}
           className="rounded-lg border border-stone-300 px-3 py-1.5 text-sm disabled:opacity-50 dark:border-stone-700"
           title="One turn, read chunk by chunk. Tool calls do not reassemble in a stream, so this one does not loop."

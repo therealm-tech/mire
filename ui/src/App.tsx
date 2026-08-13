@@ -266,11 +266,10 @@ export function App() {
   /**
    * The turn about to be sent, appended to what came before.
    *
-   * A blank box is not an empty turn: it means "send the conversation as it
-   * stands", which is how you retry a turn after removing one, or ask the same
-   * history of a different profile. The question joins the transcript straight
-   * away rather than when the answer lands — waiting for the endpoint to say
-   * something before showing what was asked is how a chat window feels broken.
+   * The question joins the transcript straight away rather than when the answer
+   * lands — waiting for the endpoint to say something before showing what was
+   * asked is how a chat window feels broken. Sending the history as it stands is
+   * **Retry**'s job, not an empty box's.
    */
   const ask = useCallback((): Message[] => {
     const text = prompt.trim()
@@ -343,79 +342,112 @@ export function App() {
   }, [profile, token, ask])
 
   /**
-   * A chat profile, run in a loop. This is what **Send** does, whether or not the
-   * profile declares a single tool: a profile with nothing to call stops on turn
-   * one, which is the same one turn a plain call would have made.
+   * A chat profile, run in a loop over the history it is handed. This is what
+   * **Send** and **Retry** both do, whether or not the profile declares a single
+   * tool: a profile with nothing to call stops on turn one, which is the same one
+   * turn a plain call would have made.
+   *
+   * It takes the history rather than reading it, because **Retry** shortens the
+   * timeline and then runs it in the same breath — and `setTimeline` has not
+   * landed by then.
    */
-  const send = useCallback(() => {
-    if (!profile) {
-      return
-    }
-    setBusy(true)
-    setCallError(null)
-    setLive(null)
-    setEmbedding(null)
-
-    const sent = ask()
-    const body: AgentRequest = {
-      profile: profile.name,
-      messages: sent,
-      maxIterations,
-    }
-    if (token.length > 0) {
-      body.token = token
-    }
-    // Left out entirely on auto: the field's absence is what tells the server to
-    // settle the revision itself, and sending a value it worked out anyway would
-    // be a second opinion nobody asked for.
-    if (mcpProtocol !== null) {
-      body.mcpProtocol = mcpProtocol
-    }
-
-    runAgent(body, (event) => {
-      switch (event.event) {
-        case 'setup':
-          // Before the first turn, because that is when it happened: a run that
-          // never got past `initialize` has no turn to hang the reason off.
-          setExchanges((current) => [...current, ...setupExchanges(event.mcp)])
-          break
-        case 'turn':
-          // Everything the turn put on a wire, in the order it left: the model
-          // call, then each tool that answered it.
-          setExchanges((current) => [...current, ...turnExchanges(event)])
-          if (event.tools.length > 0) {
-            setTimeline((current) => [...current, activityItem(event)])
-          }
-          break
-        case 'done': {
-          // Only the answer it finished on rejoins the history. The turns in
-          // between are tool calls and their results; they are in the traffic
-          // below, and replaying them without the results would break the next
-          // call.
-          const last = event.turns.at(-1)
-          const answer = last ? assistantTurn(last.call) : null
-          setTimeline((current) => [
-            ...current,
-            ...(answer ? [messageItem(answer)] : []),
-            verdictItem(event),
-          ])
-          logger.info('agent.done', { turns: event.turns.length, stop: event.stop.outcome })
-          break
-        }
-        case 'failed':
-          setCallError(new ApiError(500, { code: event.code, message: event.message }))
-          break
+  const runChat = useCallback(
+    (sent: Message[]) => {
+      if (!profile) {
+        return
       }
-    })
-      .catch((error: unknown) => {
-        if (error instanceof ApiError) {
-          setCallError(error)
-        } else {
-          logger.error('agent.failed', { message: String(error) })
+      setBusy(true)
+      setCallError(null)
+      setLive(null)
+      setEmbedding(null)
+
+      const body: AgentRequest = {
+        profile: profile.name,
+        messages: sent,
+        maxIterations,
+      }
+      if (token.length > 0) {
+        body.token = token
+      }
+      // Left out entirely on auto: the field's absence is what tells the server
+      // to settle the revision itself, and sending a value it worked out anyway
+      // would be a second opinion nobody asked for.
+      if (mcpProtocol !== null) {
+        body.mcpProtocol = mcpProtocol
+      }
+
+      runAgent(body, (event) => {
+        switch (event.event) {
+          case 'setup':
+            // Before the first turn, because that is when it happened: a run
+            // that never got past `initialize` has no turn to hang the reason
+            // off.
+            setExchanges((current) => [...current, ...setupExchanges(event.mcp)])
+            break
+          case 'turn':
+            // Everything the turn put on a wire, in the order it left: the model
+            // call, then each tool that answered it.
+            setExchanges((current) => [...current, ...turnExchanges(event)])
+            if (event.tools.length > 0) {
+              setTimeline((current) => [...current, activityItem(event)])
+            }
+            break
+          case 'done': {
+            // Only the answer it finished on rejoins the history. The turns in
+            // between are tool calls and their results; they are in the traffic
+            // below, and replaying them without the results would break the next
+            // call.
+            const last = event.turns.at(-1)
+            const answer = last ? assistantTurn(last.call) : null
+            setTimeline((current) => [
+              ...current,
+              ...(answer ? [messageItem(answer)] : []),
+              verdictItem(event),
+            ])
+            logger.info('agent.done', { turns: event.turns.length, stop: event.stop.outcome })
+            break
+          }
+          case 'failed':
+            setCallError(new ApiError(500, { code: event.code, message: event.message }))
+            break
         }
       })
-      .finally(() => setBusy(false))
-  }, [profile, token, maxIterations, mcpProtocol, ask])
+        .catch((error: unknown) => {
+          if (error instanceof ApiError) {
+            setCallError(error)
+          } else {
+            logger.error('agent.failed', { message: String(error) })
+          }
+        })
+        .finally(() => setBusy(false))
+    },
+    [profile, token, maxIterations, mcpProtocol],
+  )
+
+  const send = useCallback(() => runChat(ask()), [runChat, ask])
+
+  /**
+   * That turn again, and nothing after it.
+   *
+   * A question is asked again as it stands — which is the whole point when the
+   * call failed and left it sitting there unanswered. An answer is dropped
+   * first, since asking again with it still in the history would only be asking
+   * the model to agree with itself. Either way whatever followed it goes too:
+   * the verdict of the run being replaced is no longer about anything.
+   */
+  const retry = useCallback(
+    (id: string) => {
+      const index = timeline.findIndex((item) => item.id === id)
+      const item = timeline[index]
+      if (item?.kind !== 'message') {
+        return
+      }
+      const kept = timeline.slice(0, item.message.role === 'user' ? index + 1 : index)
+      setTimeline(kept)
+      runChat(wireMessages(kept))
+    },
+    [timeline, runChat],
+  )
 
   const reset = useCallback(() => {
     setTimeline([])
@@ -547,7 +579,7 @@ export function App() {
               onMaxIterations={setMaxIterations}
               onSend={send}
               onStream={stream}
-              onRemove={(id) => setTimeline((current) => current.filter((item) => item.id !== id))}
+              onRetry={retry}
               onReset={reset}
             />
           ) : null}

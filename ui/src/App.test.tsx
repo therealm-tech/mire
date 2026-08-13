@@ -472,6 +472,7 @@ describe('App', () => {
     // Back to auto, and the field goes away entirely: its absence is what tells
     // the server to settle the revision itself.
     await user.selectOptions(screen.getByLabelText('Protocol'), '')
+    await user.type(screen.getByRole('textbox', { name: /message/i }), 'again')
     await user.click(screen.getByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(2))
 
@@ -984,6 +985,7 @@ describe('traffic', () => {
       expect(within(panel('Traffic')).getByText('1 exchange')).toBeInTheDocument()
     })
 
+    await user.type(screen.getByRole('textbox', { name: /message/i }), 'again')
     await user.click(screen.getByRole('button', { name: 'Send' }))
     await waitFor(() => {
       expect(within(panel('Traffic')).getByText('2 exchanges')).toBeInTheDocument()
@@ -1363,7 +1365,28 @@ describe('conversation', () => {
     expect(sent[0]?.messages).toEqual([{ role: 'user', content: 'one\ntwo' }])
   })
 
-  it('drops a turn that is removed, and sends what is left', async () => {
+  it('refuses to send an empty box, so nothing goes out unseen', async () => {
+    const { fetchMock, sent } = recordingApi(['pong'])
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await type(user, 'one')
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(sent).toHaveLength(1))
+
+    // The box empties itself on send, and what is left cannot be sent again by
+    // pressing the same button: that used to resend the whole conversation with
+    // nothing on screen to say it had.
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Stream' })).toBeDisabled()
+
+    await user.type(screen.getByRole('textbox', { name: /message/i }), '{Enter}')
+    expect(sent).toHaveLength(1)
+  })
+
+  it('asks the last answer again without it, and offers that on no other turn', async () => {
     const { fetchMock, sent } = recordingApi(['first answer', 'second answer'])
     vi.stubGlobal('fetch', fetchMock)
 
@@ -1374,18 +1397,58 @@ describe('conversation', () => {
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(1))
 
-    // Removing the model's answer asks the far more interesting question:
-    // does it still say that if it never said it the first time?
-    await user.click(await screen.findByRole('button', { name: 'Remove turn 2' }))
+    // Only the answer, which is the last turn — the question underneath it has
+    // an answer after it, and re-running from there would drop one silently.
+    expect(screen.queryByRole('button', { name: 'Retry turn 1' })).not.toBeInTheDocument()
 
-    await type(user, 'two')
-    await user.click(screen.getByRole('button', { name: 'Send' }))
+    // Asking again without the answer is the far more interesting question:
+    // does it still say that if it never said it the first time?
+    await user.click(await screen.findByRole('button', { name: 'Retry turn 2' }))
     await waitFor(() => expect(sent).toHaveLength(2))
 
-    expect(sent[1]?.messages).toEqual([
-      { role: 'user', content: 'one' },
-      { role: 'user', content: 'two' },
-    ])
+    expect(sent[1]?.messages).toEqual([{ role: 'user', content: 'one' }])
+    await waitFor(() => {
+      expect(within(panel('Conversation')).getByText('second answer')).toBeInTheDocument()
+    })
+    expect(within(panel('Conversation')).queryByText('first answer')).not.toBeInTheDocument()
+  })
+
+  it('sends the last question again when the call it made failed', async () => {
+    const sent: Array<Record<string, unknown>> = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input)
+        if (url.endsWith('api/profiles')) return Promise.resolve(Response.json(PROFILES))
+        if (url.endsWith('api/auth')) return Promise.resolve(Response.json(AUTH))
+        if (url.endsWith('api/mcp')) return Promise.resolve(Response.json(MCP))
+        sent.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+        // Fails the first time, answers the second: exactly the case Retry is
+        // there for.
+        return Promise.resolve(
+          sent.length === 1
+            ? Response.json({ code: 'upstream', message: 'the endpoint refused' }, { status: 502 })
+            : sse(agentStream([answerTurn(200, 'pong')])),
+        )
+      }),
+    )
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await type(user, 'one')
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(screen.getByText('the endpoint refused')).toBeInTheDocument())
+
+    // The question stayed on screen, so the retry is on it rather than on an
+    // answer nobody got.
+    await user.click(screen.getByRole('button', { name: 'Retry turn 1' }))
+    await waitFor(() => expect(sent).toHaveLength(2))
+
+    expect(sent[1]?.messages).toEqual([{ role: 'user', content: 'one' }])
+    const conversation = within(panel('Conversation'))
+    expect(conversation.getAllByText('one')).toHaveLength(1)
+    await waitFor(() => expect(conversation.getByText('pong')).toBeInTheDocument())
   })
 
   it('starts over when the conversation is reset', async () => {
