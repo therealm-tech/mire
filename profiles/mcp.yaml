@@ -39,7 +39,9 @@ servers:
   # Reach for it when the version is the thing under test rather than a detail:
   # pinning one the server refuses gets you the refusal, which is the answer you
   # were looking for. Declare the same URL under several pins and you can say
-  # exactly which revisions your endpoint accepts.
+  # exactly which revisions your endpoint accepts. For a one-off, the UI's
+  # Protocol dropdown asks the same question for a single run without touching
+  # this file; a pin here is the one you want to keep.
   #
   # - name: dev-on-the-old-one
   #   url: http://127.0.0.1:11437/mcp

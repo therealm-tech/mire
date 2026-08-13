@@ -93,6 +93,13 @@ pub struct AuthResponse {
 pub struct McpResponse {
     /// Declared servers.
     pub servers: Vec<crate::mcp::registry::McpDescriptor>,
+    /// Every revision this build speaks, newest first.
+    ///
+    /// Here so that a client offering the choice does not have to keep its own
+    /// copy of the list: what `mire` can speak is `mire`'s to say, and a UI that
+    /// hard-codes it is a UI that offers a revision the server was never built
+    /// with the day one is added or dropped.
+    pub revisions: Vec<crate::mcp::Revision>,
     /// Entries of `mcp.yaml` that did not load.
     pub issues: Vec<LoadIssue>,
 }
@@ -418,6 +425,16 @@ pub struct AgentRequest {
     #[serde(default)]
     #[validate(range(min = 1, max = 50))]
     pub max_iterations: Option<u32>,
+
+    /// Revision to speak to every MCP server this run touches.
+    ///
+    /// Omit it — the default — and each server settles its own the way it always
+    /// did: `protocol_version:` from `mcp.yaml` when it has one, the negotiation
+    /// otherwise. Naming one here overrides both, for this run only, which is
+    /// what makes "does my endpoint still work on `2025-03-26`?" a question you
+    /// answer by asking rather than by editing a file.
+    #[serde(default)]
+    pub mcp_protocol: Option<crate::mcp::Revision>,
 }
 
 impl From<AgentRequest> for AgentInput {
@@ -425,6 +442,7 @@ impl From<AgentRequest> for AgentInput {
         Self {
             call: request.call.into(),
             max_iterations: request.max_iterations,
+            mcp_protocol: request.mcp_protocol,
         }
     }
 }

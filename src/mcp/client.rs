@@ -131,6 +131,33 @@ impl McpClient {
         }
     }
 
+    /// The same server, told which revision to speak.
+    ///
+    /// `None` changes nothing, which is what "auto" means: the server keeps its
+    /// own decision — negotiation, or the `protocol_version:` its entry pinned.
+    ///
+    /// A revision, unlike a journal, gets a *fresh* settled state rather than the
+    /// shared one. Both directions matter: a revision chosen for one run must not
+    /// become the revision every other run is speaking, and what the registry's
+    /// client negotiated earlier must not decide this one either. That costs a
+    /// handshake per run on the revisions that have one — which is the traffic you
+    /// asked to see by choosing the revision in the first place.
+    #[must_use]
+    pub fn speaking(&self, revision: Option<Revision>) -> Self {
+        let Some(revision) = revision else {
+            return self.clone();
+        };
+
+        Self {
+            server: McpServer {
+                protocol_version: Some(revision),
+                ..self.server.clone()
+            },
+            session: Arc::new(RwLock::new(None)),
+            ..self.clone()
+        }
+    }
+
     /// Files one exchange, if anybody is collecting.
     ///
     /// A poisoned journal is dropped rather than propagated: the recording is not
@@ -1307,5 +1334,46 @@ mod tests {
         server.tools = vec!["read_file".to_owned()];
         assert!(server.offers("read_file"));
         assert!(!server.offers("delete_everything"));
+    }
+
+    #[tokio::test]
+    async fn a_stated_revision_is_this_clients_business_and_nobody_elses() {
+        let client = McpClient::new(
+            McpServer {
+                name: "fs".to_owned(),
+                url: Url::parse("https://mcp.internal/mcp").unwrap(),
+                auth: None,
+                tools: Vec::new(),
+                headers: HeaderTemplates::default(),
+                timeout: Duration::from_secs(30),
+                protocol_version: None,
+            },
+            Client::new(),
+        );
+        *client.session.write().await = Some(Session::sessionless(
+            Revision::LATEST,
+            negotiate::Settled::Discovered,
+        ));
+
+        // Auto is not a choice: the same server, still settled on what it
+        // negotiated.
+        let auto = client.speaking(None);
+        assert_eq!(auto.server().protocol_version, None);
+        assert_eq!(
+            auto.settled().await.map(|session| session.revision),
+            Some(Revision::LATEST)
+        );
+
+        // A stated revision starts from nothing rather than inheriting whatever
+        // some earlier caller settled on…
+        let stated = client.speaking(Some(Revision::V20250326));
+        assert_eq!(stated.server().protocol_version, Some(Revision::V20250326));
+        assert!(stated.settled().await.is_none());
+
+        // …and what it settles stays its own.
+        assert_eq!(
+            client.settled().await.map(|session| session.revision),
+            Some(Revision::LATEST)
+        );
     }
 }

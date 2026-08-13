@@ -708,6 +708,25 @@ you can say exactly which revisions your endpoint accepts. An unknown one is a
 load issue naming what this build speaks, reported at startup like every other
 bad entry, without taking the rest of the file down.
 
+#### Or choose it per run
+
+Editing a file, restarting and putting it back is a lot of ceremony for one
+question. The **Protocol** dropdown above the MCP servers in the UI asks it
+directly, and `POST /api/agent` takes the same thing:
+
+```json
+{ "profile": "chat", "prompt": "weather in Paris?", "mcpProtocol": "2025-03-26" }
+```
+
+`auto` — the default, and the field simply left out — is the negotiation as
+described above, with `protocol_version:` still in charge where a server declares
+one. Naming a revision overrides both, for that run and no other: it applies to
+every server the profile reaches (one trace speaking two revisions is a result
+nobody can attribute), it is stated rather than probed for, and it leaves the
+revision every other caller is speaking exactly where it was. `mcp.yaml` remains
+the place for a pin you want to keep. A revision this build does not speak is a
+`422` before anything is sent, and `GET /api/mcp` lists the ones it does.
+
 A session that the server has forgotten — a restart, an expiry, a different
 replica — comes back as a `404` to a request that carried one. `mire` handshakes
 again and replays the call once, so you see the listing rather than the

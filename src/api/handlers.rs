@@ -26,7 +26,7 @@ use crate::auth::{Auth, AuthError, CALLBACK_PATH, OidcBrowserAuth};
 use crate::config::Config;
 use crate::error::ApiError;
 use crate::exec::{CallInput, CallOutcome};
-use crate::mcp::{McpCredentials, McpError};
+use crate::mcp::{McpCredentials, McpError, Revision};
 use crate::profile::{Profile, ProfileKind};
 
 /// Liveness probe. Deliberately outside the `OpenAPI` document.
@@ -413,6 +413,9 @@ pub async fn list_mcp(State(state): State<AppState>) -> Json<McpResponse> {
     let config = state.runner.config().snapshot();
     Json(McpResponse {
         servers: config.mcp.descriptors().to_vec(),
+        // Newest first: that is the one a reader is looking for, and the one a
+        // selector should list at the top.
+        revisions: Revision::ALL.iter().rev().copied().collect(),
         issues: config.mcp.issues().to_vec(),
     })
 }

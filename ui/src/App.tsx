@@ -23,6 +23,7 @@ import { ChatPanel } from './components/ChatPanel'
 import { EmbeddingPanel } from './components/EmbeddingPanel'
 import { EmbeddingRequest } from './components/EmbeddingRequest'
 import { McpAuth } from './components/McpAuth'
+import { McpProtocol } from './components/McpProtocol'
 import { ModelAuth } from './components/ModelAuth'
 import { ProfileList } from './components/ProfileList'
 import { Panel, Spinner } from './components/primitives'
@@ -127,6 +128,8 @@ export function App() {
   const [includeVectors, setIncludeVectors] = useState(false)
 
   const [maxIterations, setMaxIterations] = useState(6)
+  // `null` is auto: every server settles its own revision the way it always did.
+  const [mcpProtocol, setMcpProtocol] = useState<string | null>(null)
 
   const [signingIn, setSigningIn] = useState<string | null>(null)
   // Carries the provider, because two places can start a login now and an error
@@ -362,6 +365,12 @@ export function App() {
     if (token.length > 0) {
       body.token = token
     }
+    // Left out entirely on auto: the field's absence is what tells the server to
+    // settle the revision itself, and sending a value it worked out anyway would
+    // be a second opinion nobody asked for.
+    if (mcpProtocol !== null) {
+      body.mcpProtocol = mcpProtocol
+    }
 
     runAgent(body, (event) => {
       switch (event.event) {
@@ -406,7 +415,7 @@ export function App() {
         }
       })
       .finally(() => setBusy(false))
-  }, [profile, token, maxIterations, ask])
+  }, [profile, token, maxIterations, mcpProtocol, ask])
 
   const reset = useCallback(() => {
     setTimeline([])
@@ -475,6 +484,17 @@ export function App() {
               <h3 className="font-semibold text-stone-600 text-xs dark:text-stone-400">
                 MCP servers
               </h3>
+              {/*
+                Above the servers rather than on each one: the revision is a
+                property of the run, and one trace speaking two of them is a
+                result nobody could attribute.
+              */}
+              <McpProtocol
+                revisions={mcp.revisions}
+                selected={mcpProtocol}
+                disabled={busy}
+                onSelect={setMcpProtocol}
+              />
               <McpAuth
                 names={profile.mcp}
                 servers={mcp.servers}

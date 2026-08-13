@@ -3636,6 +3636,13 @@ async fn the_api_lists_servers_and_asks_one_what_it_offers() {
     assert_eq!(listing["servers"][0]["tools"][0], "get_weather");
     assert!(listing["issues"].as_array().unwrap().is_empty());
 
+    // What this build speaks, newest first, so a client offering the choice does
+    // not have to keep its own copy of the list.
+    assert_eq!(
+        listing["revisions"],
+        json!(["2026-07-28", "2025-06-18", "2025-03-26"])
+    );
+
     let tools = harness.get("/api/mcp/weather/tools").await;
     assert_eq!(tools["server"], "weather");
     assert_eq!(tools["tools"][0]["name"], "get_weather");
@@ -3845,6 +3852,141 @@ async fn a_pinned_revision_is_used_without_asking_anybody() {
             body.contains("server/discover") || body.contains("\"initialize\"")
         });
     assert!(!probed, "a pinned revision must not negotiate");
+}
+
+#[tokio::test]
+async fn a_run_can_state_its_revision_and_it_beats_both_the_file_and_the_probe() {
+    // The point of the knob: this server speaks `2025-06-18` and the file pins
+    // the revision it does not speak. Nothing on disk changes — the run says
+    // which one it wants, and that is the one that goes out.
+    let mcp = legacy_mcp_server("2025-06-18").await;
+    let endpoint = MockServer::start().await;
+    model_using_a_tool(&endpoint).await;
+
+    let harness = Harness::start(&[
+        (
+            "mcp.yaml",
+            format!(
+                "servers:\n  - name: weather\n    url: {}/mcp\n    protocol_version: 2026-07-28\n",
+                mcp.uri()
+            ),
+        ),
+        (
+            "chat.yaml",
+            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+        ),
+    ])
+    .await;
+
+    let (status, events) = harness
+        .agent(json!({
+            "profile": "chat",
+            "prompt": "weather in Paris?",
+            "mcpProtocol": "2025-06-18",
+        }))
+        .await;
+    assert_eq!(status, 200);
+
+    // The tool really ran, which it could not have on the pinned revision.
+    let turns: Vec<_> = events.iter().filter(|(name, _)| name == "turn").collect();
+    assert_eq!(turns[0].1["tools"][0]["source"], "mcp");
+    assert!(
+        turns[0].1["tools"][0]["result"]
+            .as_str()
+            .unwrap()
+            .contains("21")
+    );
+
+    // Everything the run said went out on the stated revision, setup included.
+    let setup = events
+        .iter()
+        .find(|(name, _)| name == "setup")
+        .expect("the handshake is traffic worth seeing");
+    for exchange in setup.1["mcp"].as_array().unwrap() {
+        assert_eq!(exchange["revision"], "2025-06-18", "{exchange}");
+    }
+    assert!(
+        setup.1["mcp"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|exchange| exchange["method"] == "initialize"),
+    );
+
+    // A stated revision is a statement, like a pin: nothing was probed for it.
+    let requests = mcp.received_requests().await.expect("requests");
+    assert!(
+        !requests
+            .iter()
+            .any(|request| String::from_utf8_lossy(&request.body).contains("server/discover")),
+        "a stated revision must not negotiate"
+    );
+
+    // And one handshake covers the run: the listing and the call share a client,
+    // rather than each tool call introducing itself again.
+    let handshakes = requests
+        .iter()
+        .filter(|request| String::from_utf8_lossy(&request.body).contains("\"initialize\""))
+        .count();
+    assert_eq!(handshakes, 1, "one handshake per run, not per call");
+}
+
+#[tokio::test]
+async fn a_revision_chosen_for_one_run_is_not_chosen_for_the_next() {
+    // The choice covers exactly one run. If it leaked into the registry's own
+    // client, this listing would come back `pinned` — and every other caller
+    // would silently be speaking somebody else's revision.
+    let mcp = legacy_mcp_server("2025-06-18").await;
+    let endpoint = MockServer::start().await;
+    model_using_a_tool(&endpoint).await;
+
+    let harness = Harness::start(&[
+        (
+            "mcp.yaml",
+            format!("servers:\n  - name: weather\n    url: {}/mcp\n", mcp.uri()),
+        ),
+        (
+            "chat.yaml",
+            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+        ),
+    ])
+    .await;
+
+    let (status, _) = harness
+        .agent(json!({"profile": "chat", "prompt": "go", "mcpProtocol": "2025-06-18"}))
+        .await;
+    assert_eq!(status, 200);
+
+    let answer = harness.get("/api/mcp/weather/tools").await;
+    assert_eq!(answer["protocol"]["revision"], "2025-06-18");
+    assert_eq!(answer["protocol"]["settled"], "handshake");
+}
+
+#[tokio::test]
+async fn a_revision_this_build_never_heard_of_is_refused_before_anything_is_sent() {
+    let mcp = mcp_server(weather_tool(), vec![]).await;
+    let endpoint = MockServer::start().await;
+    model_using_a_tool(&endpoint).await;
+
+    let harness = Harness::start(&[
+        (
+            "mcp.yaml",
+            format!("servers:\n  - name: weather\n    url: {}/mcp\n", mcp.uri()),
+        ),
+        (
+            "chat.yaml",
+            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+        ),
+    ])
+    .await;
+
+    let (status, events) = harness
+        .agent(json!({"profile": "chat", "prompt": "go", "mcpProtocol": "1999-01-01"}))
+        .await;
+
+    assert_eq!(status, 422);
+    assert!(events.is_empty(), "a bad revision should not open a stream");
+    assert!(mcp.received_requests().await.expect("requests").is_empty());
 }
 
 #[tokio::test]

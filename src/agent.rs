@@ -20,7 +20,7 @@
 //! `max_iterations` and look like a slow agent. It is not — the configured
 //! predicate could never be evaluated even once, and that is what gets reported.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::time::{Duration, Instant};
 
 use jsonschema::Validator;
@@ -33,7 +33,7 @@ use tracing::{debug, info, warn};
 use crate::config::Config;
 use crate::decode::Decoded;
 use crate::exec::{CallInput, CallOutcome, ExecError, Runner};
-use crate::mcp::{McpCredentials, McpError, McpExchange, McpJournal, McpTool};
+use crate::mcp::{McpClient, McpCredentials, McpError, McpExchange, McpJournal, McpTool, Revision};
 use crate::message::{Message, Role, ToolCall};
 use crate::profile::{AgentSpec, Profile, ProfileKind, StopWhen, ToolResponse, ToolSpec};
 use crate::script::ScriptError;
@@ -220,6 +220,14 @@ pub struct AgentInput {
     pub call: CallInput,
     /// Turn budget, overriding the profile's.
     pub max_iterations: Option<u32>,
+    /// Revision to speak to every MCP server this run touches, overriding both
+    /// the negotiation and any `protocol_version:` in `mcp.yaml`.
+    ///
+    /// `None` is the negotiation as it stands. Set it when the revision is what
+    /// you are testing and you would rather not edit a file between two runs —
+    /// the answer a server gives on `2025-03-26` is a different fact from the one
+    /// it gives on `2026-07-28`, and both are worth a button.
+    pub mcp_protocol: Option<Revision>,
 }
 
 /// Why an agent run could not be performed at all.
@@ -470,6 +478,13 @@ struct Tools {
     validators: Vec<(String, Option<Validator>)>,
     live: Vec<McpTool>,
     config: std::sync::Arc<Config>,
+    /// This run's client per server, keyed by registry name.
+    ///
+    /// Built once, in [`prepare`], and reused for every call the loop makes.
+    /// Looking one up again per tool call would be a second client with a second
+    /// settled state — and on a run that chose its revision, a second handshake
+    /// before every single tool.
+    clients: BTreeMap<String, McpClient>,
     /// This run's MCP traffic, drained into each turn as it completes.
     journal: McpJournal,
 }
@@ -518,16 +533,21 @@ async fn prepare(runner: &Runner, input: &mut AgentInput) -> Result<Prepared, Ag
     let journal: McpJournal = McpJournal::default();
 
     let mut live = Vec::new();
+    let mut clients = BTreeMap::new();
     for server in &profile.mcp {
+        // The client this run will use for everything it says to this server:
+        // the revision it was told to speak, and the journal it is recorded in.
         let client = config
             .mcp
             .get(server)
             .ok_or_else(|| McpError::UnknownServer(server.clone()))?
+            .speaking(input.mcp_protocol)
             .recording(journal.clone());
         let credentials = McpCredentials::resolve(&config.registry, client.server()).await?;
         let listed = client.list_tools(&credentials).await?;
         info!(profile = %profile.name, %server, tools = listed.len(), "MCP tools offered");
         live.extend(listed);
+        clients.insert(server.clone(), client);
     }
 
     let spec = profile.agent.clone().unwrap_or_else(default_spec);
@@ -554,6 +574,7 @@ async fn prepare(runner: &Runner, input: &mut AgentInput) -> Result<Prepared, Ag
             validators,
             live,
             config,
+            clients,
             journal,
         },
         profile,
@@ -806,15 +827,11 @@ async fn live(
 
     let outcome = async {
         let client = tools
-            .config
-            .mcp
+            .clients
             .get(&tool.server)
             .ok_or_else(|| McpError::UnknownServer(tool.server.clone()))?;
         let credentials = McpCredentials::resolve(&tools.config.registry, client.server()).await?;
-        client
-            .recording(tools.journal.clone())
-            .call_tool(tool, &call.arguments, &credentials)
-            .await
+        client.call_tool(tool, &call.arguments, &credentials).await
     }
     .await;
 
@@ -985,6 +1002,7 @@ tools:
             validators: compile_validators(&profile.tools, &[]),
             live: Vec::new(),
             config: std::sync::Arc::new(Config::default()),
+            clients: BTreeMap::new(),
             journal: McpJournal::default(),
             profile,
         }

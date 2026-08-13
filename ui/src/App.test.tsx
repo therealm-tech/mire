@@ -107,6 +107,9 @@ const MCP = {
       usesAuth: ['gateway'],
     },
   ],
+  // What this build speaks, newest first, as the server reports it. The UI keeps
+  // no list of its own.
+  revisions: ['2026-07-28', '2025-06-18', '2025-03-26'],
   issues: [],
 }
 
@@ -428,6 +431,51 @@ describe('App', () => {
 
     // A profile naming a server that `mcp.yaml` never declared says so.
     expect(screen.getByText(/declared in no/)).toBeInTheDocument()
+  })
+
+  it('offers the revisions the server says it speaks, and negotiates by default', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    // Nothing to speak to, nothing to choose.
+    await screen.findByRole('button', { name: /^chat/ })
+    expect(screen.queryByLabelText('Protocol')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /guarded/ }))
+    const protocol = screen.getByLabelText('Protocol')
+
+    // The list comes from `GET /api/mcp` rather than from a copy kept here, so
+    // it cannot offer a revision this build was never taught.
+    expect(
+      within(protocol)
+        .getAllByRole('option')
+        .map((option) => option.textContent),
+    ).toEqual(['auto', '2026-07-28', '2025-06-18', '2025-03-26'])
+    expect(protocol).toHaveValue('')
+    expect(screen.getByText(/Negotiated per server/)).toBeInTheDocument()
+  })
+
+  it('states the chosen revision on the wire and says nothing on auto', async () => {
+    const { fetchMock, sent } = recordingApi(['pong', 'pong'])
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: /guarded/ }))
+    await user.selectOptions(screen.getByLabelText('Protocol'), '2025-03-26')
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(sent).toHaveLength(1))
+
+    expect(sent[0]?.mcpProtocol).toBe('2025-03-26')
+
+    // Back to auto, and the field goes away entirely: its absence is what tells
+    // the server to settle the revision itself.
+    await user.selectOptions(screen.getByLabelText('Protocol'), '')
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(sent).toHaveLength(2))
+
+    expect(sent[1]).not.toHaveProperty('mcpProtocol')
   })
 
   it('switches to the embedding input when an embedding profile is selected', async () => {

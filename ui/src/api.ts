@@ -98,6 +98,14 @@ export const mcpDescriptorSchema = z.object({
 
 export const mcpResponseSchema = z.object({
   servers: z.array(mcpDescriptorSchema),
+  /**
+   * The revisions this build speaks, newest first.
+   *
+   * Read rather than hard-coded: what `mire` can speak is `mire`'s to say, and a
+   * list kept here would offer a revision the server never had the day one is
+   * added or dropped.
+   */
+  revisions: z.array(z.string()),
   issues: z.array(loadIssueSchema),
 })
 
@@ -526,6 +534,14 @@ export function call(body: CallRequest): Promise<CallOutcome> {
 /** One agent run. Mirrors `AgentRequest` on the server. */
 export interface AgentRequest extends CallRequest {
   maxIterations?: number
+  /**
+   * Revision to speak to every MCP server this run touches.
+   *
+   * Left out for `auto`, which is each server settling its own the way it always
+   * did: `protocol_version:` from `mcp.yaml` when it has one, the negotiation
+   * otherwise. Naming one overrides both, for this run alone.
+   */
+  mcpProtocol?: string
 }
 
 /**
