@@ -31,19 +31,7 @@ servers:
   - name: dev
     url: http://127.0.0.1:11436/mcp
     timeout_ms: 15000
-    tools:
-      - get_weather
-
-  # Name them when you are pointing at something that can delete things and you
-  # only meant to read.
-
-  # The same server from docker-compose.yaml, on an older revision. Nothing here
-  # says so: `mire` asks, finds no `server/discover`, falls back to `initialize`,
-  # and carries the session it hands back. Call `/api/mcp/dev-legacy/tools` and
-  # the answer names the revision it settled on and how.
-  - name: dev-legacy
-    url: http://127.0.0.1:11437/mcp
-    timeout_ms: 15000
+    auth: keycloak-user
     tools:
       - get_weather
 
