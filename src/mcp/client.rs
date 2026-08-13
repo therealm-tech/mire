@@ -1,32 +1,45 @@
-//! Streamable HTTP transport for MCP revision `2026-07-28`.
+//! Streamable HTTP transport, for every revision `mire` speaks.
 //!
 //! One `POST` per request, to one endpoint. The answer is either a JSON object or
 //! an SSE stream whose last event carries the response; a client has to accept
-//! both, so both are handled here and collapsed into a single value.
+//! both, so both are handled here and collapsed into a single value. That much is
+//! true of all three revisions, which is why they fit behind one client.
 //!
-//! Two rules from the revision earn most of the code below:
+//! What the revision decides, and the reason [`Revision`] answers questions
+//! instead of being matched on:
 //!
-//! * selected body fields are **mirrored into headers** (`Mcp-Method`,
+//! * **`2026-07-28`** mirrors selected body fields into headers (`Mcp-Method`,
 //!   `Mcp-Name`, and `Mcp-Param-*` for annotated parameters) so intermediaries
 //!   can route without parsing bodies — and the server rejects the request with
-//!   `-32020` if a header and the body disagree;
-//! * a value that cannot be a plain ASCII header is carried base64 in a sentinel
-//!   wrapper, which the server undoes before comparing.
+//!   `-32020` if a header and the body disagree. A value that cannot be a plain
+//!   ASCII header is carried base64 in a sentinel wrapper, which the server undoes
+//!   before comparing. There is no handshake and no session.
+//! * **`2025-06-18`** and **`2025-03-26`** open with `initialize`, carry the
+//!   server's `Mcp-Session-Id` on every later request, and mirror nothing. The
+//!   older of the two predates the `MCP-Protocol-Version` header and is not sent
+//!   one.
+//!
+//! Which of them is in force is settled once per server by [`super::negotiate`]
+//! and cached here.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use reqwest::Client;
+use reqwest::StatusCode;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
+use tokio::sync::RwLock;
 use tracing::{debug, warn};
 use url::Url;
 
 use super::headers::HeaderTemplates;
-use super::{McpError, McpTool, PROTOCOL_VERSION, ToolResult};
+use super::negotiate::{self, Session};
+use super::{McpError, McpTool, Revision, ToolResult};
 use crate::auth::AuthProvider;
 
 use super::McpCredentials;
@@ -34,6 +47,9 @@ use crate::redact::Redactor;
 
 /// Pages of `tools/list` to follow before deciding a server is toying with us.
 const MAX_PAGES: usize = 20;
+
+/// The header carrying a session, on the revisions that have one.
+const SESSION_HEADER: &str = "mcp-session-id";
 
 /// A declared MCP server.
 #[derive(Debug, Clone)]
@@ -52,6 +68,13 @@ pub struct McpServer {
     pub headers: HeaderTemplates,
     /// Per-request timeout.
     pub timeout: Duration,
+    /// Revision to use, skipping negotiation entirely.
+    ///
+    /// `None` — the default — negotiates. Set it when the version is the thing
+    /// under test: pinning one the server refuses produces the refusal, which is
+    /// a legitimate thing to want to see from a tool whose job is to tell you
+    /// what your endpoint does.
+    pub protocol_version: Option<Revision>,
 }
 
 impl McpServer {
@@ -63,23 +86,76 @@ impl McpServer {
 }
 
 /// Talks to one MCP server.
+///
+/// Cloned freely — the registry hands out clones and a configuration reload
+/// rebuilds the lot — so the negotiated state is shared rather than copied.
+/// A reload deliberately drops it: the file may have repointed the server.
 #[derive(Debug, Clone)]
 pub struct McpClient {
     server: McpServer,
     http: Client,
+    /// Settled on first use, then reused. Behind a lock because the API hands
+    /// out `&McpClient` from an `Arc<Config>` snapshot and several requests can
+    /// arrive at an unnegotiated server at once.
+    session: Arc<RwLock<Option<Session>>>,
 }
 
 impl McpClient {
     /// Wraps a server definition around the shared HTTP client.
     #[must_use]
     pub fn new(server: McpServer, http: Client) -> Self {
-        Self { server, http }
+        Self {
+            server,
+            http,
+            session: Arc::new(RwLock::new(None)),
+        }
     }
 
     /// The server this talks to.
     #[must_use]
     pub fn server(&self) -> &McpServer {
         &self.server
+    }
+
+    /// The revision in force, if one has been settled yet.
+    ///
+    /// `None` before the first call: negotiation costs a round trip and is not
+    /// worth doing to populate a listing nobody asked to act on.
+    pub async fn settled(&self) -> Option<Session> {
+        self.session.read().await.clone()
+    }
+
+    /// The settled revision, negotiating on first use.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`negotiate`](super::negotiate::negotiate) could not resolve.
+    pub async fn session(&self, credentials: &McpCredentials<'_>) -> Result<Session, McpError> {
+        if let Some(session) = self.session.read().await.clone() {
+            return Ok(session);
+        }
+
+        // Negotiating twice concurrently is wasteful but harmless, and holding
+        // the write lock across two round trips would serialise every caller
+        // behind the slowest server. Last writer wins; both wrote the same thing.
+        let session = negotiate::negotiate(self, credentials).await?;
+
+        debug!(
+            server = %self.server.name,
+            revision = %session.revision,
+            settled = ?session.settled,
+            "protocol revision in force"
+        );
+        *self.session.write().await = Some(session.clone());
+        Ok(session)
+    }
+
+    /// Drops the settled state, so the next call negotiates again.
+    ///
+    /// Called when a server says the session is gone, and by nothing else: a
+    /// revision does not change under a running server.
+    async fn forget(&self) {
+        *self.session.write().await = None;
     }
 
     /// Lists the tools on offer, following pagination.
@@ -106,7 +182,16 @@ impl McpClient {
             }
 
             let result = self
-                .request("tools/list", Value::Object(params), None, &[], credentials)
+                .call(
+                    &Invocation {
+                        method: "tools/list",
+                        params: Value::Object(params),
+                        name: None,
+                        annotated: &[],
+                        arguments: &Value::Null,
+                    },
+                    credentials,
+                )
                 .await?;
 
             let page: ToolsList =
@@ -161,20 +246,24 @@ impl McpClient {
         let params = json!({ "name": tool.name, "arguments": arguments });
 
         // The server rejects a request whose mirrored headers disagree with the
-        // body, so these are derived from exactly what is about to be sent.
+        // body, so these are derived from exactly what is about to be sent — and
+        // only on the revision that defines them, which is decided a layer down
+        // because a lost session can put us through negotiation again.
         let annotated = header_params(&tool.input_schema).map_err(|reason| McpError::Protocol {
             server: self.server.name.clone(),
             message: format!("`{}` has an invalid `x-mcp-header`: {reason}", tool.name),
         })?;
-        let mirrored = mirror_headers(&annotated, arguments);
 
         let started = Instant::now();
         let result = self
-            .request(
-                "tools/call",
-                params,
-                Some(&tool.name),
-                &mirrored,
+            .call(
+                &Invocation {
+                    method: "tools/call",
+                    params,
+                    name: Some(&tool.name),
+                    annotated: &annotated,
+                    arguments,
+                },
                 credentials,
             )
             .await;
@@ -184,7 +273,7 @@ impl McpClient {
         debug!(
             server = %self.server.name,
             tool = %tool.name,
-            mirrored = mirrored.len(),
+            annotated = annotated.len(),
             latency_ms,
             "tool called"
         );
@@ -213,22 +302,191 @@ impl McpClient {
         })
     }
 
-    /// One JSON-RPC round trip.
-    async fn request(
+    /// One JSON-RPC call, with the revision settled and the session re-established
+    /// if the server has forgotten it.
+    async fn call(
         &self,
+        invocation: &Invocation<'_>,
+        credentials: &McpCredentials<'_>,
+    ) -> Result<Value, McpError> {
+        let session = self.session(credentials).await?;
+        let first = self.attempt(&session, invocation, credentials).await;
+
+        // The session is gone, not the revision: a server that restarted has
+        // forgotten who we are, and the answer is to introduce ourselves again.
+        // Exactly once — losing it twice in one call is a real problem, and
+        // retrying forever would turn it into a hang.
+        if matches!(first, Err(McpError::SessionLost { .. })) {
+            warn!(
+                server = %self.server.name,
+                "the server no longer knows our session, negotiating again"
+            );
+            self.forget().await;
+            let session = self.session(credentials).await?;
+            return self.attempt(&session, invocation, credentials).await;
+        }
+
+        first
+    }
+
+    /// One attempt, with the headers the revision in force actually defines.
+    async fn attempt(
+        &self,
+        session: &Session,
+        invocation: &Invocation<'_>,
+        credentials: &McpCredentials<'_>,
+    ) -> Result<Value, McpError> {
+        // Only the newest revision defines these, and computing them here rather
+        // than at the call site is what lets a lost session put us through
+        // negotiation again without the caller having to care.
+        let mirrored = if session.revision.mirrors_headers() {
+            mirror_headers(invocation.annotated, invocation.arguments)
+        } else {
+            Vec::new()
+        };
+
+        Ok(self
+            .exchange(
+                session,
+                invocation.method,
+                invocation.params.clone(),
+                invocation.name,
+                &mirrored,
+                credentials,
+            )
+            .await?
+            .result)
+    }
+
+    /// One JSON-RPC round trip, at an explicit protocol state.
+    ///
+    /// Visible to [`super::negotiate`], which has to make requests before there is
+    /// a settled session to make them at.
+    pub(super) async fn exchange(
+        &self,
+        session: &Session,
         method: &str,
+        params: Value,
+        name: Option<&str>,
+        mirrored: &[(String, String)],
+        credentials: &McpCredentials<'_>,
+    ) -> Result<Exchange, McpError> {
+        let sent = self
+            .send(
+                session,
+                method,
+                Some(1),
+                params,
+                name,
+                mirrored,
+                credentials,
+            )
+            .await?;
+
+        let envelope = if sent.streaming {
+            last_event(&sent.body).ok_or_else(|| McpError::Protocol {
+                server: self.server.name.clone(),
+                message: "the event stream ended without a response".to_owned(),
+            })?
+        } else {
+            sent.body.clone()
+        };
+
+        let parsed: Envelope =
+            serde_json::from_str(&envelope).map_err(|error| McpError::Protocol {
+                server: self.server.name.clone(),
+                message: format!(
+                    "{method} answered {} with something that is not JSON-RPC: {}",
+                    sent.status,
+                    sent.scrub.text(&error.to_string())
+                ),
+            })?;
+
+        if let Some(error) = parsed.error {
+            return Err(McpError::Rpc {
+                server: self.server.name.clone(),
+                method: method.to_owned(),
+                code: error.code,
+                message: sent.scrub.text(&error.message),
+            });
+        }
+
+        // An envelope with neither half is almost never the MCP server: it is
+        // whatever sits in front of it — a gateway 404, an ingress that never
+        // routed the request, a proxy answering its own JSON. The server then has
+        // nothing in its log and the client has nothing to go on, so the status
+        // and the body go in the message; they are the only things that name the
+        // culprit.
+        let result = parsed.result.ok_or_else(|| McpError::Protocol {
+            server: self.server.name.clone(),
+            message: format!(
+                "{method} answered {} with neither a result nor an error — \
+                 usually something in front of the server answering instead of it: {}",
+                sent.status,
+                snippet(&sent.scrub.text(&envelope))
+            ),
+        })?;
+
+        Ok(Exchange {
+            result,
+            session_id: sent.session_id,
+        })
+    }
+
+    /// Sends a notification: no `id`, and therefore no answer to wait for.
+    ///
+    /// Visible to [`super::negotiate`] for `notifications/initialized`, which is
+    /// what closes the handshake on the older revisions.
+    pub(super) async fn notify(
+        &self,
+        session: &Session,
+        method: &str,
+        params: Value,
+        credentials: &McpCredentials<'_>,
+    ) -> Result<(), McpError> {
+        let sent = self
+            .send(session, method, None, params, None, &[], credentials)
+            .await?;
+
+        // `202 Accepted` with an empty body is the expected answer, but a server
+        // that says `200` and nothing is not doing anything wrong either.
+        if sent.status.is_success() {
+            return Ok(());
+        }
+
+        Err(McpError::Protocol {
+            server: self.server.name.clone(),
+            message: format!(
+                "{method} was refused with {}: {}",
+                sent.status,
+                snippet(&sent.scrub.text(&sent.body))
+            ),
+        })
+    }
+
+    /// The raw `POST`: builds the body and headers, sends, reads the answer.
+    #[allow(clippy::too_many_arguments)]
+    async fn send(
+        &self,
+        session: &Session,
+        method: &str,
+        id: Option<u32>,
         mut params: Value,
         name: Option<&str>,
         mirrored: &[(String, String)],
         credentials: &McpCredentials<'_>,
-    ) -> Result<Value, McpError> {
-        // Every request carries its own protocol version and identity: there is
-        // no handshake to have established it earlier.
-        if let Some(object) = params.as_object_mut() {
+    ) -> Result<Sent, McpError> {
+        // The handshake-free revision has no earlier exchange to have established
+        // the protocol version or who is calling, so every request carries both.
+        // The older ones said it once, in `initialize`, and repeating it there
+        // would be inventing a field the revision does not define.
+        if !session.revision.handshakes()
+            && let Some(object) = params.as_object_mut()
+        {
             object.insert(
                 "_meta".to_owned(),
                 json!({
-                    "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
+                    "io.modelcontextprotocol/protocolVersion": session.revision.as_str(),
                     "io.modelcontextprotocol/clientInfo": {
                         "name": "mire",
                         "version": env!("CARGO_PKG_VERSION"),
@@ -237,9 +495,17 @@ impl McpClient {
                 }),
             );
         }
-        let body = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
 
-        let mut headers = self.headers(method, name, mirrored)?;
+        let mut body = json!({"jsonrpc": "2.0", "method": method, "params": params});
+        // A notification is exactly a request without an `id`, and a server is
+        // entitled to answer nothing at all to one.
+        if let Some(id) = id
+            && let Some(object) = body.as_object_mut()
+        {
+            object.insert("id".to_owned(), json!(id));
+        }
+
+        let mut headers = self.headers(session, method, name, mirrored)?;
 
         // Rendered here rather than at load, so a rotated token is picked up on
         // the next call. Everything they produce goes into the redactor before
@@ -291,63 +557,54 @@ impl McpClient {
             .get(CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .is_some_and(|value| value.starts_with("text/event-stream"));
+        // Captured before the body is consumed. On the handshaking revisions the
+        // server issues this in its `initialize` reply and expects it back on
+        // everything after.
+        let session_id = response
+            .headers()
+            .get(SESSION_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         let text = response.text().await.unwrap_or_default();
 
         debug!(
             server = %self.server.name,
             method,
+            revision = %session.revision,
             status = status.as_u16(),
             streaming,
             bytes = text.len(),
             "MCP response"
         );
 
-        let envelope = if streaming {
-            last_event(&text).ok_or_else(|| McpError::Protocol {
+        // A `404` to a request that carried a session is the revision's way of
+        // saying the session is gone — a restarted server, an expiry, a different
+        // replica. Distinguished from a plain gateway `404` by the fact that we
+        // sent a session at all, and turned into one retry a layer up.
+        if status == StatusCode::NOT_FOUND && session.has_id() {
+            return Err(McpError::SessionLost {
                 server: self.server.name.clone(),
-                message: "the event stream ended without a response".to_owned(),
-            })?
-        } else {
-            text.clone()
-        };
-
-        let parsed: Envelope =
-            serde_json::from_str(&envelope).map_err(|error| McpError::Protocol {
-                server: self.server.name.clone(),
-                message: format!(
-                    "{method} answered {status} with something that is not JSON-RPC: {}",
-                    scrub.text(&error.to_string())
-                ),
-            })?;
-
-        if let Some(error) = parsed.error {
-            return Err(McpError::Rpc {
-                server: self.server.name.clone(),
-                method: method.to_owned(),
-                code: error.code,
-                message: scrub.text(&error.message),
+                revision: session.revision.to_string(),
             });
         }
 
-        // An envelope with neither half is almost never the MCP server: it is
-        // whatever sits in front of it — a gateway 404, an ingress that never
-        // routed the request, a proxy answering its own JSON. The server then has
-        // nothing in its log and the client has nothing to go on, so the status
-        // and the body go in the message; they are the only things that name the
-        // culprit.
-        parsed.result.ok_or_else(|| McpError::Protocol {
-            server: self.server.name.clone(),
-            message: format!(
-                "{method} answered {status} with neither a result nor an error — \
-                 usually something in front of the server answering instead of it: {}",
-                snippet(&scrub.text(&envelope))
-            ),
+        Ok(Sent {
+            status,
+            streaming,
+            session_id,
+            body: text,
+            scrub,
         })
     }
 
-    /// The headers the revision requires, mirrored from the body.
+    /// The headers the revision in force actually defines.
+    ///
+    /// Nothing here is sent unconditionally beyond content negotiation: mirrored
+    /// headers on an older server are unsolicited routing metadata, and
+    /// `MCP-Protocol-Version` postdates the oldest revision we speak.
     fn headers(
         &self,
+        session: &Session,
         method: &str,
         name: Option<&str>,
         mirrored: &[(String, String)],
@@ -359,32 +616,45 @@ impl McpClient {
             ACCEPT,
             HeaderValue::from_static("application/json, text/event-stream"),
         );
-        headers.insert(
-            HeaderName::from_static("mcp-protocol-version"),
-            HeaderValue::from_static(PROTOCOL_VERSION),
-        );
-        headers.insert(
-            HeaderName::from_static("mcp-method"),
-            self.header_value(method, method)?,
-        );
 
-        if let Some(name) = name {
+        if session.revision.sends_version_header() {
             headers.insert(
-                HeaderName::from_static("mcp-name"),
-                self.header_value(&encode_header_value(name), name)?,
+                HeaderName::from_static("mcp-protocol-version"),
+                self.header_value(session.revision.as_str(), session.revision.as_str())?,
             );
         }
 
-        // `Mcp-Param-*`, read from the arguments that are about to be sent — the
-        // server compares them to the body and rejects any disagreement.
-        for (name, value) in mirrored {
-            let header = HeaderName::try_from(name.to_ascii_lowercase()).map_err(|_| {
-                McpError::Protocol {
-                    server: self.server.name.clone(),
-                    message: format!("`{name}` is not a valid header name"),
-                }
-            })?;
-            headers.insert(header, self.header_value(value, value)?);
+        if let Some(id) = &session.id {
+            headers.insert(
+                HeaderName::from_static(SESSION_HEADER),
+                self.header_value(id, id)?,
+            );
+        }
+
+        if session.revision.mirrors_headers() {
+            headers.insert(
+                HeaderName::from_static("mcp-method"),
+                self.header_value(method, method)?,
+            );
+
+            if let Some(name) = name {
+                headers.insert(
+                    HeaderName::from_static("mcp-name"),
+                    self.header_value(&encode_header_value(name), name)?,
+                );
+            }
+
+            // `Mcp-Param-*`, read from the arguments that are about to be sent —
+            // the server compares them to the body and rejects any disagreement.
+            for (name, value) in mirrored {
+                let header = HeaderName::try_from(name.to_ascii_lowercase()).map_err(|_| {
+                    McpError::Protocol {
+                        server: self.server.name.clone(),
+                        message: format!("`{name}` is not a valid header name"),
+                    }
+                })?;
+                headers.insert(header, self.header_value(value, value)?);
+            }
         }
 
         Ok(headers)
@@ -620,6 +890,46 @@ fn flatten(content: &[Value]) -> String {
     }
 
     parts.join("\n")
+}
+
+/// What one call is, independent of the protocol state it goes out on.
+///
+/// Bundled rather than passed as seven arguments through three frames: a lost
+/// session sends the whole thing round again, and a long positional signature
+/// repeated at every level is a transposed pair waiting to happen.
+#[derive(Debug)]
+struct Invocation<'a> {
+    method: &'a str,
+    params: Value,
+    /// The tool name, for `Mcp-Name` where the revision mirrors it.
+    name: Option<&'a str>,
+    /// Parameters carrying an `x-mcp-header` annotation…
+    annotated: &'a [HeaderParam],
+    /// …and the arguments to read their values out of.
+    arguments: &'a Value,
+}
+
+/// What one round trip produced.
+#[derive(Debug)]
+pub(super) struct Exchange {
+    /// The JSON-RPC `result`.
+    pub result: Value,
+    /// `Mcp-Session-Id`, when the server sent one back. Only `initialize` really
+    /// issues it, but reading it everywhere costs nothing and a server is allowed
+    /// to be surprising.
+    pub session_id: Option<String>,
+}
+
+/// A raw answer, before anyone has decided what it means.
+#[derive(Debug)]
+struct Sent {
+    status: StatusCode,
+    streaming: bool,
+    session_id: Option<String>,
+    body: String,
+    /// Carries the credentials that went out, so any of them quoted back at us
+    /// is scrubbed from the message rather than from nothing.
+    scrub: Redactor,
 }
 
 #[derive(Debug, Deserialize)]
@@ -878,6 +1188,7 @@ mod tests {
             tools: Vec::new(),
             headers: HeaderTemplates::default(),
             timeout: Duration::from_secs(30),
+            protocol_version: None,
         };
         assert!(server.offers("anything"));
 

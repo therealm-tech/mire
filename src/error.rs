@@ -108,6 +108,15 @@ impl From<crate::mcp::McpError> for ApiError {
             McpError::Rpc { .. } | McpError::Protocol { .. } => {
                 Self::new(StatusCode::BAD_GATEWAY, "mcp_protocol_error", message)
             }
+            // Its own code, deliberately: "we do not speak the same protocol" is
+            // the one MCP failure you fix by changing a version rather than by
+            // looking at the server, and it used to arrive as an opaque `400`.
+            McpError::NoCommonRevision { .. } => {
+                Self::new(StatusCode::BAD_GATEWAY, "mcp_no_common_revision", message)
+            }
+            McpError::SessionLost { .. } => {
+                Self::new(StatusCode::BAD_GATEWAY, "mcp_session_lost", message)
+            }
             // Neither a failure nor something to retry: the server wants a human
             // in the loop, and a test harness has nobody to ask.
             McpError::InputRequired { .. } => Self::new(

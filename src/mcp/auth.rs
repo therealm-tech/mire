@@ -114,6 +114,7 @@ mod tests {
             tools: Vec::new(),
             headers: crate::mcp::HeaderTemplates::compile(&declared).expect("compile"),
             timeout: std::time::Duration::from_secs(5),
+            protocol_version: None,
         }
     }
 

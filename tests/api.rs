@@ -3012,6 +3012,25 @@ async fn a_new_attempt_clears_the_previous_complaint() {
 async fn mcp_server(tools: Value, answers: Vec<Value>) -> MockServer {
     let server = MockServer::start().await;
 
+    // A server on the newest revision answers discovery, so negotiation settles
+    // in one round trip and every test below exercises the same path a real
+    // `2026-07-28` server puts the client through.
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
+        .and(header("mcp-method", "server/discover"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "resultType": "complete",
+                "protocolVersions": ["2026-07-28"],
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "mock", "version": "0.1.0"},
+            },
+        })))
+        .mount(&server)
+        .await;
+
     Mock::given(method("POST"))
         .and(path("/mcp"))
         .and(header("mcp-method", "tools/list"))
@@ -3481,6 +3500,406 @@ async fn the_api_lists_servers_and_asks_one_what_it_offers() {
 
     let missing = harness.get("/api/mcp/nope/tools").await;
     assert_eq!(missing["code"], "unknown_mcp_server");
+}
+
+/// A server on one of the handshaking revisions.
+///
+/// It refuses `server/discover` the way a server that predates it would, issues a
+/// session from `initialize`, and then demands that session back on everything.
+async fn legacy_mcp_server(revision: &str) -> MockServer {
+    let server = MockServer::start().await;
+    let session = "session-from-initialize";
+
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
+        .and(body_string_contains("\"initialize\""))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("mcp-session-id", session)
+                .set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "protocolVersion": revision,
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "legacy", "version": "0.1.0"},
+                    },
+                })),
+        )
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
+        .and(body_string_contains("notifications/initialized"))
+        .respond_with(ResponseTemplate::new(202))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
+        .and(header("mcp-session-id", session))
+        .and(body_string_contains("tools/list"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"tools": weather_tool()},
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
+        .and(header("mcp-session-id", session))
+        .and(body_string_contains("tools/call"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [{"type": "text", "text": "{\"temp\": 21}"}],
+                "isError": false,
+            },
+        })))
+        .mount(&server)
+        .await;
+
+    // Anything else, `server/discover` included: this revision never had it.
+    // Mounted last on purpose — wiremock takes the first mock that matches.
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {"code": -32601, "message": "method not found"},
+        })))
+        .mount(&server)
+        .await;
+
+    server
+}
+
+#[tokio::test]
+async fn an_older_server_is_reached_by_falling_back_to_the_handshake() {
+    // The failure that started all this: `server/discover` is a method of the
+    // newest revision, so it cannot be the only probe. When it comes back empty
+    // handed, `initialize` is the older revisions' own negotiation.
+    let mcp = legacy_mcp_server("2025-06-18").await;
+    let harness = Harness::start(&[(
+        "mcp.yaml",
+        format!("servers:\n  - name: files\n    url: {}/mcp\n", mcp.uri()),
+    )])
+    .await;
+
+    let answer = harness.get("/api/mcp/files/tools").await;
+    assert_eq!(answer["protocol"]["revision"], "2025-06-18");
+    assert_eq!(answer["protocol"]["settled"], "handshake");
+    assert_eq!(answer["tools"][0]["name"], "get_weather");
+
+    let listing = mcp
+        .received_requests()
+        .await
+        .expect("requests")
+        .into_iter()
+        .find(|request| String::from_utf8_lossy(&request.body).contains("tools/list"))
+        .expect("a listing went out");
+
+    // The session the handshake issued comes back on the listing...
+    assert_eq!(
+        listing
+            .headers
+            .get("mcp-session-id")
+            .map(|v| v.to_str().unwrap()),
+        Some("session-from-initialize")
+    );
+    // ...and none of the newest revision's mirrored headers do. They are routing
+    // metadata an intermediary may act on, and this server never asked for them.
+    assert!(listing.headers.get("mcp-method").is_none());
+    assert_eq!(
+        listing
+            .headers
+            .get("mcp-protocol-version")
+            .map(|v| v.to_str().unwrap()),
+        Some("2025-06-18")
+    );
+}
+
+#[tokio::test]
+async fn the_oldest_revision_is_not_sent_a_header_it_predates() {
+    let mcp = legacy_mcp_server("2025-03-26").await;
+    let harness = Harness::start(&[(
+        "mcp.yaml",
+        format!("servers:\n  - name: files\n    url: {}/mcp\n", mcp.uri()),
+    )])
+    .await;
+
+    // `initialize` proposes the newest handshaking revision; the server answers
+    // with an older one, and that is the mechanism working rather than a problem.
+    let answer = harness.get("/api/mcp/files/tools").await;
+    assert_eq!(answer["protocol"]["revision"], "2025-03-26");
+
+    let listing = mcp
+        .received_requests()
+        .await
+        .expect("requests")
+        .into_iter()
+        .find(|request| String::from_utf8_lossy(&request.body).contains("tools/list"))
+        .expect("a listing went out");
+    assert!(listing.headers.get("mcp-protocol-version").is_none());
+}
+
+#[tokio::test]
+async fn a_server_sharing_no_revision_says_which_rather_than_answering_400() {
+    // Discovery succeeded and the answer was "nothing you speak". That is a
+    // finished conversation, and it deserves better than a bare status code.
+    let mcp = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"protocolVersions": ["2019-01-01", "2020-02-02"]},
+        })))
+        .mount(&mcp)
+        .await;
+
+    let harness = Harness::start(&[(
+        "mcp.yaml",
+        format!("servers:\n  - name: files\n    url: {}/mcp\n", mcp.uri()),
+    )])
+    .await;
+
+    let answer = harness.get("/api/mcp/files/tools").await;
+    assert_eq!(answer["code"], "mcp_no_common_revision");
+    let message = answer["message"].as_str().unwrap();
+    // Both halves, because either one alone leaves you guessing.
+    assert!(message.contains("2026-07-28"), "{message}");
+    assert!(message.contains("2019-01-01, 2020-02-02"), "{message}");
+}
+
+#[tokio::test]
+async fn a_pinned_revision_is_used_without_asking_anybody() {
+    let mcp = mcp_server(weather_tool(), vec![]).await;
+    let harness = Harness::start(&[(
+        "mcp.yaml",
+        format!(
+            "servers:\n  - name: files\n    url: {}/mcp\n    protocol_version: 2026-07-28\n",
+            mcp.uri()
+        ),
+    )])
+    .await;
+
+    let answer = harness.get("/api/mcp/files/tools").await;
+    assert_eq!(answer["protocol"]["revision"], "2026-07-28");
+    assert_eq!(answer["protocol"]["settled"], "pinned");
+
+    // A pin is a statement, not a preference: nothing was probed.
+    let probed = mcp
+        .received_requests()
+        .await
+        .expect("requests")
+        .into_iter()
+        .any(|request| {
+            let body = String::from_utf8_lossy(&request.body).to_string();
+            body.contains("server/discover") || body.contains("\"initialize\"")
+        });
+    assert!(!probed, "a pinned revision must not negotiate");
+}
+
+#[tokio::test]
+async fn a_server_that_answers_no_probe_at_all_still_gets_its_listing() {
+    // `server/discover` is a method a perfectly good server may not implement.
+    // Refusing to proceed would break endpoints that work in order to report a
+    // problem they do not have — so the newest revision is assumed, and said.
+    let mcp = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(header("mcp-method", "tools/list"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"tools": weather_tool()},
+        })))
+        .mount(&mcp)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&mcp)
+        .await;
+
+    let harness = Harness::start(&[(
+        "mcp.yaml",
+        format!("servers:\n  - name: files\n    url: {}/mcp\n", mcp.uri()),
+    )])
+    .await;
+
+    let answer = harness.get("/api/mcp/files/tools").await;
+    assert_eq!(answer["tools"][0]["name"], "get_weather");
+    // Assumed, not discovered: the difference is the whole point of reporting it.
+    assert_eq!(answer["protocol"]["settled"], "assumed");
+    assert_eq!(answer["protocol"]["revision"], "2026-07-28");
+}
+
+#[tokio::test]
+async fn a_tool_call_on_an_older_revision_carries_the_session_and_mirrors_nothing() {
+    // The listing proves the handshake; this proves the *call*, which is where
+    // getting it wrong costs something: `Mcp-Name` and `Mcp-Param-*` are routing
+    // metadata an intermediary in front of an older server may act on, and it
+    // never asked for them.
+    let mcp = legacy_mcp_server("2025-06-18").await;
+    let endpoint = MockServer::start().await;
+    model_using_a_tool(&endpoint).await;
+
+    let harness = Harness::start(&[
+        (
+            "mcp.yaml",
+            format!("servers:\n  - name: weather\n    url: {}/mcp\n", mcp.uri()),
+        ),
+        (
+            "chat.yaml",
+            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+        ),
+    ])
+    .await;
+
+    let (status, events) = harness
+        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .await;
+    assert_eq!(status, 200);
+
+    let turns: Vec<_> = events.iter().filter(|(name, _)| name == "turn").collect();
+    let tool = &turns[0].1["tools"][0];
+    assert_eq!(tool["source"], "mcp");
+    assert!(tool["result"].as_str().unwrap().contains("21"), "{tool}");
+
+    let call = mcp
+        .received_requests()
+        .await
+        .expect("requests")
+        .into_iter()
+        .find(|request| String::from_utf8_lossy(&request.body).contains("tools/call"))
+        .expect("the tool was really called");
+
+    assert_eq!(
+        call.headers
+            .get("mcp-session-id")
+            .map(|v| v.to_str().unwrap()),
+        Some("session-from-initialize")
+    );
+    assert!(call.headers.get("mcp-name").is_none());
+    assert!(call.headers.get("mcp-method").is_none());
+    assert!(call.headers.get("mcp-param-units").is_none());
+}
+
+#[tokio::test]
+async fn a_session_the_server_has_forgotten_is_re_established_and_the_call_replayed() {
+    // A restarted server has forgotten who we are. On these revisions it says so
+    // with a `404` to a request that carried a session — which is exactly how it
+    // differs from a gateway `404`, and why one is retried and the other is not.
+    let mcp = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(body_string_contains("\"initialize\""))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("mcp-session-id", "before-the-restart")
+                .set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {"protocolVersion": "2025-06-18", "capabilities": {}},
+                })),
+        )
+        .up_to_n_times(1)
+        .mount(&mcp)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(body_string_contains("\"initialize\""))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("mcp-session-id", "after-the-restart")
+                .set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {"protocolVersion": "2025-06-18", "capabilities": {}},
+                })),
+        )
+        .mount(&mcp)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(body_string_contains("notifications/initialized"))
+        .respond_with(ResponseTemplate::new(202))
+        .mount(&mcp)
+        .await;
+
+    // The session issued before the restart is no longer known.
+    Mock::given(method("POST"))
+        .and(header("mcp-session-id", "before-the-restart"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&mcp)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(header("mcp-session-id", "after-the-restart"))
+        .and(body_string_contains("tools/list"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"tools": weather_tool()},
+        })))
+        .mount(&mcp)
+        .await;
+
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {"code": -32601, "message": "method not found"},
+        })))
+        .mount(&mcp)
+        .await;
+
+    let harness = Harness::start(&[(
+        "mcp.yaml",
+        format!("servers:\n  - name: files\n    url: {}/mcp\n", mcp.uri()),
+    )])
+    .await;
+
+    // The caller sees a listing, not a session problem: recovering from this is
+    // not news, and a harness that reported it as a failure would be crying wolf.
+    let answer = harness.get("/api/mcp/files/tools").await;
+    assert_eq!(answer["tools"][0]["name"], "get_weather");
+    assert_eq!(answer["protocol"]["revision"], "2025-06-18");
+
+    let handshakes = mcp
+        .received_requests()
+        .await
+        .expect("requests")
+        .into_iter()
+        .filter(|request| String::from_utf8_lossy(&request.body).contains("\"initialize\""))
+        .count();
+    // Twice: once to start, once after being told the session was gone. A third
+    // would mean the retry had become a loop.
+    assert_eq!(handshakes, 2);
+}
+
+#[tokio::test]
+async fn an_unknown_pinned_revision_is_a_load_issue_naming_what_we_speak() {
+    let harness = Harness::start(&[(
+        "mcp.yaml",
+        "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    \
+         protocol_version: 1999-01-01\n"
+            .to_owned(),
+    )])
+    .await;
+
+    let listing = harness.get("/api/mcp").await;
+    let message = listing["issues"][0]["message"].as_str().unwrap();
+    assert!(message.contains("1999-01-01"), "{message}");
+    assert!(
+        message.contains("2026-07-28, 2025-06-18, 2025-03-26"),
+        "{message}"
+    );
+    // The bad entry is skipped; it must not take the file down with it.
+    assert!(listing["servers"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -4051,11 +4470,21 @@ async fn a_rotated_token_reaches_the_next_mcp_call_without_a_restart() {
     std::fs::write(&secret, "second\n").expect("rotate");
     harness.get("/api/mcp/files/tools").await;
 
+    // Only the listings: negotiation puts its own probes on the wire, and they
+    // are not what this is about. They do carry the credential, which is the
+    // point of checking the header rather than the count.
     let sent: Vec<String> = mcp
         .received_requests()
         .await
         .expect("requests")
         .iter()
+        .filter(|request| {
+            request
+                .headers
+                .get("mcp-method")
+                .and_then(|value| value.to_str().ok())
+                == Some("tools/list")
+        })
         .map(|request| {
             request
                 .headers

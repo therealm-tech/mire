@@ -113,6 +113,18 @@ impl McpRegistry {
                 }
             };
 
+            let protocol_version = match config.protocol_version.as_deref().map(str::parse) {
+                None => None,
+                Some(Ok(revision)) => Some(revision),
+                Some(Err(message)) => {
+                    registry.issues.push(LoadIssue::new(
+                        &path,
+                        format!("MCP server `{}`: {message}", config.name),
+                    ));
+                    continue;
+                }
+            };
+
             let server = McpServer {
                 name: config.name.clone(),
                 url: config.url,
@@ -120,6 +132,7 @@ impl McpRegistry {
                 tools: config.tools,
                 headers,
                 timeout: Duration::from_millis(config.timeout_ms),
+                protocol_version,
             };
 
             debug!(name = %server.name, url = %server.url, "MCP server registered");
@@ -192,6 +205,13 @@ struct ServerConfig {
     headers: BTreeMap<String, String>,
     #[serde(default = "default_timeout_ms")]
     timeout_ms: u64,
+    /// Revision to speak, skipping negotiation.
+    ///
+    /// A string rather than a [`crate::mcp::Revision`] so that an unknown one is
+    /// a load issue naming what this build speaks, in the file it came from —
+    /// rather than a serde message about an untagged enum.
+    #[serde(default)]
+    protocol_version: Option<String>,
 }
 
 fn default_timeout_ms() -> u64 {

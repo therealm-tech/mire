@@ -420,13 +420,14 @@ pub async fn list_mcp(State(state): State<AppState>) -> Json<McpResponse> {
 /// Asks a server what it currently offers.
 ///
 /// This really talks to it, with the auth the server declares — which makes it
-/// the quickest way to answer "is this MCP endpoint up, and does my credential
-/// get me in?" without running a model at all.
+/// the quickest way to answer "is this MCP endpoint up, does my credential get me
+/// in, and which revision are we actually speaking?" without running a model at
+/// all.
 ///
 /// # Errors
 ///
-/// `404` for an unknown server, `502` when it cannot be reached or answers
-/// something that is not a tool listing.
+/// `404` for an unknown server, `502` when it cannot be reached, shares no
+/// protocol revision, or answers something that is not a tool listing.
 pub async fn list_mcp_tools(
     State(state): State<AppState>,
     Path(path): Path<McpPath>,
@@ -441,9 +442,16 @@ pub async fn list_mcp_tools(
     // name, which is what makes this endpoint answer the question it is for:
     // "does my credential actually get me in?"
     let credentials = McpCredentials::resolve(&config.registry, client.server()).await?;
+
+    // Settled before the listing rather than read after it, so the revision is
+    // reported even when the negotiation succeeded and the listing then failed —
+    // which is precisely the case worth telling apart.
+    let protocol = client.session(&credentials).await?;
     let tools = client.list_tools(&credentials).await?;
+
     Ok(Json(McpToolsResponse {
         server: path.name,
+        protocol,
         tools,
     }))
 }

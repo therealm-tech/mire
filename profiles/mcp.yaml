@@ -4,10 +4,12 @@
 # a tool the model calls here is really executed, on a real server. It is opt-in
 # per profile and never implied.
 #
-# `mire` speaks revision 2026-07-28 of the Streamable HTTP transport — no
-# `initialize` handshake, no session header, one POST per request. Everything
-# goes through the same HTTP client as the model endpoints, so `--ca-bundle` and
-# the auth registry apply here exactly as they do there.
+# `mire` speaks three revisions of the Streamable HTTP transport — 2026-07-28
+# (no handshake, no session, mirrored headers), 2025-06-18 and 2025-03-26 (an
+# `initialize` handshake and a session header). It settles on one per server, on
+# first use, and `GET /api/mcp/<name>/tools` reports which one and how it was
+# decided. Everything goes through the same HTTP client as the model endpoints,
+# so `--ca-bundle` and the auth registry apply here exactly as they do there.
 ---
 servers:
   # The server in docker-compose.yaml. Three tools, each showing one thing:
@@ -34,6 +36,26 @@ servers:
 
   # Name them when you are pointing at something that can delete things and you
   # only meant to read.
+
+  # The same server from docker-compose.yaml, on an older revision. Nothing here
+  # says so: `mire` asks, finds no `server/discover`, falls back to `initialize`,
+  # and carries the session it hands back. Call `/api/mcp/dev-legacy/tools` and
+  # the answer names the revision it settled on and how.
+  - name: dev-legacy
+    url: http://127.0.0.1:11437/mcp
+    timeout_ms: 15000
+    tools:
+      - get_weather
+
+  # `protocol_version:` skips the negotiation and states the revision outright.
+  # Reach for it when the version is the thing under test rather than a detail:
+  # pinning one the server refuses gets you the refusal, which is the answer you
+  # were looking for. Declare the same URL under several pins and you can say
+  # exactly which revisions your endpoint accepts.
+  #
+  # - name: dev-on-the-old-one
+  #   url: http://127.0.0.1:11437/mcp
+  #   protocol_version: 2025-06-18
 
   # ---------------------------------------------------------------------------
   # Every auth workflow, commented out. Delete what you do not need.

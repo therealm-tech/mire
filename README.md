@@ -171,7 +171,8 @@ there is nothing to pass.
 | --- | --- | --- |
 | `ollama` | 11434 | The models. Unauthenticated, on purpose |
 | `gateway` | 11435 | nginx in front of Ollama, rejecting requests with no credential |
-| `mcp` | 11436 | A minimal MCP server, so agent mode has something real to call |
+| `mcp` | 11436 | A minimal MCP server on `2026-07-28`, so agent mode has something real to call |
+| `mcp-legacy` | 11437 | The same server on `2025-06-18`, so the revision negotiation has something to negotiate with |
 | `keycloak` | 8080 | Realm `mire`: `mire-workload` (service account) and `mire-ui` (browser login, user `mire` / `mire`) |
 
 Models, as of August 2026 — these rankings move monthly, so revisit the choice:
@@ -512,13 +513,11 @@ tools to the model, and when the model calls one, **calls it for real**. The
 trace says which: every tool card carries `simulated` or `mcp`, the server name
 and the round trip.
 
-`mire` speaks revision **`2026-07-28`** of the Streamable HTTP transport — no
-`initialize` handshake, no session header, one `POST` per request, answers as
-either JSON or an SSE stream. Everything goes through the same HTTP client as
-your model endpoints, so `--ca-bundle` applies, and so does the whole auth
-registry: `GET /api/mcp/{name}/tools` against `anonymous`, a token and a workload
-identity in turn answers "is this MCP endpoint up, and does my credential get me
-in?" without running a model at all.
+Everything goes through the same HTTP client as your model endpoints, so
+`--ca-bundle` applies, and so does the whole auth registry:
+`GET /api/mcp/{name}/tools` against `anonymous`, a token and a workload identity
+in turn answers "is this MCP endpoint up, and does my credential get me in?"
+without running a model at all.
 
 Three behaviours worth knowing, because each is a decision rather than an
 accident:
@@ -532,6 +531,63 @@ accident:
 - **A server that asks for interactive input stops the tool.** `resultType:
   "input_required"` means it wants an elicitation, and a harness has nobody to
   ask; you get a message naming what it wanted rather than an empty result.
+
+### Which revision you are actually speaking
+
+`mire` speaks three revisions of the Streamable HTTP transport, and settles on
+one per server, once, on first use:
+
+| Revision | Shape |
+| --- | --- |
+| `2026-07-28` | No handshake, no session. Selected body fields mirrored into `Mcp-Method` / `Mcp-Name` / `Mcp-Param-*` |
+| `2025-06-18` | `initialize` handshake, `Mcp-Session-Id` on every later request |
+| `2025-03-26` | The same, minus the `MCP-Protocol-Version` header it predates |
+
+It settles them by asking, newest first. `server/discover` answers with every
+version a server speaks — but it is itself a method of `2026-07-28`, so it cannot
+be the only question. When it comes back empty handed, `initialize` is the older
+revisions' own negotiation: `mire` proposes, the server replies with what it will
+actually use, and an older answer is the mechanism working rather than a
+downgrade to be suspicious of. If neither answers, the newest revision is assumed
+and the request goes out as it always did — `server/discover` is a method a
+perfectly good server may not implement, and failing there would break endpoints
+that work in order to report a problem they do not have.
+
+**It tells you which, every time.** `GET /api/mcp/{name}/tools` carries the
+answer next to the tools it produced:
+
+```json
+{
+  "server": "files",
+  "protocol": { "revision": "2025-06-18", "settled": "handshake" },
+  "tools": []
+}
+```
+
+`settled` is `discovered`, `handshake`, `pinned` or `assumed`. That last one
+matters: a run that worked because a guess happened to be right is a different
+fact from one that worked because both ends agreed, and only one of them stays
+true next week. A tool whose job is to tell you what your endpoint does may not
+quietly settle for something and call it success.
+
+Pin it when the version is the thing under test:
+
+```yaml
+  - name: files-on-the-old-one
+    url: https://mcp.internal/mcp
+    protocol_version: 2025-06-18
+```
+
+A pin skips both probes. Pinning a revision the server refuses gets you the
+refusal, which is the point — declare the same URL twice under different pins and
+you can say exactly which revisions your endpoint accepts. An unknown one is a
+load issue naming what this build speaks, reported at startup like every other
+bad entry, without taking the rest of the file down.
+
+A session that the server has forgotten — a restart, an expiry, a different
+replica — comes back as a `404` to a request that carried one. `mire` handshakes
+again and replays the call once, so you see the listing rather than the
+plumbing. Twice in a row is reported, because at that point it is not plumbing.
 
 ### A token that does not fit
 
@@ -821,7 +877,7 @@ seconds.
 | `GET /api/profiles/{name}` | One profile, as declared |
 | `GET /api/auth` | Auth providers, for the selector, with session status |
 | `GET /api/mcp` | MCP servers declared in `mcp.yaml` |
-| `GET /api/mcp/{name}/tools` | Ask a server what it offers, right now |
+| `GET /api/mcp/{name}/tools` | Ask a server what it offers, right now, and on which revision |
 | `POST /api/auth/{name}/login` | Start a browser login; returns where to send it |
 | `POST /api/auth/{name}/logout` | Forget the session `mire` holds |
 | `POST /api/call` | Render, authenticate, send, decode |

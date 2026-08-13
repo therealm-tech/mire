@@ -12,6 +12,17 @@ repos:
       - id: check-merge-conflict
       - id: detect-private-key
 
+  # The repository is Rust, but `dev/mcp/` is a real Python program that `mire`
+  # is tested against — and it already carries `# noqa:` codes, which only mean
+  # anything if something enforces them. Upstream hook rather than a `system`
+  # entry: pre-commit builds its own isolated environment, so there is nothing
+  # to install by hand.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.5
+    hooks:
+      - id: ruff-check
+      - id: ruff-format
+
   - repo: local
     hooks:
       - id: cargo-fmt

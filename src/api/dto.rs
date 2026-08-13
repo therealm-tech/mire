@@ -96,6 +96,11 @@ pub struct McpResponse {
 pub struct McpToolsResponse {
     /// Registry name of the server that was asked.
     pub server: String,
+    /// The revision the exchange actually happened on, and how that was settled.
+    ///
+    /// Never omitted: a listing that does not say which protocol produced it is
+    /// exactly the ambiguity this endpoint exists to remove.
+    pub protocol: crate::mcp::Session,
     /// Its tools, as it describes them right now.
     pub tools: Vec<crate::mcp::McpTool>,
 }

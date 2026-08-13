@@ -95,6 +95,36 @@ services:
       timeout: 5s
       retries: 10
 
+  # The same server on an older revision, so the negotiation has something to
+  # negotiate *with*. Point a profile at both and watch `mire` settle on
+  # `2026-07-28` for one and handshake its way to `2025-06-18` for the other.
+  mcp-legacy:
+    image: python:3.13-alpine
+    command:
+      - python
+      - /srv/server.py
+    environment:
+      MCP_REVISION: 2025-06-18
+      PORT: "11437"
+    ports:
+      - 127.0.0.1:11437:11437
+    volumes:
+      - ./dev/mcp/server.py:/srv/server.py:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request,json;
+          d=json.dumps({'jsonrpc':'2.0','id':1,'method':'initialize','params':
+          {'protocolVersion':'2025-06-18','capabilities':{},
+          'clientInfo':{'name':'healthcheck','version':'0'}}}).encode();
+          r=urllib.request.Request('http://localhost:11437/mcp', data=d, headers={
+          'content-type':'application/json'});
+          exit(0 if 'protocolVersion' in urllib.request.urlopen(r).read().decode() else 1)"
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   keycloak:
     image: quay.io/keycloak/keycloak:26.7.1
     command:
