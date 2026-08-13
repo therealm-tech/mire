@@ -152,8 +152,10 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   when it comes from a header template rather than `auth:`, and warns when it is
   a browser provider nobody has signed in to — that call answers
   `409 not_signed_in` and sends nothing, so the **Sign in** button for it is on
-  the row itself. A profile naming a server `mcp.yaml` does not declare is called
-  out there too.
+  the row itself. Once somebody has been through, the row says who, and carries
+  the **Sign out** that drops that identity again — a server's provider is often
+  not the profile's, so this row is the only place it appears. A profile naming a
+  server `mcp.yaml` does not declare is called out there too.
 - **Conversation**, for chat profiles. A transcript: your question on the right,
   the answer on the left, the tools the run called in between, and a composer at
   the bottom. `Enter` sends, `Shift`+`Enter` starts a line. **Send** runs the

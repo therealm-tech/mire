@@ -502,6 +502,7 @@ export function App() {
                 signingIn={signingIn}
                 loginError={loginError}
                 onLogin={signIn}
+                onLogout={signOut}
               />
             </section>
           ) : null}

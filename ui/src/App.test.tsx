@@ -1186,12 +1186,16 @@ describe('browser login', () => {
     )
     expect(logins.some((url) => url.endsWith('/api/auth/me/login'))).toBe(true)
 
-    // The session lands, so the row stops asking for one.
+    // The session lands, so the row stops asking for one and says who it got
+    // instead — with the way back out, since this row is the only place that
+    // identity is on screen.
+    const dev = within(screen.getByTestId('mcp-dev'))
     await waitFor(
-      () =>
-        expect(within(screen.getByTestId('mcp-dev')).queryByRole('button')).not.toBeInTheDocument(),
+      () => expect(dev.getByRole('button', { name: 'Sign out of me' })).toBeInTheDocument(),
       { timeout: 4000 },
     )
+    expect(dev.queryByRole('button', { name: /Sign in to me/ })).not.toBeInTheDocument()
+    expect(dev.getByText('gleroy')).toBeInTheDocument()
 
     // And the model still calls as what the profile says. A server needing a
     // session is not an opinion about the model's identity.
@@ -1234,6 +1238,46 @@ describe('browser login', () => {
 
     expect(await screen.findByRole('button', { name: 'Sign in' })).toBeInTheDocument()
     expect(screen.queryByText('gleroy')).not.toBeInTheDocument()
+  })
+
+  it('drops a session from the MCP row that is the only place it shows', async () => {
+    const logouts: string[] = []
+    let signedIn = true
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input)
+        let payload: unknown = PROFILES
+        if (url.endsWith('/logout')) {
+          logouts.push(url)
+          signedIn = false
+          payload = { signedOut: true }
+        } else if (url.endsWith('api/mcp')) {
+          payload = MCP
+        } else if (url.endsWith('api/auth')) {
+          payload = signedIn ? SIGNED_IN : AUTH
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify(payload), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+        )
+      }),
+    )
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    // `guarded` calls the model as `pasted`, so `me` appears nowhere but here.
+    await user.click(await screen.findByRole('button', { name: /guarded/ }))
+    const dev = within(screen.getByTestId('mcp-dev'))
+    expect(dev.getByText('gleroy')).toBeInTheDocument()
+
+    await user.click(dev.getByRole('button', { name: 'Sign out of me' }))
+
+    expect(await dev.findByRole('button', { name: /Sign in to me/ })).toBeInTheDocument()
+    expect(logouts.some((url) => url.endsWith('/api/auth/me/logout'))).toBe(true)
   })
 })
 

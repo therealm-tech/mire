@@ -24,12 +24,13 @@ export function identities(server: McpDescriptor): { name: string; templated: bo
  * entry in `mcp.yaml`, and neither follows the other. Only the servers this
  * profile actually names are listed.
  *
- * The one thing worth acting on is a browser provider with no session: the call
- * then answers `409 not_signed_in` and **nothing is sent**, which is a far better
- * outcome than a confusing `401` but still needs somebody to go and sign in. So
- * that button is here, on the row that needs it: the provider a server reaches
- * for is often not the one the profile authenticates the model with, so there is
- * nowhere else it could go.
+ * The one thing worth acting on is a browser provider: with no session the call
+ * answers `409 not_signed_in` and **nothing is sent**, which is a far better
+ * outcome than a confusing `401` but still needs somebody to go and sign in —
+ * and with one, the row is what says who the tool calls go out as, so it is also
+ * where you drop that identity again. Both buttons are here, on the row that
+ * needs them: the provider a server reaches for is often not the one the profile
+ * authenticates the model with, so there is nowhere else they could go.
  */
 export function McpAuth({
   names,
@@ -38,6 +39,7 @@ export function McpAuth({
   signingIn,
   loginError,
   onLogin,
+  onLogout,
 }: {
   names: string[]
   servers: McpDescriptor[]
@@ -45,6 +47,7 @@ export function McpAuth({
   signingIn: string | null
   loginError: { provider: string; message: string } | null
   onLogin: (name: string) => void
+  onLogout: (name: string) => void
 }) {
   return (
     <ul className="space-y-1.5">
@@ -63,12 +66,14 @@ export function McpAuth({
         }
 
         const used = identities(server)
-        // Every browser provider this server reaches for that nobody has been
-        // through yet. Each one is a `409` on the first tool call, and a button.
-        const awaited = used
+        // Every browser provider this server reaches for. Without a session each
+        // one is a `409` on the first tool call; with one it is a name somebody
+        // signed in as, and may want to stop being.
+        const human = used
           .map(({ name: provider }) => providers.find((entry) => entry.name === provider))
           .filter((entry) => entry !== undefined)
-          .filter((entry) => entry.needsLogin && !entry.session)
+          .filter((entry) => entry.needsLogin)
+        const awaited = human.filter((entry) => !entry.session)
 
         return (
           <li
@@ -102,9 +107,27 @@ export function McpAuth({
               {server.url}
             </span>
 
-            {awaited.map((entry) => {
+            {human.map((entry) => {
               const failure =
                 loginError?.provider === entry.name ? loginError.message : (entry.lastError ?? null)
+
+              // Signed in: the row already names the provider, so all this adds
+              // is who that turned out to be, and the way back out.
+              if (entry.session) {
+                return (
+                  <div key={entry.name} className="mt-1 flex flex-wrap items-center gap-2">
+                    <Badge tone="good">signed in</Badge>
+                    <span className="text-xs">{entry.session.subject ?? 'unknown user'}</span>
+                    <button
+                      type="button"
+                      onClick={() => onLogout(entry.name)}
+                      className="ml-auto rounded border border-stone-300 px-2 py-1 text-xs dark:border-stone-700"
+                    >
+                      Sign out of {entry.name}
+                    </button>
+                  </div>
+                )
+              }
 
               return (
                 <div key={entry.name} className="mt-1 space-y-1">
