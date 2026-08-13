@@ -17,11 +17,11 @@ export function JsonTree({ value, depth = 0 }: { value: unknown; depth?: number 
     return <span className="text-sky-700 dark:text-sky-300">{String(value)}</span>
   }
   if (Array.isArray(value)) {
-    return <Branch label={`array · ${value.length}`} entries={value.entries()} depth={depth} />
+    return <Branch label={`array · ${value.length}`} entries={[...value.entries()]} depth={depth} />
   }
   if (typeof value === 'object') {
     const entries = Object.entries(value as Record<string, unknown>)
-    return <Branch label={`object · ${entries.length}`} entries={entries.values()} depth={depth} />
+    return <Branch label={`object · ${entries.length}`} entries={entries} depth={depth} />
   }
   return <span className="text-stone-500">{String(value)}</span>
 }
@@ -32,11 +32,15 @@ function Branch({
   depth,
 }: {
   label: string
-  entries: IterableIterator<[number | string, unknown]>
+  /**
+   * An array, and it has to be: an iterator is consumed by the first render, and
+   * the second one — the one the collapse toggle causes — would find it empty.
+   * The parent does not re-render, so it is the *same* exhausted iterator.
+   */
+  entries: [number | string, unknown][]
   depth: number
 }) {
   const [open, setOpen] = useState(depth < 2)
-  const items = [...entries]
 
   return (
     <div>
@@ -49,7 +53,7 @@ function Branch({
       </button>
       {open ? (
         <ul className="ml-3 border-stone-200 border-l pl-2 dark:border-stone-800">
-          {items.map(([key, nested]) => (
+          {entries.map(([key, nested]) => (
             <li key={String(key)} className="py-px">
               <span className="text-stone-600 dark:text-stone-400">{key}</span>
               <span className="text-stone-400">: </span>

@@ -154,18 +154,18 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   `409 not_signed_in` and sends nothing, so the **Sign in** button for it is on
   the row itself. A profile naming a server `mcp.yaml` does not declare is called
   out there too.
-- **Request.** A prompt for a chat profile, one text per line for an embedding
-  one. **Send** goes out; for a chat profile it is always the
-  [loop](#agent-mode), because a profile with no tools stops on turn one and
-  that is the same one turn a single call would have made. **Stream** is the
-  exception: one turn, read chunk by chunk. `Ctrl`/`Cmd`+`Enter` sends too — a
-  bare `Enter` still means a newline, because the box is where a multi-line
-  system prompt gets pasted.
-- **Conversation**, for chat profiles — see [below](#having-a-conversation).
-- **Rendered request**, with a *Copy as curl* button and credentials masked.
-- **Response.** The decoded content, tool calls, finish reason and usage, then
-  the decode trace — which path matched, which missed, what was tried — and the
-  raw JSON as a collapsible tree.
+- **Conversation**, for chat profiles. A transcript: your question on the right,
+  the answer on the left, the tools the run called in between, and a composer at
+  the bottom. `Enter` sends, `Shift`+`Enter` starts a line. **Send** runs the
+  [loop](#agent-mode) — always, because a profile with no tools stops on turn one
+  and that is the same one turn a single call would have made. **Stream** is the
+  exception: one turn, read chunk by chunk, the text appearing as it arrives.
+  More on what the transcript is [below](#having-a-conversation).
+- **Input**, for embedding profiles. One text per line, a run count, and a
+  checkbox for the full vectors. There is no second turn of an embedding, so
+  there is no conversation and no loop.
+- **Traffic**, under the conversation. Everything that left the process, in the
+  order it left, one card per exchange — see [below](#reading-the-traffic).
 - **Embedding.** Count, width, encoding, the five checks, and per vector its
   norm, a sample of the first values and a distribution histogram. Never a wall
   of floats.
@@ -178,8 +178,8 @@ username, the granted scopes and a countdown.
 ### Having a conversation
 
 A chat profile keeps its turns. Send, get an answer, ask a follow-up: the
-question goes out with everything that came before it, and the **Conversation**
-panel shows exactly what that is.
+question goes out with everything that came before it. It reads like a chat
+window, because that is the fastest way to tell whether a model is following you.
 
 **The conversation lives in the browser, not in `mire`.** There is no session,
 no identifier, nothing to expire. The whole history travels in the body of every
@@ -188,24 +188,75 @@ as curl* of turn five reproduces turn five, in a shell, tomorrow, on a machine
 that never had the tab open. A server-side conversation would turn that button
 into a lie.
 
-That is also why the panel is a list of turns with a **Remove** on each rather
-than a chat bubble log. It is the `messages` array the next request will carry,
-and editing it is the point — dropping the model's last answer and asking again
-is how you find out whether it only said that because it had already said it.
-**New conversation** clears the lot.
+So the transcript is not a log *of* the `messages` array — it **is** the array,
+laid out. Every turn keeps its **Remove**, because editing the history is the
+point: dropping the model's last answer and asking again is how you find out
+whether it only said that because it had already said it. **New conversation**
+clears the lot.
 
-Two things follow from where the history lives, each of which is a decision:
+Three things follow, each of which is a decision:
 
 - **An empty box resends the conversation unchanged.** After removing a turn,
   that is how you replay it. It is also how you ask the same history of a
-  different profile or a different credential — switch, send, compare.
+  different profile — and since the identity is the profile's, that is how you
+  ask it as somebody else too: switch, send, compare.
 - **Only the answer the run finished on rejoins the history.** The tool calls in
-  between and their results stay in the trace: they are what the run was about,
-  and replaying them into the next request without their results is how you get a
-  `400` from an endpoint that was working fine. A tool call that *does* land in
-  the history — from a **Stream**, which does not loop, or from a run that
-  stopped on one — is flagged in the panel, because most endpoints refuse the
-  next turn until it has a result.
+  between and their results stay out of it: replaying them into the next request
+  without their results is how you get a `400` from an endpoint that was working
+  fine. They still appear in the transcript, where they happened, as a line
+  naming the tool and whether it really ran — the full exchange is in
+  **Traffic**. A tool call that *does* land in the history — from a **Stream**,
+  which does not loop, or from a run that stopped on one — is flagged on its
+  bubble, because most endpoints refuse the next turn until it has a result.
+- **Nothing waits for the endpoint.** The question appears the moment you press
+  Enter, tool calls appear as the loop makes them, streamed text appears as it
+  arrives. A call that fails leaves the question in the history, so an empty box
+  and a second **Send** is the retry.
+
+### Reading the traffic
+
+Under the conversation, **Traffic** is every wire this process touched, in the
+order it touched them. Three kinds of card, each showing what went out and what
+came back:
+
+| | Model call | MCP round trip | Tool call |
+| --- | --- | --- | --- |
+| **Request** | Method, URL, masked headers, body, *Copy as curl* | The JSON-RPC that went out, with its headers and the revision it went out on | The arguments the model produced |
+| **Decode** | Which configured path matched which field, which missed, and everything that was tried | — | Whether those arguments match the schema the tool was declared with |
+| **Response** | Status, latency, decoded content and tool calls, stream counters, the body, the raw JSON as a tree | Status, latency, and the JSON-RPC that came back | What the tool handed back, and whether it reported a problem |
+
+**Every body is a foldable tree**, in both directions and on all three cards —
+the same view the raw response always had, because finding where an endpoint hid
+a field is the job and a wall of text is the one shape that does not help with
+it. A body that is not JSON is shown as itself: an HTML error page from a gateway
+is a finding, and prettifying it would hide the finding. The one-line version is
+what *Copy as curl* still hands you — that button reproduces the call, this panel
+explains it.
+
+**Every word said to an MCP server is here, not just the tool calls.**
+`server/discover`, `initialize`, `notifications/initialized` and `tools/list`
+happen before the first prompt is spent, so they appear before the first turn,
+labelled **Setup**. That is not bookkeeping: a run whose handshake came back
+`401` calls no tools at all, and a panel that only listed tool calls would show
+an empty run and no reason for it. The same goes for a session the server forgot
+mid-run — the second `initialize` is right there between the turns that straddle
+it.
+
+Model, protocol and tool sit in one list on purpose. A run is only explicable
+when you can read them against each other in order — the model asked for a tool
+with *these* arguments, *this* went to the server, it answered *that*, and the
+next request carried it *like this*. Split across panels, or reset per turn, and
+the comparison stops being possible.
+
+Every tool card says whether it really left the process (**called for real**,
+with the server that answered and how long it took) or was
+[simulated](#agent-mode). A plausible-looking result from a tool nothing wired up
+is the easiest way to believe an integration works.
+
+The list **accumulates across the whole conversation** rather than resetting on
+every send, because "it worked on turn one and not on turn four" is a comparison
+and a panel showing only the latest turn cannot make one. *Collapse all* folds it
+away; *Clear* empties it, on purpose, when you want a clean read.
 
 ## A stack to point it at
 
@@ -897,9 +948,12 @@ choose before you have any evidence.
 
 It runs on the [conversation](#having-a-conversation) in the browser, and when it
 stops it appends the answer it finished on. The turns in between — the tool calls
-and their results — stay in the trace: they are what the run was about, and
+and their results — stay out of the history: they are what the run was about, and
 replaying them into the next request without their results is how you get a `400`
-from an endpoint that was working fine.
+from an endpoint that was working fine. They are not lost, though. Each one lands
+in the transcript where it happened and in full in
+[**Traffic**](#reading-the-traffic), request, decode and response, next to the
+model call that asked for it.
 
 ```yaml
 agent:
@@ -927,10 +981,17 @@ a result. Arguments are validated against that schema and the mismatches are
 reported; the model still gets an answer, so it has a chance to correct itself. A
 tool the profile never declared gets an error back rather than silence.
 
-`POST /api/agent` streams server-sent events: a `turn` event per turn as it
-happens, then one `done` carrying the whole trace. Each turn holds the rendered
-request, the masked headers, the `curl` equivalent, the raw response, the decode
-trace and the tool results — the same shape `POST /api/call` returns.
+`POST /api/agent` streams server-sent events: one `setup` event if the profile
+has MCP servers, a `turn` event per turn as it happens, then one `done` carrying
+the whole trace. Each turn holds the rendered request, the masked headers, the
+`curl` equivalent, the raw response, the decode trace and the tool results — the
+same shape `POST /api/call` returns — plus `mcp`, every JSON-RPC round trip that
+turn made, request and response, credentials already masked.
+
+`setup` carries the same shape for what happened before the loop: discovery, the
+handshake, `tools/list`. It arrives first because it happened first, and a run
+that dies negotiating never reaches a turn to report it on. `done` repeats it
+under `setup`, so a client that only reads the trace still has it.
 
 ### Every way out is named
 

@@ -33,7 +33,7 @@ use tracing::{debug, info, warn};
 use crate::config::Config;
 use crate::decode::Decoded;
 use crate::exec::{CallInput, CallOutcome, ExecError, Runner};
-use crate::mcp::{McpCredentials, McpError, McpTool};
+use crate::mcp::{McpCredentials, McpError, McpExchange, McpJournal, McpTool};
 use crate::message::{Message, Role, ToolCall};
 use crate::profile::{AgentSpec, Profile, ProfileKind, StopWhen, ToolResponse, ToolSpec};
 use crate::script::ScriptError;
@@ -178,6 +178,13 @@ pub struct Turn {
     pub call: Box<CallOutcome>,
     /// Tools answered at the end of this turn.
     pub tools: Vec<ToolInvocation>,
+    /// Every JSON-RPC round trip the tools above took, request and response.
+    ///
+    /// A [`ToolInvocation`] says what the tool was asked and what it answered;
+    /// this says what actually went over the wire to get there, which is the only
+    /// place a `401` from the server or a lost session is visible at all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp: Vec<McpExchange>,
     /// Continue, or stop and why.
     pub decision: Decision,
 }
@@ -190,6 +197,14 @@ pub struct Trace {
     pub profile: String,
     /// Auth provider that ran.
     pub auth: String,
+    /// What was said to the MCP servers before the first prompt was spent:
+    /// discovery, the handshake, `tools/list`.
+    ///
+    /// Before any turn, because it happens before any turn — and because a run
+    /// that died here has no turns at all, which is exactly when this is the
+    /// whole story.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub setup: Vec<McpExchange>,
     /// Every turn, in order.
     pub turns: Vec<Turn>,
     /// How it ended.
@@ -229,7 +244,21 @@ pub enum AgentError {
     Mcp(#[from] McpError),
 }
 
-/// Runs the loop, handing each turn to `on_turn` as it completes.
+/// Something worth reporting before the run is over.
+///
+/// An enum rather than a second callback because there is an order to these and
+/// a single stream is what preserves it: the setup traffic really did happen
+/// before turn one, and a client rebuilding a timeline should not have to know
+/// that on its own.
+#[derive(Debug, Clone, Copy)]
+pub enum AgentUpdate<'a> {
+    /// What listing the tools cost, before the first prompt was spent.
+    Setup(&'a [McpExchange]),
+    /// A turn completed.
+    Turn(&'a Turn),
+}
+
+/// Runs the loop, handing each update to `on_update` as it happens.
 ///
 /// The callback is what makes the API able to stream: turns arrive as they
 /// happen rather than after the run.
@@ -241,7 +270,7 @@ pub enum AgentError {
 pub async fn run(
     runner: &Runner,
     mut input: AgentInput,
-    mut on_turn: impl FnMut(&Turn),
+    mut on_update: impl FnMut(AgentUpdate<'_>),
 ) -> Result<Trace, AgentError> {
     let Prepared {
         profile,
@@ -249,7 +278,12 @@ pub async fn run(
         limit,
         deadline,
         tools,
+        setup,
     } = prepare(runner, &mut input).await?;
+
+    if !setup.is_empty() {
+        on_update(AgentUpdate::Setup(&setup));
+    }
 
     let started = Instant::now();
     let mut messages = input.call.messages.clone();
@@ -292,13 +326,14 @@ pub async fn run(
                 index,
                 call: Box::new(outcome),
                 tools: Vec::new(),
+                mcp: crate::mcp::drain(&tools.journal),
                 decision: Decision::Stop {
                     stop: StopOutcome::Stopped {
                         reason: reason.clone(),
                     },
                 },
             };
-            on_turn(&turn);
+            on_update(AgentUpdate::Turn(&turn));
             turns.push(turn);
             break StopOutcome::Stopped { reason };
         }
@@ -307,25 +342,18 @@ pub async fn run(
         let repeated = detect_repeat(&mut seen_calls, &completion.tool_calls);
 
         let invocations = invoke_tools(&tools, &completion.tool_calls, index).await;
-        let decision = repeated.as_ref().map_or(
-            Decision::Continue {
-                tools: invocations.len(),
-            },
-            |tool| Decision::Stop {
-                stop: StopOutcome::RepeatedCall {
-                    tool: tool.clone(),
-                    at_turn: index,
-                },
-            },
-        );
+        let decision = decide(repeated.as_ref(), invocations.len(), index);
 
         let turn = Turn {
             index,
             call: Box::new(outcome),
             tools: invocations,
+            // Drained after the tools ran, so it holds exactly what this turn put
+            // on a wire and the next turn starts from nothing.
+            mcp: crate::mcp::drain(&tools.journal),
             decision,
         };
-        on_turn(&turn);
+        on_update(AgentUpdate::Turn(&turn));
 
         if let Some(tool) = repeated {
             warn!(profile = %profile.name, %tool, turn = index, "the model asked for the same thing twice");
@@ -352,9 +380,24 @@ pub async fn run(
     Ok(Trace {
         profile: profile.name.clone(),
         auth: auth_name,
+        setup,
         turns,
         stop,
         duration_ms: elapsed_ms(started),
+    })
+}
+
+/// What to do after a turn that asked for tools.
+///
+/// The same tool with the same arguments twice is a loop rather than progress,
+/// and stopping on it is the only way that shows up as a finding instead of as a
+/// run that merely took a while.
+fn decide(repeated: Option<&String>, tools: usize, index: u32) -> Decision {
+    repeated.map_or(Decision::Continue { tools }, |tool| Decision::Stop {
+        stop: StopOutcome::RepeatedCall {
+            tool: tool.clone(),
+            at_turn: index,
+        },
     })
 }
 
@@ -415,6 +458,8 @@ struct Prepared {
     limit: u32,
     deadline: Duration,
     tools: Tools,
+    /// What listing the tools cost in MCP traffic, before the loop started.
+    setup: Vec<McpExchange>,
 }
 
 /// Everything needed to answer a tool call, from either source.
@@ -425,6 +470,8 @@ struct Tools {
     validators: Vec<(String, Option<Validator>)>,
     live: Vec<McpTool>,
     config: std::sync::Arc<Config>,
+    /// This run's MCP traffic, drained into each turn as it completes.
+    journal: McpJournal,
 }
 
 impl Tools {
@@ -466,12 +513,17 @@ async fn prepare(runner: &Runner, input: &mut AgentInput) -> Result<Prepared, Ag
         });
     }
 
+    // Recorded from the first probe: a run that cannot get past `initialize` has
+    // no turns to hang the reason off, and the `?` below is where it ends.
+    let journal: McpJournal = McpJournal::default();
+
     let mut live = Vec::new();
     for server in &profile.mcp {
         let client = config
             .mcp
             .get(server)
-            .ok_or_else(|| McpError::UnknownServer(server.clone()))?;
+            .ok_or_else(|| McpError::UnknownServer(server.clone()))?
+            .recording(journal.clone());
         let credentials = McpCredentials::resolve(&config.registry, client.server()).await?;
         let listed = client.list_tools(&credentials).await?;
         info!(profile = %profile.name, %server, tools = listed.len(), "MCP tools offered");
@@ -496,11 +548,13 @@ async fn prepare(runner: &Runner, input: &mut AgentInput) -> Result<Prepared, Ag
         deadline: spec
             .max_duration_ms
             .map_or(DEFAULT_MAX_DURATION, Duration::from_millis),
+        setup: crate::mcp::drain(&journal),
         tools: Tools {
             profile: profile.clone(),
             validators,
             live,
             config,
+            journal,
         },
         profile,
         spec,
@@ -757,7 +811,10 @@ async fn live(
             .get(&tool.server)
             .ok_or_else(|| McpError::UnknownServer(tool.server.clone()))?;
         let credentials = McpCredentials::resolve(&tools.config.registry, client.server()).await?;
-        client.call_tool(tool, &call.arguments, &credentials).await
+        client
+            .recording(tools.journal.clone())
+            .call_tool(tool, &call.arguments, &credentials)
+            .await
     }
     .await;
 
@@ -928,6 +985,7 @@ tools:
             validators: compile_validators(&profile.tools, &[]),
             live: Vec::new(),
             config: std::sync::Arc::new(Config::default()),
+            journal: McpJournal::default(),
             profile,
         }
     }

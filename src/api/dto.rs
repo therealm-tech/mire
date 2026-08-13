@@ -491,6 +491,12 @@ impl From<CallEvent> for StreamEvent {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(tag = "event", rename_all = "camelCase")]
 pub enum AgentEvent {
+    /// What was said to the MCP servers before the loop began: discovery, the
+    /// handshake, `tools/list`. Sent only when there was any.
+    Setup {
+        /// The exchanges, in the order they happened.
+        mcp: Vec<crate::mcp::McpExchange>,
+    },
     /// A turn completed. Sent as it happens, not at the end.
     Turn(Box<Turn>),
     /// The loop ended. Carries the whole trace, so a client that missed events
@@ -511,6 +517,7 @@ impl AgentEvent {
     #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
+            Self::Setup { .. } => "setup",
             Self::Turn(_) => "turn",
             Self::Done(_) => "done",
             Self::Failed { .. } => "failed",

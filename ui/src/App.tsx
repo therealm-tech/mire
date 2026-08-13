@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   type AgentRequest,
   ApiError,
@@ -7,6 +7,7 @@ import {
   type CallRequest,
   call,
   callbackUri,
+  type Embedding,
   fetchAuth,
   fetchMcp,
   fetchProfiles,
@@ -17,32 +18,29 @@ import {
   runAgent,
   startLogin,
   streamCall,
-  type Trace,
-  type Turn,
 } from './api'
-import { AgentPanel } from './components/AgentPanel'
-import { ConversationPanel } from './components/ConversationPanel'
+import { ChatPanel } from './components/ChatPanel'
+import { EmbeddingPanel } from './components/EmbeddingPanel'
+import { EmbeddingRequest } from './components/EmbeddingRequest'
 import { McpAuth } from './components/McpAuth'
 import { ModelAuth } from './components/ModelAuth'
 import { ProfileList } from './components/ProfileList'
-import { Badge, Panel, Spinner } from './components/primitives'
-import { RenderedRequest, RequestPanel } from './components/RequestPanel'
-import { ResponsePanel } from './components/ResponsePanel'
+import { Panel, Spinner } from './components/primitives'
+import { TrafficPanel } from './components/TrafficPanel'
+import {
+  activityItem,
+  type ChatItem,
+  callExchange,
+  type Exchange,
+  messageItem,
+  setupExchanges,
+  turnExchanges,
+  verdictItem,
+  wireMessages,
+} from './conversation'
 import { logger } from './logger'
 
 const ANONYMOUS = 'anonymous'
-
-/**
- * The turn about to be sent, appended to what came before.
- *
- * A blank box is not an empty turn: it means "send the conversation as it
- * stands", which is how you retry a turn after removing one, or ask the same
- * history of a different profile.
- */
-function withPrompt(history: Message[], prompt: string): Message[] {
-  const text = prompt.trim()
-  return text.length === 0 ? history : [...history, { role: 'user', content: text }]
-}
 
 /**
  * The model's turn, as the decoder saw it.
@@ -123,7 +121,7 @@ export function App() {
   const [token, setToken] = useState('')
 
   const [prompt, setPrompt] = useState('ping')
-  const [messages, setMessages] = useState<Message[]>([])
+  const [timeline, setTimeline] = useState<ChatItem[]>([])
   const [input, setInput] = useState('one\ntwo')
   const [repeat, setRepeat] = useState(1)
   const [includeVectors, setIncludeVectors] = useState(false)
@@ -136,11 +134,14 @@ export function App() {
   const [loginError, setLoginError] = useState<{ provider: string; message: string } | null>(null)
 
   const [busy, setBusy] = useState(false)
-  const [outcome, setOutcome] = useState<CallOutcome | null>(null)
   const [live, setLive] = useState<string | null>(null)
-  const [turns, setTurns] = useState<Turn[]>([])
-  const [trace, setTrace] = useState<Trace | null>(null)
+  const [embedding, setEmbedding] = useState<Embedding | null>(null)
+  const [exchanges, setExchanges] = useState<Exchange[]>([])
   const [callError, setCallError] = useState<ApiError | null>(null)
+
+  // The history is the timeline, not a copy of it: the two cannot drift, so what
+  // the transcript shows is exactly what the next request will carry.
+  const messages = useMemo(() => wireMessages(timeline), [timeline])
 
   useEffect(() => {
     Promise.all([fetchProfiles(), fetchAuth(), fetchMcp()])
@@ -226,8 +227,7 @@ export function App() {
     setBusy(true)
     setCallError(null)
     setLive(null)
-    setTurns([])
-    setTrace(null)
+    setEmbedding(null)
 
     const body: CallRequest = {
       profile: profile.name,
@@ -241,7 +241,9 @@ export function App() {
 
     call(body)
       .then((result) => {
-        setOutcome(result)
+        setExchanges((current) => [...current, callExchange(result)])
+        const decoded = result.response.decoded
+        setEmbedding(decoded?.kind === 'embedding' ? decoded : null)
         logger.info('call.done', {
           profile: result.profile,
           auth: result.auth,
@@ -251,7 +253,6 @@ export function App() {
       .catch((error: unknown) => {
         if (error instanceof ApiError) {
           setCallError(error)
-          setOutcome(null)
         } else {
           logger.error('call.failed', { message: String(error) })
         }
@@ -259,20 +260,39 @@ export function App() {
       .finally(() => setBusy(false))
   }, [profile, token, input, repeat, includeVectors])
 
+  /**
+   * The turn about to be sent, appended to what came before.
+   *
+   * A blank box is not an empty turn: it means "send the conversation as it
+   * stands", which is how you retry a turn after removing one, or ask the same
+   * history of a different profile. The question joins the transcript straight
+   * away rather than when the answer lands — waiting for the endpoint to say
+   * something before showing what was asked is how a chat window feels broken.
+   */
+  const ask = useCallback((): Message[] => {
+    const text = prompt.trim()
+    if (text.length === 0) {
+      return messages
+    }
+
+    const asked: Message = { role: 'user', content: text }
+    setTimeline((current) => [...current, messageItem(asked)])
+    setPrompt('')
+    return [...messages, asked]
+  }, [messages, prompt])
+
   const stream = useCallback(() => {
     if (!profile) {
       return
     }
     setBusy(true)
     setCallError(null)
-    setOutcome(null)
-    setTurns([])
-    setTrace(null)
-    // Empty rather than null: the panel appears immediately, so a stream that
+    setEmbedding(null)
+    // Empty rather than null: the bubble appears immediately, so a stream that
     // never produces a token is visibly a stream that never produced a token.
     setLive('')
 
-    const sent = withPrompt(messages, prompt)
+    const sent = ask()
     const body: CallRequest = { profile: profile.name, messages: sent }
     if (token.length > 0) {
       body.token = token
@@ -287,14 +307,16 @@ export function App() {
           setLive((current) => (current ?? '') + event.text)
           break
         case 'done': {
-          setOutcome(event)
+          setExchanges((current) => [...current, callExchange(event)])
           // The `done` event carries the same decoded answer the non-streaming
           // endpoint returns, so the conversation is built from that rather than
           // from the deltas: one source of truth, and it survives a stream whose
           // last chunk arrived in a shape the delta reader skipped.
           const answer = assistantTurn(event)
-          setMessages(answer ? [...sent, answer] : sent)
-          setPrompt('')
+          if (answer) {
+            setTimeline((current) => [...current, messageItem(answer)])
+            setLive(null)
+          }
           logger.info('stream.done', {
             status: event.response?.http.status ?? null,
             ttftMs: event.response?.http.ttftMs ?? null,
@@ -315,7 +337,7 @@ export function App() {
         }
       })
       .finally(() => setBusy(false))
-  }, [profile, token, prompt, messages])
+  }, [profile, token, ask])
 
   /**
    * A chat profile, run in a loop. This is what **Send** does, whether or not the
@@ -328,12 +350,10 @@ export function App() {
     }
     setBusy(true)
     setCallError(null)
-    setOutcome(null)
     setLive(null)
-    setTurns([])
-    setTrace(null)
+    setEmbedding(null)
 
-    const sent = withPrompt(messages, prompt)
+    const sent = ask()
     const body: AgentRequest = {
       profile: profile.name,
       messages: sent,
@@ -345,22 +365,31 @@ export function App() {
 
     runAgent(body, (event) => {
       switch (event.event) {
+        case 'setup':
+          // Before the first turn, because that is when it happened: a run that
+          // never got past `initialize` has no turn to hang the reason off.
+          setExchanges((current) => [...current, ...setupExchanges(event.mcp)])
+          break
         case 'turn':
-          setTurns((current) => [...current, event])
-          // The rendered request, the decode trace and the raw body are the point
-          // of this tool, and they belong to a turn rather than to a run — so the
-          // panels below follow the latest one as it lands.
-          setOutcome(event.call)
+          // Everything the turn put on a wire, in the order it left: the model
+          // call, then each tool that answered it.
+          setExchanges((current) => [...current, ...turnExchanges(event)])
+          if (event.tools.length > 0) {
+            setTimeline((current) => [...current, activityItem(event)])
+          }
           break
         case 'done': {
-          setTrace(event)
-          // Only the answer it finished on rejoins the conversation. The turns
-          // in between are tool calls and their results; they are in the trace,
-          // and replaying them without the results would break the next call.
+          // Only the answer it finished on rejoins the history. The turns in
+          // between are tool calls and their results; they are in the traffic
+          // below, and replaying them without the results would break the next
+          // call.
           const last = event.turns.at(-1)
           const answer = last ? assistantTurn(last.call) : null
-          setMessages(answer ? [...sent, answer] : sent)
-          setPrompt('')
+          setTimeline((current) => [
+            ...current,
+            ...(answer ? [messageItem(answer)] : []),
+            verdictItem(event),
+          ])
           logger.info('agent.done', { turns: event.turns.length, stop: event.stop.outcome })
           break
         }
@@ -377,7 +406,14 @@ export function App() {
         }
       })
       .finally(() => setBusy(false))
-  }, [profile, token, prompt, messages, maxIterations])
+  }, [profile, token, maxIterations, ask])
+
+  const reset = useCallback(() => {
+    setTimeline([])
+    setLive(null)
+    setCallError(null)
+    setPrompt('')
+  }, [])
 
   if (loadError) {
     return (
@@ -399,6 +435,7 @@ export function App() {
 
   // Sending nothing and being refused is the route proving it is protected.
   const expectUnauthorized = provider?.kind === 'anonymous'
+  const chatting = profile !== undefined && profile.kind !== 'embedding'
 
   return (
     <div className="mx-auto max-w-6xl space-y-4 p-3 sm:p-6">
@@ -451,8 +488,13 @@ export function App() {
         </div>
       </Panel>
 
+      {/*
+        `min-w-0` on both columns: a grid child is `min-width: auto`, so a wide
+        request body would widen the column and put the scrollbar on the page
+        rather than on the block that is too wide.
+      */}
       <div className="grid gap-4 lg:grid-cols-[18rem_1fr]">
-        <div className="space-y-4">
+        <div className="min-w-0 space-y-4">
           <Panel title="Profiles">
             <ProfileList
               profiles={profiles.profiles}
@@ -463,87 +505,66 @@ export function App() {
           </Panel>
         </div>
 
-        <div className="space-y-4">
-          {profile && profile.kind !== 'embedding' ? (
-            <ConversationPanel
-              messages={messages}
-              busy={busy}
-              onRemove={(index) =>
-                setMessages((current) => current.filter((_, position) => position !== index))
-              }
-              onReset={() => setMessages([])}
-            />
-          ) : null}
-
-          {profile ? (
-            <RequestPanel
-              profile={profile}
-              prompt={prompt}
-              turns={messages.length}
-              input={input}
-              repeat={repeat}
-              includeVectors={includeVectors}
-              busy={busy}
-              onPrompt={setPrompt}
-              onInput={setInput}
-              onRepeat={setRepeat}
-              onIncludeVectors={setIncludeVectors}
-              maxIterations={maxIterations}
-              onMaxIterations={setMaxIterations}
-              onSend={profile.kind === 'embedding' ? embed : send}
-              onStream={stream}
-            />
-          ) : (
+        <div className="min-w-0 space-y-4">
+          {profile === undefined ? (
             <Panel title="Request">
               <p className="text-stone-500 text-sm dark:text-stone-400">
                 Select a profile to get started.
               </p>
             </Panel>
-          )}
+          ) : null}
 
-          {busy && live === null && turns.length === 0 ? <Spinner label="Calling…" /> : null}
+          {chatting ? (
+            <ChatPanel
+              items={timeline}
+              live={live}
+              busy={busy}
+              prompt={prompt}
+              maxIterations={maxIterations}
+              error={callError ? callError.body : null}
+              onPrompt={setPrompt}
+              onMaxIterations={setMaxIterations}
+              onSend={send}
+              onStream={stream}
+              onRemove={(id) => setTimeline((current) => current.filter((item) => item.id !== id))}
+              onReset={reset}
+            />
+          ) : null}
 
-          {live === null ? null : (
-            <Panel
-              title="Streaming"
-              actions={
-                busy ? (
-                  <Badge tone="neutral">receiving…</Badge>
-                ) : (
-                  <Badge tone="good">complete</Badge>
-                )
-              }
-            >
-              {live.length === 0 ? (
-                <p className="text-stone-500 text-sm dark:text-stone-400">
-                  Connected. Nothing has arrived yet.
-                </p>
-              ) : (
-                <p className="whitespace-pre-wrap text-sm">{live}</p>
-              )}
-            </Panel>
-          )}
+          {profile !== undefined && !chatting ? (
+            <>
+              <EmbeddingRequest
+                input={input}
+                repeat={repeat}
+                includeVectors={includeVectors}
+                busy={busy}
+                onInput={setInput}
+                onRepeat={setRepeat}
+                onIncludeVectors={setIncludeVectors}
+                onSend={embed}
+              />
 
-          {callError ? (
-            <Panel
-              title="mire could not run this call"
-              actions={<Badge tone="bad">{callError.body.code}</Badge>}
-            >
-              <p className="text-sm">{callError.body.message}</p>
-              {callError.body.detail ? (
-                <pre className="mt-2 overflow-x-auto rounded bg-stone-100 p-2 font-mono text-xs dark:bg-stone-950">
-                  {JSON.stringify(callError.body.detail, null, 2)}
-                </pre>
+              {busy ? <Spinner label="Calling…" /> : null}
+
+              {callError ? (
+                <Panel title="mire could not run this call">
+                  <p className="text-sm">{callError.body.message}</p>
+                </Panel>
               ) : null}
-            </Panel>
+
+              {embedding ? (
+                <Panel title="Embedding">
+                  <EmbeddingPanel embedding={embedding} />
+                </Panel>
+              ) : null}
+            </>
           ) : null}
 
-          <AgentPanel turns={turns} trace={trace} running={busy && turns.length > 0} />
-
-          {outcome ? <RenderedRequest outcome={outcome} /> : null}
-          {outcome ? (
-            <ResponsePanel outcome={outcome} expectUnauthorized={expectUnauthorized} />
-          ) : null}
+          <TrafficPanel
+            exchanges={exchanges}
+            expectUnauthorized={expectUnauthorized}
+            onClear={() => setExchanges([])}
+          />
         </div>
       </div>
     </div>

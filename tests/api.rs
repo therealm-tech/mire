@@ -3266,6 +3266,123 @@ async fn the_required_headers_are_mirrored_from_the_body() {
 }
 
 #[tokio::test]
+async fn every_word_said_to_an_mcp_server_is_reported_not_just_the_tool_calls() {
+    let mcp = mcp_server(
+        weather_tool(),
+        vec![json!({"resultType": "complete", "content": [{"type": "text", "text": "21"}]})],
+    )
+    .await;
+    let endpoint = MockServer::start().await;
+    model_using_a_tool(&endpoint).await;
+
+    let harness = Harness::start(&[
+        (
+            "mcp.yaml",
+            format!("servers:\n  - name: weather\n    url: {}/mcp\n", mcp.uri()),
+        ),
+        (
+            "chat.yaml",
+            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+        ),
+    ])
+    .await;
+
+    let (status, events) = harness
+        .agent(json!({"profile": "chat", "prompt": "go"}))
+        .await;
+    assert_eq!(status, 200);
+
+    // Listing the tools happens before the first prompt is spent, so it arrives
+    // before the first turn rather than being folded into it. A run that dies
+    // negotiating has no turns at all, and this is then the whole story.
+    let (name, setup) = events.first().expect("an event");
+    assert_eq!(name, "setup");
+    let listing = setup["mcp"].as_array().expect("the setup exchanges");
+    let listed = listing
+        .iter()
+        .find(|exchange| exchange["method"] == "tools/list")
+        .expect("a `tools/list`");
+    assert_eq!(listed["server"], "weather");
+    assert_eq!(listed["status"], 200);
+    // Both halves, which is the point: what was asked and what came back.
+    assert!(listed["request"].as_str().unwrap().contains("tools/list"));
+    assert!(listed["response"].as_str().unwrap().contains("get_weather"));
+    assert_eq!(listed["revision"], "2026-07-28");
+
+    // And the tool call itself rides on the turn that made it.
+    let turn = events
+        .iter()
+        .find(|(name, _)| name == "turn")
+        .map(|(_, payload)| payload)
+        .expect("a turn");
+    let called = turn["mcp"]
+        .as_array()
+        .expect("the turn's exchanges")
+        .iter()
+        .find(|exchange| exchange["method"] == "tools/call")
+        .expect("a `tools/call`");
+    assert!(called["request"].as_str().unwrap().contains("Paris"));
+    assert!(called["response"].as_str().unwrap().contains("21"));
+
+    // The trace carries the setup too, so a client that missed the event still
+    // has it.
+    let (_, done) = events
+        .iter()
+        .find(|(name, _)| name == "done")
+        .expect("done");
+    assert!(!done["setup"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_credential_sent_to_an_mcp_server_never_comes_back_in_the_journal() {
+    let mcp = mcp_server(
+        weather_tool(),
+        vec![json!({"resultType": "complete", "content": [{"type": "text", "text": "21"}]})],
+    )
+    .await;
+    let endpoint = MockServer::start().await;
+    model_using_a_tool(&endpoint).await;
+
+    // `PATH` stands in for a credential variable, as elsewhere in this file: the
+    // test cannot set one, and what matters is that whatever went out does not
+    // come back.
+    let secret = std::env::var("PATH").expect("PATH");
+
+    let harness = Harness::start(&[
+        (
+            "mcp.yaml",
+            format!(
+                "servers:\n  - name: weather\n    url: {}/mcp\n    headers:\n      \
+                 x-api-key: 'k-{{{{ env.PATH }}}}'\n",
+                mcp.uri()
+            ),
+        ),
+        (
+            "chat.yaml",
+            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+        ),
+    ])
+    .await;
+
+    let (status, events) = harness
+        .agent(json!({"profile": "chat", "prompt": "go"}))
+        .await;
+    assert_eq!(status, 200);
+
+    // The whole stream, not just the exchange that carried it: a transcript is
+    // durable, and a credential printed once is a credential to rotate.
+    let whole = serde_json::to_string(&events).expect("serialise");
+    assert!(
+        !whole.contains(&secret),
+        "the journal must never echo a credential back"
+    );
+    assert!(
+        whole.contains("x-api-key"),
+        "the header itself is still reported — only its value is not"
+    );
+}
+
+#[tokio::test]
 async fn a_server_that_answers_a_stream_is_read_the_same_way() {
     let mcp = MockServer::start().await;
     Mock::given(method("POST"))

@@ -22,7 +22,7 @@
 //! Which of them is in force is settled once per server by [`super::negotiate`]
 //! and cached here.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -39,7 +39,7 @@ use url::Url;
 
 use super::headers::HeaderTemplates;
 use super::negotiate::{self, Session};
-use super::{McpError, McpTool, Revision, ToolResult};
+use super::{McpError, McpExchange, McpJournal, McpTool, Revision, ToolResult};
 use crate::auth::AuthProvider;
 
 use super::McpCredentials;
@@ -98,6 +98,12 @@ pub struct McpClient {
     /// out `&McpClient` from an `Arc<Config>` snapshot and several requests can
     /// arrive at an unnegotiated server at once.
     session: Arc<RwLock<Option<Session>>>,
+    /// Where to record what goes over the wire, when somebody is collecting.
+    ///
+    /// Per *run*, not per client: the registry's client is shared by everything
+    /// in flight, so a journal living on it would mix two people's traffic
+    /// together. [`recording`](Self::recording) is how one run gets its own.
+    journal: Option<McpJournal>,
 }
 
 impl McpClient {
@@ -108,6 +114,32 @@ impl McpClient {
             server,
             http,
             session: Arc::new(RwLock::new(None)),
+            journal: None,
+        }
+    }
+
+    /// The same client, writing every exchange it makes into `journal`.
+    ///
+    /// The negotiated session is deliberately *shared* with the client this came
+    /// from — it is the same server, and paying for a handshake per run to get a
+    /// recording would change the thing being recorded.
+    #[must_use]
+    pub fn recording(&self, journal: McpJournal) -> Self {
+        Self {
+            journal: Some(journal),
+            ..self.clone()
+        }
+    }
+
+    /// Files one exchange, if anybody is collecting.
+    ///
+    /// A poisoned journal is dropped rather than propagated: the recording is not
+    /// worth failing the run it exists to explain.
+    fn file(&self, exchange: McpExchange) {
+        if let Some(journal) = &self.journal
+            && let Ok(mut entries) = journal.lock()
+        {
+            entries.push(exchange);
         }
     }
 
@@ -471,85 +503,60 @@ impl McpClient {
         session: &Session,
         method: &str,
         id: Option<u32>,
-        mut params: Value,
+        params: Value,
         name: Option<&str>,
         mirrored: &[(String, String)],
         credentials: &McpCredentials<'_>,
     ) -> Result<Sent, McpError> {
-        // The handshake-free revision has no earlier exchange to have established
-        // the protocol version or who is calling, so every request carries both.
-        // The older ones said it once, in `initialize`, and repeating it there
-        // would be inventing a field the revision does not define.
-        if !session.revision.handshakes()
-            && let Some(object) = params.as_object_mut()
-        {
-            object.insert(
-                "_meta".to_owned(),
-                json!({
-                    "io.modelcontextprotocol/protocolVersion": session.revision.as_str(),
-                    "io.modelcontextprotocol/clientInfo": {
-                        "name": "mire",
-                        "version": env!("CARGO_PKG_VERSION"),
-                    },
-                    "io.modelcontextprotocol/clientCapabilities": {},
-                }),
-            );
-        }
-
-        let mut body = json!({"jsonrpc": "2.0", "method": method, "params": params});
-        // A notification is exactly a request without an `id`, and a server is
-        // entitled to answer nothing at all to one.
-        if let Some(id) = id
-            && let Some(object) = body.as_object_mut()
-        {
-            object.insert("id".to_owned(), json!(id));
-        }
-
+        let body = envelope(session, method, id, params);
         let mut headers = self.headers(session, method, name, mirrored)?;
+        let scrub = self.authenticate(&mut headers, credentials).await?;
 
-        // Rendered here rather than at load, so a rotated token is picked up on
-        // the next call. Everything they produce goes into the redactor before
-        // anything can quote it back at us.
-        let mut scrub = Redactor::new();
-        for (name, value) in self
-            .server
-            .headers
-            .render(&self.server.name, credentials.named())?
-        {
-            let mut rendered =
-                HeaderValue::from_str(value.expose()).map_err(|_| McpError::Header {
-                    server: self.server.name.clone(),
-                    header: name.to_string(),
-                    message: "the rendered value cannot go in an HTTP header".to_owned(),
-                })?;
-            rendered.set_sensitive(true);
-            scrub.add(&value);
-            headers.insert(name, rendered);
-        }
+        // Built here and not a line earlier: the auth provider has just added its
+        // header and its secret to the redactor, and a record taken before that
+        // would be a record of a request nobody made — or worse, one carrying a
+        // credential in the clear.
+        let mut record = self.journal.as_ref().map(|_| McpExchange {
+            server: self.server.name.clone(),
+            url: self.server.url.to_string(),
+            method: method.to_owned(),
+            revision: session.revision,
+            notification: id.is_none(),
+            headers: scrub.headers(&readable(&headers)),
+            request: scrub.text(&body.to_string()),
+            status: 0,
+            streaming: false,
+            response: String::new(),
+            latency_ms: 0,
+            error: None,
+        });
 
-        // The auth provider goes last: a named provider is the more specific
-        // statement, and it should win over a hand-written header of the same
-        // name rather than be quietly overwritten by one.
-        if let Some(provider) = credentials.provider() {
-            let from_auth = provider
-                .apply(&mut headers, &self.server.url, None)
-                .await
-                .map_err(McpError::Auth)?;
-            scrub.merge(&from_auth);
-        }
-
-        let response = self
+        let started = Instant::now();
+        let sent = self
             .http
             .post(self.server.url.clone())
             .headers(headers)
             .timeout(self.server.timeout)
             .json(&body)
             .send()
-            .await
-            .map_err(|error| McpError::Transport {
-                server: self.server.name.clone(),
-                message: scrub.text(&error.to_string()),
-            })?;
+            .await;
+        let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+        let response = match sent {
+            Ok(response) => response,
+            Err(error) => {
+                let message = scrub.text(&error.to_string());
+                if let Some(mut record) = record {
+                    record.latency_ms = latency_ms;
+                    record.error = Some(message.clone());
+                    self.file(record);
+                }
+                return Err(McpError::Transport {
+                    server: self.server.name.clone(),
+                    message,
+                });
+            }
+        };
 
         let status = response.status();
         let streaming = response
@@ -566,6 +573,14 @@ impl McpClient {
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
         let text = response.text().await.unwrap_or_default();
+
+        if let Some(mut record) = record.take() {
+            record.status = status.as_u16();
+            record.streaming = streaming;
+            record.response = scrub.text(&text);
+            record.latency_ms = latency_ms;
+            self.file(record);
+        }
 
         debug!(
             server = %self.server.name,
@@ -595,6 +610,49 @@ impl McpClient {
             body: text,
             scrub,
         })
+    }
+
+    /// Adds the templated headers and the auth provider's, in that order.
+    ///
+    /// Returns a redactor holding every secret that went out, so anything a
+    /// server quotes back at us is scrubbed from the message rather than from
+    /// nothing.
+    async fn authenticate(
+        &self,
+        headers: &mut HeaderMap,
+        credentials: &McpCredentials<'_>,
+    ) -> Result<Redactor, McpError> {
+        // Rendered here rather than at load, so a rotated token is picked up on
+        // the next call.
+        let mut scrub = Redactor::new();
+        for (name, value) in self
+            .server
+            .headers
+            .render(&self.server.name, credentials.named())?
+        {
+            let mut rendered =
+                HeaderValue::from_str(value.expose()).map_err(|_| McpError::Header {
+                    server: self.server.name.clone(),
+                    header: name.to_string(),
+                    message: "the rendered value cannot go in an HTTP header".to_owned(),
+                })?;
+            rendered.set_sensitive(true);
+            scrub.add(&value);
+            headers.insert(name, rendered);
+        }
+
+        // The auth provider goes last: a named provider is the more specific
+        // statement, and it should win over a hand-written header of the same
+        // name rather than be quietly overwritten by one.
+        if let Some(provider) = credentials.provider() {
+            let from_auth = provider
+                .apply(headers, &self.server.url, None)
+                .await
+                .map_err(McpError::Auth)?;
+            scrub.merge(&from_auth);
+        }
+
+        Ok(scrub)
     }
 
     /// The headers the revision in force actually defines.
@@ -666,6 +724,60 @@ impl McpClient {
             message: format!("`{original}` cannot be sent as an HTTP header value"),
         })
     }
+}
+
+/// The JSON-RPC body one request goes out as.
+///
+/// `id` is what separates a request from a notification: a notification is
+/// exactly a request without one, and a server is entitled to answer nothing at
+/// all to it.
+fn envelope(session: &Session, method: &str, id: Option<u32>, mut params: Value) -> Value {
+    // The handshake-free revision has no earlier exchange to have established the
+    // protocol version or who is calling, so every request carries both. The
+    // older ones said it once, in `initialize`, and repeating it there would be
+    // inventing a field the revision does not define.
+    if !session.revision.handshakes()
+        && let Some(object) = params.as_object_mut()
+    {
+        object.insert(
+            "_meta".to_owned(),
+            json!({
+                "io.modelcontextprotocol/protocolVersion": session.revision.as_str(),
+                "io.modelcontextprotocol/clientInfo": {
+                    "name": "mire",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+                "io.modelcontextprotocol/clientCapabilities": {},
+            }),
+        );
+    }
+
+    let mut body = json!({"jsonrpc": "2.0", "method": method, "params": params});
+    if let Some(id) = id
+        && let Some(object) = body.as_object_mut()
+    {
+        object.insert("id".to_owned(), json!(id));
+    }
+    body
+}
+
+/// Headers as text, for the journal.
+///
+/// A value that is not valid UTF-8 is named rather than dropped: a header that
+/// cannot be printed is still a header that was sent, and its absence from the
+/// record would be the one thing nobody could work out from the outside.
+fn readable(headers: &HeaderMap) -> BTreeMap<String, String> {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_owned(),
+                value
+                    .to_str()
+                    .map_or_else(|_| "<not text>".to_owned(), str::to_owned),
+            )
+        })
+        .collect()
 }
 
 /// A parameter the server wants mirrored into a header.

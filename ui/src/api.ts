@@ -281,6 +281,33 @@ const toolInvocationSchema = z.object({
   error: z.string().optional(),
 })
 
+/**
+ * One JSON-RPC round trip with an MCP server, as it happened.
+ *
+ * The tool calls a run makes are only half of what it says to a server: the
+ * discovery probe, the handshake and `tools/list` are the other half, and when a
+ * server refuses the run before a single tool is called they are the only half
+ * there is. `status: 0` means the request never reached anybody, and `error`
+ * then says why.
+ */
+export const mcpExchangeSchema = z.object({
+  server: z.string(),
+  url: z.string(),
+  /** `server/discover`, `initialize`, `tools/list`, `tools/call`, … */
+  method: z.string(),
+  /** The revision it went out on, not necessarily the one that ended up in force. */
+  revision: z.string(),
+  /** A notification carries no `id` and expects no answer. */
+  notification: z.boolean(),
+  headers: z.record(z.string(), z.string()),
+  request: z.string(),
+  status: z.number(),
+  streaming: z.boolean(),
+  response: z.string(),
+  latencyMs: z.number(),
+  error: z.string().optional(),
+})
+
 const decisionSchema = z.discriminatedUnion('decision', [
   z.object({ decision: z.literal('continue'), tools: z.number() }),
   z.object({ decision: z.literal('stop'), stop: stopOutcomeSchema }),
@@ -290,12 +317,19 @@ export const turnSchema = z.object({
   index: z.number(),
   call: callOutcomeSchema,
   tools: z.array(toolInvocationSchema),
+  /**
+   * What the tools above cost in JSON-RPC. Omitted entirely when there was none,
+   * which is every turn of a profile with no MCP server.
+   */
+  mcp: z.array(mcpExchangeSchema).default([]),
   decision: decisionSchema,
 })
 
 export const traceSchema = z.object({
   profile: z.string(),
   auth: z.string(),
+  /** What listing the tools cost, before the first prompt was spent. */
+  setup: z.array(mcpExchangeSchema).default([]),
   turns: z.array(turnSchema),
   stop: stopOutcomeSchema,
   durationMs: z.number(),
@@ -304,6 +338,9 @@ export const traceSchema = z.object({
 // The server flattens the payload alongside the `event` tag, so the shapes are
 // spread rather than intersected — an intersection is not discriminable.
 export const agentEventSchema = z.discriminatedUnion('event', [
+  // Arrives before the first turn, because that is when it happened: a run that
+  // dies negotiating has no turn to hang the reason off.
+  z.object({ event: z.literal('setup'), mcp: z.array(mcpExchangeSchema) }),
   z.object({ event: z.literal('turn'), ...turnSchema.shape }),
   z.object({ event: z.literal('done'), ...traceSchema.shape }),
   z.object({ event: z.literal('failed'), code: z.string(), message: z.string() }),
@@ -345,6 +382,7 @@ export type DecodeTrace = z.infer<typeof decodeTraceSchema>
 export type CallOutcome = z.infer<typeof callOutcomeSchema>
 export type StopOutcome = z.infer<typeof stopOutcomeSchema>
 export type ToolInvocation = z.infer<typeof toolInvocationSchema>
+export type McpExchange = z.infer<typeof mcpExchangeSchema>
 export type Turn = z.infer<typeof turnSchema>
 export type Trace = z.infer<typeof traceSchema>
 export type AgentEvent = z.infer<typeof agentEventSchema>

@@ -2,8 +2,7 @@ import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from './App'
-import { describeStop } from './components/AgentPanel'
-import { statusTone } from './components/ResponsePanel'
+import { describeStop, statusTone } from './conversation'
 
 const PROFILES = {
   profiles: [
@@ -195,6 +194,22 @@ function sse(text: string): Response {
   })
 }
 
+/**
+ * The `<li>` one exchange renders, found by the label on its toggle.
+ *
+ * Needed now that a run puts five cards on the page: `authorization: ***` and
+ * `"city": "Paris"` are each true of more than one of them, and an unscoped
+ * assertion would be asserting the wrong card as readily as the right one.
+ */
+function card(label: RegExp): HTMLElement {
+  const toggle = screen.getByRole('button', { name: label })
+  const item = toggle.closest('li')
+  if (!item) {
+    throw new Error(`no card labelled ${label}`)
+  }
+  return item
+}
+
 /** The `<section>` a titled panel renders, for assertions scoped to one panel. */
 function panel(title: string): HTMLElement {
   const heading = screen.getByRole('heading', { name: title })
@@ -328,37 +343,12 @@ describe('App', () => {
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     await waitFor(() => {
-      // Scoped to the paragraph, and to wording the auth selector's own hint
-      // does not share: a bare regex matches ancestors too.
+      // Scoped to the paragraph, and to wording the auth panel's own hint does
+      // not share: a bare regex matches ancestors too.
       expect(
         screen.getByText(/that is a pass, not a failure/i, { selector: 'p' }),
       ).toBeInTheDocument()
     })
-  })
-
-  it('renders the decoded content and the curl equivalent', async () => {
-    const user = userEvent.setup()
-    vi.stubGlobal(
-      'fetch',
-      mockApi({
-        'api/profiles': PROFILES,
-        'api/auth': AUTH,
-        'api/mcp': MCP,
-        'api/agent': agentStream([answerTurn(200)]),
-      }),
-    )
-    render(<App />)
-
-    await user.click(await screen.findByRole('button', { name: 'Send' }))
-
-    // Scoped: the answer also joins the conversation, which is a different
-    // panel making a different claim about the same text.
-    await waitFor(() => {
-      expect(within(panel('Response')).getByText('pong')).toBeInTheDocument()
-    })
-    expect(screen.getByRole('button', { name: 'Copy as curl' })).toBeInTheDocument()
-    // The masked credential is what the UI was handed, and what it shows.
-    expect(screen.getByText(/authorization: \*\*\*/)).toBeInTheDocument()
   })
 
   it('offers no way to call as somebody else', async () => {
@@ -532,7 +522,7 @@ describe('agent mode', () => {
     await waitFor(() => expect(urls.some((url) => url.endsWith('api/call'))).toBe(true))
   })
 
-  it('shows the text as it streams, then the timings once it is done', async () => {
+  it('answers in the transcript and records the timings underneath', async () => {
     const user = userEvent.setup()
     const outcome = completion(200)
     const streamed = {
@@ -570,38 +560,28 @@ describe('agent mode', () => {
 
     vi.stubGlobal(
       'fetch',
-      vi.fn((input: RequestInfo | URL) => {
-        const url = String(input)
-        if (url.endsWith('api/profiles')) {
-          return Promise.resolve(Response.json(PROFILES))
-        }
-        if (url.endsWith('api/auth')) {
-          return Promise.resolve(Response.json(AUTH))
-        }
-        if (url.endsWith('api/mcp')) {
-          return Promise.resolve(Response.json(MCP))
-        }
-        return Promise.resolve(
-          new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
-        )
+      mockApi({
+        'api/profiles': PROFILES,
+        'api/auth': AUTH,
+        'api/mcp': MCP,
+        'api/call/stream': stream,
       }),
     )
 
     render(<App />)
     await user.click(await screen.findByRole('button', { name: 'Stream' }))
 
-    // The deltas add up in the live panel — scoped to it, because once `done`
-    // lands the decoded answer says the same word one panel further down.
+    // The answer joins the conversation as a turn rather than staying in a
+    // panel of its own: the deltas were a preview of this bubble.
     await waitFor(() => {
-      expect(within(panel('Streaming')).getByText('pong')).toBeInTheDocument()
+      expect(within(panel('Conversation')).getByText('pong')).toBeInTheDocument()
     })
 
-    // And the numbers a streaming test is actually for.
-    await waitFor(() => {
-      expect(screen.getByText(/first token 40 ms/)).toBeInTheDocument()
-    })
-    expect(screen.getByText('3 chunks')).toBeInTheDocument()
-    expect(screen.getByText(/ended cleanly/)).toBeInTheDocument()
+    // And the numbers a streaming test is actually for, one panel down.
+    const traffic = within(panel('Traffic'))
+    expect(traffic.getByText(/first token 40 ms/)).toBeInTheDocument()
+    expect(traffic.getByText('3 chunks')).toBeInTheDocument()
+    expect(traffic.getByText(/ended cleanly/)).toBeInTheDocument()
   })
 
   it('says so when a stream stops without ending', async () => {
@@ -631,20 +611,11 @@ describe('agent mode', () => {
 
     vi.stubGlobal(
       'fetch',
-      vi.fn((input: RequestInfo | URL) => {
-        const url = String(input)
-        if (url.endsWith('api/profiles')) {
-          return Promise.resolve(Response.json(PROFILES))
-        }
-        if (url.endsWith('api/auth')) {
-          return Promise.resolve(Response.json(AUTH))
-        }
-        if (url.endsWith('api/mcp')) {
-          return Promise.resolve(Response.json(MCP))
-        }
-        return Promise.resolve(
-          new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
-        )
+      mockApi({
+        'api/profiles': PROFILES,
+        'api/auth': AUTH,
+        'api/mcp': MCP,
+        'api/call/stream': stream,
       }),
     )
 
@@ -655,60 +626,24 @@ describe('agent mode', () => {
       expect(screen.getByText(/stopped without ending/i)).toBeInTheDocument()
     })
     // What arrived is still shown: a truncated answer is the finding.
-    expect(within(panel('Response')).getByText('half a sen')).toBeInTheDocument()
+    expect(within(panel('Conversation')).getByText('half a sen')).toBeInTheDocument()
   })
 
-  it('renders each streamed turn as a card and the verdict at the end', async () => {
+  it('shows the tools a run called in the transcript and the verdict it ended on', async () => {
     const user = userEvent.setup()
-    const stream = [
-      'event: turn',
-      `data: ${JSON.stringify({ event: 'turn', ...turnFixture() })}`,
-      '',
-      'event: done',
-      `data: ${JSON.stringify({ event: 'done', ...traceFixture() })}`,
-      '',
-      '',
-    ].join('\n')
-
-    vi.stubGlobal(
-      'fetch',
-      vi.fn((input: RequestInfo | URL) => {
-        const url = String(input)
-        if (url.endsWith('api/profiles')) {
-          return Promise.resolve(Response.json(PROFILES))
-        }
-        if (url.endsWith('api/auth')) {
-          return Promise.resolve(Response.json(AUTH))
-        }
-        if (url.endsWith('api/mcp')) {
-          return Promise.resolve(Response.json(MCP))
-        }
-        return Promise.resolve(
-          new Response(stream, {
-            status: 200,
-            headers: { 'content-type': 'text/event-stream' },
-          }),
-        )
-      }),
-    )
+    vi.stubGlobal('fetch', toolRunApi())
 
     render(<App />)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
+    // What the run did on its own sits between the question and the answer,
+    // where it happened, rather than in a panel somewhere else.
+    const conversation = within(panel('Conversation'))
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /Turn 1/ })).toBeInTheDocument()
+      expect(conversation.getByText('get_weather')).toBeInTheDocument()
     })
-    expect(screen.getByText(/asked for no more tools/i)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Export trace' })).toBeInTheDocument()
-
-    // A closed card still says what the turn did; the detail is behind the click.
-    // Scoped to the trace: the conversation panel names the same tool call.
-    expect(within(panel('Agent')).getByText(/get_weather/)).toBeInTheDocument()
-    expect(screen.queryByText(/arguments match the schema/i)).not.toBeInTheDocument()
-
-    await user.click(screen.getByRole('button', { name: /Turn 1/ }))
-    expect(screen.getByText(/arguments match the schema/i)).toBeInTheDocument()
-    expect(screen.getByText(/"temp": 21/)).toBeInTheDocument()
+    expect(conversation.getByText(/called for real via/)).toBeInTheDocument()
+    expect(conversation.getByText(/asked for no more tools/i)).toBeInTheDocument()
   })
 
   it('shows what the endpoint said when it refused the turn', async () => {
@@ -734,40 +669,27 @@ describe('agent mode', () => {
 
     vi.stubGlobal(
       'fetch',
-      vi.fn((input: RequestInfo | URL) => {
-        const url = String(input)
-        if (url.endsWith('api/profiles')) {
-          return Promise.resolve(Response.json(PROFILES))
-        }
-        if (url.endsWith('api/auth')) {
-          return Promise.resolve(Response.json(AUTH))
-        }
-        if (url.endsWith('api/mcp')) {
-          return Promise.resolve(Response.json(MCP))
-        }
-        const stream = [
+      mockApi({
+        'api/profiles': PROFILES,
+        'api/auth': AUTH,
+        'api/mcp': MCP,
+        'api/agent': [
           'event: turn',
           `data: ${JSON.stringify({ event: 'turn', ...refused })}`,
           '',
           '',
-        ].join('\n')
-        return Promise.resolve(
-          new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
-        )
+        ].join('\n'),
       }),
     )
 
     render(<App />)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
+    // A refusal opens its own body: a red `400` with nothing under it is the
+    // whole problem this answers.
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /Turn 1/ })).toBeInTheDocument()
+      expect(within(panel('Traffic')).getByText(/maximum context length/)).toBeInTheDocument()
     })
-
-    // One click on the turn is enough: a refusal opens its own body, because a
-    // red `400` with nothing under it is the whole problem this answers.
-    await user.click(screen.getByRole('button', { name: /Turn 1/ }))
-    expect(within(panel('Agent')).getByText(/maximum context length/)).toBeInTheDocument()
   })
 })
 
@@ -798,8 +720,41 @@ function turnFixture() {
         result: '{"temp": 21}',
       },
     ],
+    mcp: [mcpExchange('tools/call', '{"jsonrpc":"2.0","id":1,"result":{"temp":21}}')],
     decision: { decision: 'continue', tools: 1 },
   }
+}
+
+/** One JSON-RPC round trip, as `POST /api/agent` reports it. */
+function mcpExchange(method: string, response: string) {
+  return {
+    server: 'weather',
+    url: 'http://127.0.0.1:11436/mcp',
+    method,
+    revision: '2026-07-28',
+    notification: false,
+    headers: { 'mcp-method': method, authorization: '***' },
+    request: `{"jsonrpc":"2.0","id":1,"method":"${method}","params":{"city":"Paris"}}`,
+    status: 200,
+    streaming: false,
+    response,
+    latencyMs: 12,
+  }
+}
+
+/** The handshake and the listing, which happen before the loop starts. */
+function setupEvent() {
+  return [
+    'event: setup',
+    `data: ${JSON.stringify({
+      event: 'setup',
+      mcp: [
+        mcpExchange('initialize', '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"x"}}'),
+        mcpExchange('tools/list', '{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}'),
+      ],
+    })}`,
+    '',
+  ]
 }
 
 function traceFixture() {
@@ -811,6 +766,187 @@ function traceFixture() {
     durationMs: 120,
   }
 }
+
+/** A run that calls one MCP tool, so every kind of exchange is on the wire. */
+function toolRunApi() {
+  const stream = [
+    ...setupEvent(),
+    'event: turn',
+    `data: ${JSON.stringify({ event: 'turn', ...turnFixture() })}`,
+    '',
+    'event: done',
+    `data: ${JSON.stringify({ event: 'done', ...traceFixture() })}`,
+    '',
+    '',
+  ].join('\n')
+
+  return mockApi({
+    'api/profiles': PROFILES,
+    'api/auth': AUTH,
+    'api/mcp': MCP,
+    'api/agent': stream,
+  })
+}
+
+describe('traffic', () => {
+  it('says nothing has been on the wire before anything has', async () => {
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: 'Traffic' })).toBeInTheDocument()
+    expect(screen.getByText(/Nothing on the wire yet/)).toBeInTheDocument()
+  })
+
+  it('records the model call and the tool call as separate exchanges', async () => {
+    vi.stubGlobal('fetch', toolRunApi())
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    // One card for what was asked of the model, one for what the tool was asked.
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Turn 1 · model/ })).toBeInTheDocument()
+    })
+    expect(screen.getByRole('button', { name: /Turn 1 · get_weather/ })).toBeInTheDocument()
+    // Two of those, plus the handshake, the listing and the `tools/call` under
+    // the tool: five wires touched, five cards.
+    expect(within(panel('Traffic')).getByText('5 exchanges')).toBeInTheDocument()
+  })
+
+  it('records what was said to the MCP server before the loop began', async () => {
+    vi.stubGlobal('fetch', toolRunApi())
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    // No tool was called by these, so a tool listing could never show them —
+    // and a server that refuses the handshake produces nothing else at all.
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Setup · initialize/ })).toBeInTheDocument()
+    })
+    expect(screen.getByRole('button', { name: /Setup · tools\/list/ })).toBeInTheDocument()
+    // The tool call's own JSON-RPC belongs to the turn that made it.
+    expect(screen.getByRole('button', { name: /Turn 1 · tools\/call/ })).toBeInTheDocument()
+
+    const handshake = within(card(/Setup · initialize/))
+    expect(handshake.getByText('protocolVersion')).toBeInTheDocument()
+    expect(handshake.getByText('"x"')).toBeInTheDocument()
+    expect(handshake.getAllByText(/mcp-method:/).length).toBeGreaterThan(0)
+  })
+
+  it('shows every body as a tree, the way the raw response always was', async () => {
+    vi.stubGlobal('fetch', toolRunApi())
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Turn 1 · model/ })).toBeInTheDocument()
+    })
+
+    // The request that went out is one line of JSON. Finding a field in it is
+    // the job, so it gets the same foldable tree the response always had.
+    const model = within(card(/Turn 1 · model/))
+    expect(model.getByText('messages')).toBeInTheDocument()
+    // A branch is a button, because folding it is the point.
+    expect(model.getByRole('button', { name: /array · 0/ })).toBeInTheDocument()
+
+    // Same for the JSON-RPC underneath a tool, in both directions.
+    const protocol = within(card(/Turn 1 · tools\/call/))
+    expect(protocol.getByText('method')).toBeInTheDocument()
+    expect(protocol.getByText('"tools/call"')).toBeInTheDocument()
+    expect(protocol.getByText('temp')).toBeInTheDocument()
+  })
+
+  it('shows the request, the decode and the response of the model call', async () => {
+    vi.stubGlobal('fetch', toolRunApi())
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Turn 1 · model/ })).toBeInTheDocument()
+    })
+    const model = within(card(/Turn 1 · model/))
+
+    // The request, credentials already masked, with its `curl` equivalent.
+    expect(model.getByText(/authorization: \*\*\*/)).toBeInTheDocument()
+    expect(model.getByRole('button', { name: 'Copy as curl' })).toBeInTheDocument()
+
+    // The decode: which configured path resolved which field.
+    expect(model.getByText('$.choices[0].message.content')).toBeInTheDocument()
+
+    // And the response the decoder read it out of.
+    expect(model.getByText(/finish: tool_calls/)).toBeInTheDocument()
+  })
+
+  it('shows the arguments, the schema check and the result of the tool call', async () => {
+    vi.stubGlobal('fetch', toolRunApi())
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Turn 1 · get_weather/ })).toBeInTheDocument()
+    })
+    const tool = within(card(/Turn 1 · get_weather/))
+
+    expect(tool.getByText('city')).toBeInTheDocument()
+    expect(tool.getByText('"Paris"')).toBeInTheDocument()
+    expect(tool.getByText(/arguments match the schema/i)).toBeInTheDocument()
+    expect(tool.getByText('temp')).toBeInTheDocument()
+    expect(tool.getByText('21')).toBeInTheDocument()
+    // Whether it really ran is the first thing the card says.
+    expect(tool.getByText(/called for real/)).toBeInTheDocument()
+  })
+
+  it('folds every exchange away and back', async () => {
+    vi.stubGlobal('fetch', toolRunApi())
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Turn 1 · model/ })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: 'Collapse all' }))
+    expect(screen.queryByText(/arguments match the schema/i)).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Expand all' }))
+    expect(screen.getByText(/arguments match the schema/i)).toBeInTheDocument()
+  })
+
+  it('keeps the traffic of every turn, so two turns can be compared', async () => {
+    vi.stubGlobal(
+      'fetch',
+      mockApi({
+        'api/profiles': PROFILES,
+        'api/auth': AUTH,
+        'api/mcp': MCP,
+        'api/agent': agentStream([answerTurn(200)]),
+      }),
+    )
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+    await waitFor(() => {
+      expect(within(panel('Traffic')).getByText('1 exchange')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() => {
+      expect(within(panel('Traffic')).getByText('2 exchanges')).toBeInTheDocument()
+    })
+
+    // And it can be emptied on purpose, which is not the same thing as being
+    // emptied for you every time you press Send.
+    await user.click(screen.getByRole('button', { name: 'Clear' }))
+    expect(screen.getByText(/Nothing on the wire yet/)).toBeInTheDocument()
+  })
+})
 
 describe('browser login', () => {
   /** The signed-in half of the auth listing. */
@@ -1088,7 +1224,24 @@ describe('conversation', () => {
     ])
   })
 
-  it('empties the box on success so the next turn starts clean', async () => {
+  it('shows the question straight away and the answer beside it', async () => {
+    const { fetchMock } = recordingApi(['Paris is the capital.'])
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await type(user, 'Capital of France?')
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    const conversation = within(panel('Conversation'))
+    expect(conversation.getByText('Capital of France?')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(conversation.getByText('Paris is the capital.')).toBeInTheDocument()
+    })
+  })
+
+  it('empties the box so the next turn starts clean', async () => {
     const { fetchMock } = recordingApi(['pong'])
     vi.stubGlobal('fetch', fetchMock)
 
@@ -1099,6 +1252,23 @@ describe('conversation', () => {
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     await waitFor(() => expect(screen.getByRole('textbox', { name: /message/i })).toHaveValue(''))
+  })
+
+  it('sends on Enter and starts a line on Shift+Enter', async () => {
+    const { fetchMock, sent } = recordingApi(['pong'])
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    const box = await screen.findByRole('textbox', { name: /message/i })
+    await user.clear(box)
+    await user.type(box, 'one{Shift>}{Enter}{/Shift}two')
+    expect(box).toHaveValue('one\ntwo')
+
+    await user.type(box, '{Enter}')
+    await waitFor(() => expect(sent).toHaveLength(1))
+    expect(sent[0]?.messages).toEqual([{ role: 'user', content: 'one\ntwo' }])
   })
 
   it('drops a turn that is removed, and sends what is left', async () => {
@@ -1114,7 +1284,7 @@ describe('conversation', () => {
 
     // Removing the model's answer asks the far more interesting question:
     // does it still say that if it never said it the first time?
-    await user.click(screen.getByRole('button', { name: 'Remove turn 2' }))
+    await user.click(await screen.findByRole('button', { name: 'Remove turn 2' }))
 
     await type(user, 'two')
     await user.click(screen.getByRole('button', { name: 'Send' }))
@@ -1136,10 +1306,11 @@ describe('conversation', () => {
     await type(user, 'one')
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(1))
-    expect(screen.getByRole('heading', { name: 'Conversation' })).toBeInTheDocument()
+    expect(within(panel('Conversation')).getByText('one')).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'New conversation' }))
-    expect(screen.queryByRole('heading', { name: 'Conversation' })).not.toBeInTheDocument()
+    expect(within(panel('Conversation')).queryByText('one')).not.toBeInTheDocument()
+    expect(screen.getByText(/Nothing said yet/)).toBeInTheDocument()
 
     await type(user, 'two')
     await user.click(screen.getByRole('button', { name: 'Send' }))

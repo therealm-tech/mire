@@ -37,8 +37,10 @@ pub mod headers;
 pub mod negotiate;
 pub mod registry;
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -49,6 +51,67 @@ pub use client::{McpClient, McpServer};
 pub use headers::HeaderTemplates;
 pub use negotiate::Session;
 pub use registry::McpRegistry;
+
+/// One JSON-RPC round trip with an MCP server, as it happened.
+///
+/// The tool calls a run makes are only half of what it says to a server. The
+/// discovery probe, the handshake and `tools/list` are the other half — and when
+/// a server refuses the run before a single tool is called, they are the *only*
+/// half, which is precisely when somebody needs to read them. A tool that never
+/// ran because `initialize` came back `401` is not a model problem, and nothing
+/// in a tool-call listing could ever say so.
+///
+/// Recorded whatever happens, including a request that never got an answer at
+/// all: that is the most informative entry this can hold.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct McpExchange {
+    /// Registry name of the server.
+    pub server: String,
+    /// The endpoint it went to.
+    pub url: String,
+    /// JSON-RPC method: `server/discover`, `initialize`, `tools/list`, …
+    pub method: String,
+    /// The revision it went out on, which is not always the one that ends up in
+    /// force — the probes are how that gets settled.
+    pub revision: Revision,
+    /// A notification carries no `id` and expects no answer.
+    pub notification: bool,
+    /// Request headers, masked.
+    pub headers: BTreeMap<String, String>,
+    /// The JSON-RPC request body, masked.
+    pub request: String,
+    /// HTTP status, or `0` when the request never reached a server.
+    pub status: u16,
+    /// Whether the answer arrived as an event stream rather than one object.
+    pub streaming: bool,
+    /// The response body, masked. Empty when nothing came back.
+    pub response: String,
+    /// Round trip, in milliseconds.
+    pub latency_ms: u64,
+    /// Why there is no response, when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Where one run collects the MCP exchanges it produced.
+///
+/// A plain `std::sync::Mutex` rather than tokio's: every critical section is a
+/// `push` onto a `Vec` with no `await` inside it, so there is nothing to hold
+/// across a yield point.
+pub type McpJournal = Arc<Mutex<Vec<McpExchange>>>;
+
+/// Takes everything recorded so far, leaving the journal empty.
+///
+/// A poisoned lock yields nothing rather than panicking: losing the record of a
+/// run is not a reason to fail the run it is recording.
+#[must_use]
+pub fn drain(journal: &McpJournal) -> Vec<McpExchange> {
+    journal
+        .lock()
+        .map(|mut entries| std::mem::take(&mut *entries))
+        .unwrap_or_default()
+}
 
 /// A revision of the Streamable HTTP transport `mire` can speak.
 ///

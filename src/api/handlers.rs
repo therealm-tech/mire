@@ -613,11 +613,15 @@ pub async fn agent(
     let input: AgentInput = request.into();
 
     tokio::spawn(async move {
-        let turns = sender.clone();
-        let outcome = agent::run(&runner, input, |turn| {
+        let updates = sender.clone();
+        let outcome = agent::run(&runner, input, |update| {
+            let event = match update {
+                agent::AgentUpdate::Setup(mcp) => AgentEvent::Setup { mcp: mcp.to_vec() },
+                agent::AgentUpdate::Turn(turn) => AgentEvent::Turn(Box::new(turn.clone())),
+            };
             // Unbounded so the loop is never blocked by a client that stopped
             // reading; a dropped receiver just means nobody is listening.
-            let _ = turns.send(AgentEvent::Turn(Box::new(turn.clone())));
+            let _ = updates.send(event);
         })
         .await;
 
