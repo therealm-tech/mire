@@ -1097,7 +1097,11 @@ Trivy over the repository. Whatever is deliberately waived lives in
 
 Tagging `vX.Y.Z` releases. The tag must match the `version` in `Cargo.toml` — the
 release fails on the mismatch rather than publishing a binary that lies about
-which release it is. What comes out:
+which release it is. `scripts/release.sh 0.4.0` is what keeps the two in step: it
+refuses a dirty tree, a branch other than `main`, a branch out of sync with
+`origin`, and a tag that already exists; then it bumps the manifest, runs the
+tests, commits, tags and — after one confirmation — pushes. `--no-push` stops
+before the push, `--skip-tests` before the suite. What comes out:
 
 * `ghcr.io/therealm-tech/mire:X.Y.Z` and `:latest`, a multi-arch manifest over
   `linux/amd64` and `linux/arm64`, each built on its own native runner. No QEMU.

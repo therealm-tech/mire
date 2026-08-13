@@ -67,6 +67,13 @@ repos:
         language: system
         files: ^Dockerfile$
 
+      - id: shellcheck
+        name: shellcheck
+        entry: shellcheck
+        language: system
+        types:
+          - shell
+
       - id: actionlint
         name: actionlint
         entry: actionlint

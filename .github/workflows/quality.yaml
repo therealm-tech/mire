@@ -51,7 +51,7 @@ jobs:
         with:
           python-version: "3.13"
 
-      # The three tools the `language: system` hooks expect on PATH. Pinned to
+      # The four tools the `language: system` hooks expect on PATH. Pinned to
       # the versions the repository was last verified against: a linter that
       # upgrades itself turns CI red on code nobody touched, and a bump should be
       # a diff somebody chose to make.
@@ -69,6 +69,15 @@ jobs:
         run: |
           curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
             | sudo tar -xz -C /usr/local/bin trivy
+
+      # The runner image ships a shellcheck of its own; installing one anyway
+      # keeps CI on the same version as the hook was verified against.
+      - name: install shellcheck
+        env:
+          SHELLCHECK_VERSION: "0.11.0"
+        run: |
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
+            | sudo tar -xJ --strip-components=1 -C /usr/local/bin "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
 
       - name: install actionlint
         env:
