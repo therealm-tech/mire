@@ -83,6 +83,9 @@ function TurnCard({ turn }: { turn: Turn }) {
   const content = decoded?.kind === 'completion' ? decoded.content : null
   const failedSchema = turn.tools.some((tool) => tool.schemaErrors.length > 0)
   const failedTool = turn.tools.some((tool) => tool.error)
+  // A refused turn has no content and no tools, so an unopened response block
+  // would leave the card saying `400` and nothing else.
+  const refused = turn.call.response.http.status >= 400
 
   return (
     <li className="rounded border border-stone-200 dark:border-stone-800">
@@ -119,6 +122,15 @@ function TurnCard({ turn }: { turn: Turn }) {
           {turn.tools.map((tool) => (
             <ToolCard key={`${tool.call.id ?? ''}${tool.call.name}`} tool={tool} />
           ))}
+
+          {turn.call.response.bodyText ? (
+            <details open={refused}>
+              <summary className="cursor-pointer text-stone-500 text-xs dark:text-stone-400">
+                Response received
+              </summary>
+              <Code>{turn.call.response.bodyText}</Code>
+            </details>
+          ) : null}
 
           <details>
             <summary className="cursor-pointer text-stone-500 text-xs dark:text-stone-400">

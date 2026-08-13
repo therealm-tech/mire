@@ -839,3 +839,22 @@ pub enum ExecError {
     #[error(transparent)]
     Transport(#[from] TransportError),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{REFUSAL_EXCERPT, excerpt};
+
+    #[test]
+    fn excerpt_collapses_whitespace_and_keeps_short_bodies_whole() {
+        assert_eq!(
+            excerpt("{\n  \"error\": \"too long\"\n}", REFUSAL_EXCERPT),
+            "{ \"error\": \"too long\" }"
+        );
+    }
+
+    #[test]
+    fn excerpt_truncates_on_a_character_boundary() {
+        let body = "é".repeat(10);
+        assert_eq!(excerpt(&body, 4), "éééé…");
+    }
+}

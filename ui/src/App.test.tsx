@@ -502,6 +502,62 @@ describe('agent mode', () => {
     expect(screen.getByText(/arguments match the schema/i)).toBeInTheDocument()
     expect(screen.getByText(/"temp": 21/)).toBeInTheDocument()
   })
+
+  it('shows what the endpoint said when it refused the turn', async () => {
+    const user = userEvent.setup()
+    const refused = {
+      ...turnFixture(),
+      call: {
+        ...completion(400),
+        response: {
+          ...completion(400).response,
+          http: { status: 400, headers: {}, latencyMs: 12 },
+          bodyText: '{"error":"maximum context length is 32768 tokens"}',
+        },
+      },
+      tools: [],
+      // What a refusal really produces: nothing decodes, so the loop reads it as
+      // a model that asked for no tools and calls the run done.
+      decision: {
+        decision: 'stop',
+        stop: { outcome: 'stopped', reason: { predicate: 'noToolCalls' } },
+      },
+    }
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input)
+        if (url.endsWith('api/profiles')) {
+          return Promise.resolve(Response.json(PROFILES))
+        }
+        if (url.endsWith('api/auth')) {
+          return Promise.resolve(Response.json(AUTH))
+        }
+        const stream = [
+          'event: turn',
+          `data: ${JSON.stringify({ event: 'turn', ...refused })}`,
+          '',
+          '',
+        ].join('\n')
+        return Promise.resolve(
+          new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
+        )
+      }),
+    )
+
+    render(<App />)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Turn 1/ })).toBeInTheDocument()
+    })
+
+    // One click on the turn is enough: a refusal opens its own body, because a
+    // red `400` with nothing under it is the whole problem this answers.
+    await user.click(screen.getByRole('button', { name: /Turn 1/ }))
+    expect(within(panel('Agent')).getByText(/maximum context length/)).toBeInTheDocument()
+  })
 })
 
 function turnFixture() {
