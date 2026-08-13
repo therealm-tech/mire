@@ -3,7 +3,7 @@
 //! One `POST` per request, to one endpoint. The answer is either a JSON object or
 //! an SSE stream whose last event carries the response; a client has to accept
 //! both, so both are handled here and collapsed into a single value. That much is
-//! true of all three revisions, which is why they fit behind one client.
+//! true of every revision, which is why they fit behind one client.
 //!
 //! What the revision decides, and the reason [`Revision`] answers questions
 //! instead of being matched on:
@@ -14,10 +14,11 @@
 //!   `-32020` if a header and the body disagree. A value that cannot be a plain
 //!   ASCII header is carried base64 in a sentinel wrapper, which the server undoes
 //!   before comparing. There is no handshake and no session.
-//! * **`2025-06-18`** and **`2025-03-26`** open with `initialize`, carry the
-//!   server's `Mcp-Session-Id` on every later request, and mirror nothing. The
-//!   older of the two predates the `MCP-Protocol-Version` header and is not sent
-//!   one.
+//! * **`2025-11-25`**, **`2025-06-18`** and **`2025-03-26`** open with
+//!   `initialize`, carry the server's `Mcp-Session-Id` on every later request, and
+//!   mirror nothing. The oldest of the three predates the `MCP-Protocol-Version`
+//!   header and is not sent one; the other two differ from each other in nothing
+//!   this client can observe beyond the version string itself.
 //!
 //! Which of them is in force is settled once per server by [`super::negotiate`]
 //! and cached here.

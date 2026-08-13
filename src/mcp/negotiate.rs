@@ -368,7 +368,7 @@ mod tests {
 
     #[test]
     fn what_this_build_speaks_reads_newest_first() {
-        assert_eq!(ours(), "2026-07-28, 2025-06-18, 2025-03-26");
+        assert_eq!(ours(), "2026-07-28, 2025-11-25, 2025-06-18, 2025-03-26");
     }
 
     #[test]

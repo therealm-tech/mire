@@ -658,14 +658,15 @@ accident:
 
 ### Which revision you are actually speaking
 
-`mire` speaks three revisions of the Streamable HTTP transport, and settles on
-one per server, once, on first use:
+`mire` speaks four revisions of the Streamable HTTP transport, and settles on one
+per server, once, on first use:
 
 | Revision | Shape |
 | --- | --- |
 | `2026-07-28` | No handshake, no session. Selected body fields mirrored into `Mcp-Method` / `Mcp-Name` / `Mcp-Param-*` |
-| `2025-06-18` | `initialize` handshake, `Mcp-Session-Id` on every later request |
-| `2025-03-26` | The same, minus the `MCP-Protocol-Version` header it predates |
+| `2025-11-25` | `initialize` handshake, `Mcp-Session-Id` on every later request. What the handshake proposes |
+| `2025-06-18` | The same on the wire; only the version string the two ends agree on differs |
+| `2025-03-26` | The same again, minus the `MCP-Protocol-Version` header it predates |
 
 It settles them by asking, newest first. `server/discover` answers with every
 version a server speaks — but it is itself a method of `2026-07-28`, so it cannot

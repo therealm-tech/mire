@@ -20,10 +20,10 @@
 //! and nothing else to go on, because the version was a constant. It is now a
 //! [`Revision`], negotiated per server and cached — see [`negotiate`].
 //!
-//! The three supported revisions share one endpoint and one `POST`, which is why
-//! they fit behind a single client. What separates them is small and mechanical:
-//! the two older ones open with `initialize` and carry a session, the newest one
-//! has neither and mirrors selected body fields into headers instead.
+//! Every supported revision shares one endpoint and one `POST`, which is why they
+//! fit behind a single client. What separates them is small and mechanical: the
+//! older ones open with `initialize` and carry a session, the newest one has
+//! neither and mirrors selected body fields into headers instead.
 //!
 //! Owning it keeps every call on [`crate::transport`]'s client — so `--ca-bundle`,
 //! the proxy settings and the redirect policy apply to an MCP server exactly as
@@ -118,7 +118,7 @@ pub fn drain(journal: &McpJournal) -> Vec<McpExchange> {
 /// Ordered oldest to newest, so `Ord` means "is newer than" and choosing the best
 /// revision two parties share is a `max()` over the intersection.
 ///
-/// All three are one endpoint and one `POST` per request. Everything that differs
+/// All of them are one endpoint and one `POST` per request. Everything that differs
 /// between them is exposed as a method below, so the client asks the revision what
 /// to do rather than matching on it in five places.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -129,6 +129,15 @@ pub enum Revision {
     /// Adds the `MCP-Protocol-Version` header on every post-handshake request.
     #[serde(rename = "2025-06-18")]
     V20250618,
+    /// The last of the handshaking revisions.
+    ///
+    /// Nothing this client does differs from `2025-06-18`: the same `initialize`,
+    /// the same `MCP-Session-Id`, the same version header. What separates them is
+    /// the string both ends have to agree on — which is reason enough to speak
+    /// it, because a server that has dropped everything older is unreachable
+    /// without it.
+    #[serde(rename = "2025-11-25")]
+    V20251125,
     /// Drops the handshake and the session; adds mirrored headers.
     #[serde(rename = "2026-07-28")]
     V20260728,
@@ -136,7 +145,12 @@ pub enum Revision {
 
 impl Revision {
     /// Every revision this client speaks, oldest first.
-    pub const ALL: [Self; 3] = [Self::V20250326, Self::V20250618, Self::V20260728];
+    pub const ALL: [Self; 4] = [
+        Self::V20250326,
+        Self::V20250618,
+        Self::V20251125,
+        Self::V20260728,
+    ];
 
     /// The newest one, which is what `mire` prefers and proposes first.
     pub const LATEST: Self = Self::V20260728;
@@ -146,7 +160,7 @@ impl Revision {
     /// What `initialize` proposes when discovery got us nowhere: a server that
     /// speaks something older answers with the older version rather than failing,
     /// which is the whole point of that handshake.
-    pub const LATEST_LEGACY: Self = Self::V20250618;
+    pub const LATEST_LEGACY: Self = Self::V20251125;
 
     /// The wire spelling, which is also what the specification calls it.
     #[must_use]
@@ -154,6 +168,7 @@ impl Revision {
         match self {
             Self::V20250326 => "2025-03-26",
             Self::V20250618 => "2025-06-18",
+            Self::V20251125 => "2025-11-25",
             Self::V20260728 => "2026-07-28",
         }
     }
@@ -442,7 +457,7 @@ mod tests {
         assert!(error.contains("1999-01-01"), "{error}");
         // Newest first, because that is the one a reader is looking for.
         assert!(
-            error.contains("2026-07-28, 2025-06-18, 2025-03-26"),
+            error.contains("2026-07-28, 2025-11-25, 2025-06-18, 2025-03-26"),
             "{error}"
         );
     }
@@ -450,21 +465,29 @@ mod tests {
     #[test]
     fn the_handshake_is_what_separates_the_two_transports() {
         assert!(!Revision::LATEST.handshakes());
+        assert!(Revision::V20251125.handshakes());
         assert!(Revision::V20250618.handshakes());
         assert!(Revision::V20250326.handshakes());
 
         // Mirrored headers are unsolicited routing metadata anywhere else.
         assert!(Revision::LATEST.mirrors_headers());
+        assert!(!Revision::V20251125.mirrors_headers());
         assert!(!Revision::V20250618.mirrors_headers());
 
         // `MCP-Protocol-Version` postdates the oldest revision we speak.
         assert!(!Revision::V20250326.sends_version_header());
         assert!(Revision::V20250618.sends_version_header());
+        assert!(Revision::V20251125.sends_version_header());
 
         // Discovery is a method of the newest revision, so it cannot be the only
         // probe — that asymmetry is the reason `negotiate` has a ladder.
         assert!(Revision::LATEST.discoverable());
+        assert!(!Revision::V20251125.discoverable());
         assert!(!Revision::V20250618.discoverable());
+
+        // The one the handshake proposes: newest of the handshaking revisions, so
+        // a server on an older one answers with its own rather than failing.
+        assert_eq!(Revision::LATEST_LEGACY, Revision::V20251125);
     }
 
     #[test]

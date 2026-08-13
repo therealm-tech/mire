@@ -109,7 +109,7 @@ const MCP = {
   ],
   // What this build speaks, newest first, as the server reports it. The UI keeps
   // no list of its own.
-  revisions: ['2026-07-28', '2025-06-18', '2025-03-26'],
+  revisions: ['2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26'],
   issues: [],
 }
 
@@ -450,7 +450,7 @@ describe('App', () => {
       within(protocol)
         .getAllByRole('option')
         .map((option) => option.textContent),
-    ).toEqual(['auto', '2026-07-28', '2025-06-18', '2025-03-26'])
+    ).toEqual(['auto', '2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26'])
     expect(protocol).toHaveValue('')
     expect(screen.getByText(/Negotiated per server/)).toBeInTheDocument()
   })

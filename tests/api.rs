@@ -3640,7 +3640,7 @@ async fn the_api_lists_servers_and_asks_one_what_it_offers() {
     // not have to keep its own copy of the list.
     assert_eq!(
         listing["revisions"],
-        json!(["2026-07-28", "2025-06-18", "2025-03-26"])
+        json!(["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26"])
     );
 
     let tools = harness.get("/api/mcp/weather/tools").await;
@@ -3771,6 +3771,48 @@ async fn an_older_server_is_reached_by_falling_back_to_the_handshake() {
             .map(|v| v.to_str().unwrap()),
         Some("2025-06-18")
     );
+}
+
+#[tokio::test]
+async fn a_server_on_the_last_handshaking_revision_is_reached_without_a_downgrade() {
+    // What `initialize` proposes, so a server that speaks only this one is
+    // reached on the first try rather than refused for sharing nothing.
+    let mcp = legacy_mcp_server("2025-11-25").await;
+    let harness = Harness::start(&[(
+        "mcp.yaml",
+        format!("servers:\n  - name: files\n    url: {}/mcp\n", mcp.uri()),
+    )])
+    .await;
+
+    let answer = harness.get("/api/mcp/files/tools").await;
+    assert_eq!(answer["protocol"]["revision"], "2025-11-25");
+    assert_eq!(answer["protocol"]["settled"], "handshake");
+    assert_eq!(answer["tools"][0]["name"], "get_weather");
+
+    let listing = mcp
+        .received_requests()
+        .await
+        .expect("requests")
+        .into_iter()
+        .find(|request| String::from_utf8_lossy(&request.body).contains("tools/list"))
+        .expect("a listing went out");
+
+    assert_eq!(
+        listing
+            .headers
+            .get("mcp-protocol-version")
+            .map(|v| v.to_str().unwrap()),
+        Some("2025-11-25")
+    );
+    // Handshaking revision: a session, and none of the newest one's mirroring.
+    assert_eq!(
+        listing
+            .headers
+            .get("mcp-session-id")
+            .map(|v| v.to_str().unwrap()),
+        Some("session-from-initialize")
+    );
+    assert!(listing.headers.get("mcp-method").is_none());
 }
 
 #[tokio::test]
@@ -4180,7 +4222,7 @@ async fn an_unknown_pinned_revision_is_a_load_issue_naming_what_we_speak() {
     let message = listing["issues"][0]["message"].as_str().unwrap();
     assert!(message.contains("1999-01-01"), "{message}");
     assert!(
-        message.contains("2026-07-28, 2025-06-18, 2025-03-26"),
+        message.contains("2026-07-28, 2025-11-25, 2025-06-18, 2025-03-26"),
         "{message}"
     );
     // The bad entry is skipped; it must not take the file down with it.
