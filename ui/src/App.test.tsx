@@ -12,6 +12,7 @@ const PROFILES = {
       kind: 'chat',
       url: 'https://models.internal/v1/chat/completions',
       auth: null,
+      mcp: [],
       source: '/tmp/chat.yaml',
       hasDecode: true,
     },
@@ -20,7 +21,39 @@ const PROFILES = {
       kind: 'embedding',
       url: 'https://models.internal/v1/embeddings',
       auth: null,
+      mcp: [],
       source: '/tmp/embed.yaml',
+      hasDecode: true,
+    },
+    // Names a credential this tab has to be asked for, and three MCP servers.
+    {
+      name: 'guarded',
+      kind: 'chat',
+      url: 'http://127.0.0.1:11435/v1/messages',
+      auth: 'pasted',
+      mcp: ['dev', 'keyed', 'ghost'],
+      source: '/tmp/guarded.yaml',
+      hasDecode: true,
+    },
+    // Calls as a human, which is the one identity nobody can put in a file.
+    {
+      name: 'as-me',
+      kind: 'chat',
+      url: 'https://models.internal/v1/as-me',
+      auth: 'me',
+      mcp: [],
+      source: '/tmp/as-me.yaml',
+      hasDecode: true,
+    },
+    // Broken on purpose: `gateway` may only be sent to 127.0.0.1, and this
+    // points somewhere else. Every call it makes is refused before it goes out.
+    {
+      name: 'pinned',
+      kind: 'chat',
+      url: 'https://models.internal/v1/pinned',
+      auth: 'gateway',
+      mcp: [],
+      source: '/tmp/pinned.yaml',
       hasDecode: true,
     },
   ],
@@ -29,9 +62,51 @@ const PROFILES = {
 
 const AUTH = {
   providers: [
-    { name: 'anonymous', kind: 'anonymous', needsValue: false, needsLogin: false },
-    { name: 'pasted', kind: 'token', needsValue: true, needsLogin: false },
-    { name: 'me', kind: 'oidc_browser', needsValue: false, needsLogin: true },
+    {
+      name: 'anonymous',
+      kind: 'anonymous',
+      needsValue: false,
+      needsLogin: false,
+      allowedHosts: [],
+    },
+    { name: 'pasted', kind: 'token', needsValue: true, needsLogin: false, allowedHosts: [] },
+    // Pinned to the local gateway, so it is a choice for `guarded` and not one
+    // for the profiles pointing at models.internal.
+    {
+      name: 'gateway',
+      kind: 'token',
+      needsValue: false,
+      needsLogin: false,
+      allowedHosts: ['127.0.0.1'],
+    },
+    { name: 'me', kind: 'oidc_browser', needsValue: false, needsLogin: true, allowedHosts: [] },
+  ],
+  issues: [],
+}
+
+/**
+ * Two servers, authenticating in the two ways `mcp.yaml` allows: `dev` names a
+ * provider outright, `keyed` reaches for one from inside a header template. Both
+ * are settled here rather than chosen per call, which is the whole point of
+ * showing them apart from the selector.
+ */
+const MCP = {
+  servers: [
+    {
+      name: 'dev',
+      url: 'http://127.0.0.1:11436/mcp',
+      auth: 'me',
+      tools: ['get_weather'],
+      headers: [],
+      usesAuth: [],
+    },
+    {
+      name: 'keyed',
+      url: 'https://files.internal/mcp',
+      tools: [],
+      headers: ['x-api-key'],
+      usesAuth: ['gateway'],
+    },
   ],
   issues: [],
 }
@@ -153,8 +228,36 @@ function mockApi(routes: Record<string, unknown>) {
   })
 }
 
+/** Records every `api/agent` body, so a test can assert what went out. */
+function recordingApi(answers: string[]) {
+  const sent: Array<Record<string, unknown>> = []
+  let turn = 0
+
+  const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    if (url.endsWith('api/profiles')) {
+      return Promise.resolve(Response.json(PROFILES))
+    }
+    if (url.endsWith('api/auth')) {
+      return Promise.resolve(Response.json(AUTH))
+    }
+    if (url.endsWith('api/mcp')) {
+      return Promise.resolve(Response.json(MCP))
+    }
+    if (url.endsWith('api/agent')) {
+      sent.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      const answer = answers[turn] ?? 'pong'
+      turn += 1
+      return Promise.resolve(sse(agentStream([answerTurn(200, answer)])))
+    }
+    throw new Error(`unexpected fetch: ${url}`)
+  })
+
+  return { fetchMock, sent }
+}
+
 beforeEach(() => {
-  vi.stubGlobal('fetch', mockApi({ 'api/profiles': PROFILES, 'api/auth': AUTH }))
+  vi.stubGlobal('fetch', mockApi({ 'api/profiles': PROFILES, 'api/auth': AUTH, 'api/mcp': MCP }))
 })
 
 afterEach(() => {
@@ -178,22 +281,34 @@ describe('statusTone', () => {
 })
 
 describe('App', () => {
-  it('lists the profiles and the auth providers', async () => {
+  it('lists the profiles and the identity the selected one calls with', async () => {
+    const user = userEvent.setup()
     render(<App />)
 
-    expect(await screen.findByRole('button', { name: /chat/ })).toBeInTheDocument()
+    // Anchored: a profile of kind `chat` carries the word in its badge too.
+    expect(await screen.findByRole('button', { name: /^chat/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /embed/ })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /anonymous/ })).toBeInTheDocument()
+
+    // `chat` declares no `auth:`, which resolves to the anonymous provider —
+    // shown, and said out loud rather than left to be inferred from a blank.
+    // `toHaveTextContent`, because the sentence is split around a `<span>`.
+    expect(within(screen.getByTestId('model-auth')).getByText('anonymous')).toBeInTheDocument()
+    expect(screen.getByTestId('model-auth')).toHaveTextContent('no auth: in this profile')
+
+    // Following the profile, because that is where the identity is declared.
+    await user.click(screen.getByRole('button', { name: /as-me/ }))
+    expect(within(screen.getByTestId('model-auth')).getByText('me')).toBeInTheDocument()
   })
 
   it('prompts for a credential only when the provider needs one', async () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await screen.findByRole('button', { name: /anonymous/ })
+    await screen.findByRole('button', { name: /^chat/ })
     expect(screen.queryByPlaceholderText('paste the credential')).not.toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: /pasted/ }))
+    // `guarded` names `pasted`, whose value the registry does not know.
+    await user.click(screen.getByRole('button', { name: /guarded/ }))
     expect(screen.getByPlaceholderText('paste the credential')).toBeInTheDocument()
   })
 
@@ -204,6 +319,7 @@ describe('App', () => {
       mockApi({
         'api/profiles': PROFILES,
         'api/auth': AUTH,
+        'api/mcp': MCP,
         'api/agent': agentStream([answerTurn(401, null)]),
       }),
     )
@@ -227,6 +343,7 @@ describe('App', () => {
       mockApi({
         'api/profiles': PROFILES,
         'api/auth': AUTH,
+        'api/mcp': MCP,
         'api/agent': agentStream([answerTurn(200)]),
       }),
     )
@@ -242,6 +359,85 @@ describe('App', () => {
     expect(screen.getByRole('button', { name: 'Copy as curl' })).toBeInTheDocument()
     // The masked credential is what the UI was handed, and what it shows.
     expect(screen.getByText(/authorization: \*\*\*/)).toBeInTheDocument()
+  })
+
+  it('offers no way to call as somebody else', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: /guarded/ }))
+
+    // The identity is the profile's. Nothing in the panel switches it — the only
+    // buttons here are the ones that fetch a session or drop it.
+    const buttons = within(panel('Auth'))
+      .queryAllByRole('button')
+      .map((button) => button.textContent ?? '')
+    expect(buttons.filter((label) => /^(anonymous|pasted|gateway|me)$/.test(label))).toEqual([])
+  })
+
+  it('never puts an auth of its own on the wire', async () => {
+    const { fetchMock, sent } = recordingApi(['pong'])
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(sent).toHaveLength(1))
+
+    // The profile says who it calls as, and the server reads the same file. A
+    // copy travelling alongside is a second thing that can disagree with it.
+    expect(sent[0]).not.toHaveProperty('auth')
+  })
+
+  it('says when a profile names a credential that cannot reach it', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: /pinned/ }))
+
+    expect(screen.getByText('out of allowed_hosts')).toBeInTheDocument()
+    expect(screen.getByText(/refused before anything goes out/)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /guarded/ }))
+    expect(screen.queryByText('out of allowed_hosts')).not.toBeInTheDocument()
+  })
+
+  it('lists the MCP identities apart from the model one', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    // A profile with no `mcp:` has nothing to say here, so it says nothing.
+    await screen.findByRole('button', { name: /^chat/ })
+    expect(screen.queryByRole('heading', { name: 'MCP servers' })).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /guarded/ }))
+    expect(screen.getByRole('heading', { name: 'MCP servers' })).toBeInTheDocument()
+
+    // `guarded` authenticates the model with `pasted`; none of that reaches the
+    // servers, which answer to their own entries.
+    expect(within(screen.getByTestId('model-auth')).getByText('pasted')).toBeInTheDocument()
+
+    // Named outright, and the browser provider it names has no session — so a
+    // tool call would be refused before anything went out.
+    const dev = screen.getByTestId('mcp-dev')
+    const devIdentities = within(screen.getByTestId('mcp-dev-identities'))
+    expect(devIdentities.getByText('me')).toBeInTheDocument()
+    expect(devIdentities.getByText('not signed in')).toBeInTheDocument()
+
+    // Reached from a header template rather than declared as `auth:`.
+    const keyed = screen.getByTestId('mcp-keyed')
+    expect(within(keyed).getByText('gateway')).toBeInTheDocument()
+    expect(within(keyed).getByText(/in a header template/)).toBeInTheDocument()
+
+    // Nothing here selects a credential — the only button is the one that gets
+    // a session, and a server that needs none offers nothing at all.
+    expect(within(dev).getAllByRole('button')).toHaveLength(1)
+    expect(within(dev).getByRole('button', { name: /Sign in to me/ })).toBeInTheDocument()
+    expect(within(keyed).queryByRole('button')).not.toBeInTheDocument()
+
+    // A profile naming a server that `mcp.yaml` never declared says so.
+    expect(screen.getByText(/declared in no/)).toBeInTheDocument()
   })
 
   it('switches to the embedding input when an embedding profile is selected', async () => {
@@ -315,6 +511,9 @@ describe('agent mode', () => {
         if (url.endsWith('api/auth')) {
           return Promise.resolve(Response.json(AUTH))
         }
+        if (url.endsWith('api/mcp')) {
+          return Promise.resolve(Response.json(MCP))
+        }
         if (url.endsWith('api/agent')) {
           return Promise.resolve(sse(agentStream([answerTurn(200)])))
         }
@@ -379,6 +578,9 @@ describe('agent mode', () => {
         if (url.endsWith('api/auth')) {
           return Promise.resolve(Response.json(AUTH))
         }
+        if (url.endsWith('api/mcp')) {
+          return Promise.resolve(Response.json(MCP))
+        }
         return Promise.resolve(
           new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
         )
@@ -437,6 +639,9 @@ describe('agent mode', () => {
         if (url.endsWith('api/auth')) {
           return Promise.resolve(Response.json(AUTH))
         }
+        if (url.endsWith('api/mcp')) {
+          return Promise.resolve(Response.json(MCP))
+        }
         return Promise.resolve(
           new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
         )
@@ -474,6 +679,9 @@ describe('agent mode', () => {
         }
         if (url.endsWith('api/auth')) {
           return Promise.resolve(Response.json(AUTH))
+        }
+        if (url.endsWith('api/mcp')) {
+          return Promise.resolve(Response.json(MCP))
         }
         return Promise.resolve(
           new Response(stream, {
@@ -533,6 +741,9 @@ describe('agent mode', () => {
         }
         if (url.endsWith('api/auth')) {
           return Promise.resolve(Response.json(AUTH))
+        }
+        if (url.endsWith('api/mcp')) {
+          return Promise.resolve(Response.json(MCP))
         }
         const stream = [
           'event: turn',
@@ -620,14 +831,14 @@ describe('browser login', () => {
     ),
   }
 
-  it('offers a sign-in button only for a provider that needs one', async () => {
+  it('offers a sign-in button only where the profile calls as a human', async () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await user.click(await screen.findByRole('button', { name: /anonymous/ }))
+    await user.click(await screen.findByRole('button', { name: /^chat/ }))
     expect(screen.queryByRole('button', { name: 'Sign in' })).not.toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: /^me/ }))
+    await user.click(screen.getByRole('button', { name: /as-me/ }))
     expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument()
   })
 
@@ -654,6 +865,8 @@ describe('browser login', () => {
             state: 'abc',
           }
           signedIn = true
+        } else if (url.endsWith('api/mcp')) {
+          payload = MCP
         } else if (url.endsWith('api/auth')) {
           payload = signedIn ? SIGNED_IN : AUTH
         }
@@ -670,7 +883,7 @@ describe('browser login', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await user.click(await screen.findByRole('button', { name: /^me/ }))
+    await user.click(await screen.findByRole('button', { name: /as-me/ }))
     await user.click(screen.getByRole('button', { name: 'Sign in' }))
 
     const login = await waitFor(() => {
@@ -717,6 +930,8 @@ describe('browser login', () => {
             redirectUri: 'x',
             state: 's',
           }
+        } else if (url.endsWith('api/mcp')) {
+          payload = MCP
         } else if (url.endsWith('api/auth')) {
           payload = withError
         }
@@ -732,7 +947,7 @@ describe('browser login', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await user.click(await screen.findByRole('button', { name: /^me/ }))
+    await user.click(await screen.findByRole('button', { name: /as-me/ }))
 
     // The reason survives the tab that closed, which is the whole point.
     expect(screen.getByText(/refused the login/)).toBeInTheDocument()
@@ -742,16 +957,30 @@ describe('browser login', () => {
     await waitFor(() => expect(prompts).toContain('login'))
   })
 
-  it('shows the session and lets you drop it', async () => {
-    let signedIn = true
+  it('signs in from an MCP row without touching the model credential', async () => {
+    const popup = { location: { href: '' }, closed: false, close: vi.fn() }
+    vi.stubGlobal(
+      'open',
+      vi.fn(() => popup),
+    )
+
+    const logins: string[] = []
+    let signedIn = false
     vi.stubGlobal(
       'fetch',
       vi.fn((input: RequestInfo | URL) => {
         const url = String(input)
         let payload: unknown = PROFILES
-        if (url.endsWith('/logout')) {
-          signedIn = false
-          payload = { signedOut: true }
+        if (url.endsWith('/login')) {
+          logins.push(url)
+          payload = {
+            authorizationUrl: 'https://idp.example/authorize',
+            redirectUri: 'x',
+            state: 's',
+          }
+          signedIn = true
+        } else if (url.endsWith('api/mcp')) {
+          payload = MCP
         } else if (url.endsWith('api/auth')) {
           payload = signedIn ? SIGNED_IN : AUTH
         }
@@ -767,7 +996,52 @@ describe('browser login', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await user.click(await screen.findByRole('button', { name: /^me/ }))
+    await user.click(await screen.findByRole('button', { name: /guarded/ }))
+    await user.click(
+      within(screen.getByTestId('mcp-dev')).getByRole('button', { name: /Sign in to me/ }),
+    )
+    expect(logins.some((url) => url.endsWith('/api/auth/me/login'))).toBe(true)
+
+    // The session lands, so the row stops asking for one.
+    await waitFor(
+      () =>
+        expect(within(screen.getByTestId('mcp-dev')).queryByRole('button')).not.toBeInTheDocument(),
+      { timeout: 4000 },
+    )
+
+    // And the model still calls as what the profile says. A server needing a
+    // session is not an opinion about the model's identity.
+    expect(within(screen.getByTestId('model-auth')).getByText('pasted')).toBeInTheDocument()
+  })
+
+  it('shows the session and lets you drop it', async () => {
+    let signedIn = true
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input)
+        let payload: unknown = PROFILES
+        if (url.endsWith('/logout')) {
+          signedIn = false
+          payload = { signedOut: true }
+        } else if (url.endsWith('api/mcp')) {
+          payload = MCP
+        } else if (url.endsWith('api/auth')) {
+          payload = signedIn ? SIGNED_IN : AUTH
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify(payload), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+        )
+      }),
+    )
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: /as-me/ }))
     expect(screen.getByText('gleroy')).toBeInTheDocument()
     expect(screen.getByText('expires in 4 min')).toBeInTheDocument()
     expect(screen.getByText(/granted: openid profile/)).toBeInTheDocument()
@@ -780,31 +1054,6 @@ describe('browser login', () => {
 })
 
 describe('conversation', () => {
-  /** Records every `api/agent` body, so a test can assert what went out. */
-  function recordingApi(answers: string[]) {
-    const sent: Array<Record<string, unknown>> = []
-    let turn = 0
-
-    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input)
-      if (url.endsWith('api/profiles')) {
-        return Promise.resolve(Response.json(PROFILES))
-      }
-      if (url.endsWith('api/auth')) {
-        return Promise.resolve(Response.json(AUTH))
-      }
-      if (url.endsWith('api/agent')) {
-        sent.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
-        const answer = answers[turn] ?? 'pong'
-        turn += 1
-        return Promise.resolve(sse(agentStream([answerTurn(200, answer)])))
-      }
-      throw new Error(`unexpected fetch: ${url}`)
-    })
-
-    return { fetchMock, sent }
-  }
-
   /** The message box, once the configuration has landed and it exists. */
   async function type(user: ReturnType<typeof userEvent.setup>, text: string) {
     const box = await screen.findByRole('textbox', { name: /message/i })

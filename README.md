@@ -130,12 +130,30 @@ listen address explicitly with `--host 0.0.0.0`. That is a choice, not a default
 Deliberately small. It does not edit anything — the profiles are yours and your
 editor's — and it holds no logic of its own: it shows what the API returns.
 
-- **Auth selector, above everything else.** Replaying the same request across
-  every mode is the central move, so switching is one click and changes nothing
-  else. A `401` asked anonymously shows up green, with a note saying the route is
-  protected, because that is a pass. A provider that signs in through a browser
-  carries a dot for its session state, and a **Sign in** button that says who you
-  are once you are back.
+- **Auth, above everything else, and read-only.** The identity is the profile's,
+  declared in its `auth:` next to the URL it authenticates against, so the panel
+  shows it rather than offering alternatives — what you read in the file is what
+  went out, and the UI never puts an `auth` of its own on the wire. To ask the
+  same endpoint as somebody else, copy the profile and change one line; that copy
+  is a thing you can name, keep and re-run, which a click never was. A profile
+  with no `auth:` says so and resolves to `anonymous`, where a `401` shows up
+  green with a note that the route is protected, because that is a pass. A
+  profile naming a credential whose `allowed_hosts` excludes its own URL is
+  flagged outright — every call it makes is refused before anything goes out.
+
+  What stays interactive is what no file could hold: a credential typed into this
+  tab, and a browser session somebody has to go and fetch — **Sign in**, then who
+  you are and a countdown.
+
+  Under it, in its own section, the same panel lists the identities the profile's
+  **MCP servers** will use. A separate question answered in a separate file: the
+  model's identity comes from the profile, a server's from `mcp.yaml`, and
+  neither follows the other. Each row names the provider (or `anonymous`), says
+  when it comes from a header template rather than `auth:`, and warns when it is
+  a browser provider nobody has signed in to — that call answers
+  `409 not_signed_in` and sends nothing, so the **Sign in** button for it is on
+  the row itself. A profile naming a server `mcp.yaml` does not declare is called
+  out there too.
 - **Request.** A prompt for a chat profile, one text per line for an embedding
   one. **Send** goes out; for a chat profile it is always the
   [loop](#agent-mode), because a profile with no tools stops on turn one and
@@ -222,17 +240,14 @@ Models, as of August 2026 — these rankings move monthly, so revisit the choice
   pulled embedding model in the Ollama library, and it runs on a CPU.
   `qwen3-embedding:0.6b` scores higher (70.7 on MTEB-eng-v2) at 639 MB.
 
-Six profiles come with it, each showing one thing:
+Two profiles come with it, one per kind:
 
-- **`qwen3-chat`** — Ollama's OpenAI-compatible endpoint. The obvious one.
-- **`qwen3-native`** — Ollama's *own* chat API. Content at `$.message.content`,
-  stop reason called `done_reason`, token counters at the top level instead of
-  under `usage`. Its `decode:` block is byte-for-byte identical to
-  `qwen3-chat`'s: the cascades absorb the difference, and the trace tells you
-  which path won. This is the "endpoint that does not answer like OpenAI" you
-  can actually run.
-- **`qwen3-guarded`** — the same model behind the gateway. Replay it across the
-  four auth modes and you get the matrix this tool exists for:
+- **`qwen3`** — the chat one, and it carries everything `mire` does with a chat
+  endpoint at once: a template driven by the call, a decode cascade, an agent
+  loop, real MCP tools, and an `auth:`. It points at the **gateway**, not at
+  Ollama, which is what turns auth into a question with an answer. Change that
+  one line — or `POST /api/call` with an `auth` override — and you get the matrix
+  this tool exists for:
 
   ```
   anonymous          -> 401   the route is protected — a pass
@@ -241,13 +256,18 @@ Six profiles come with it, each showing one thing:
   keycloak-user      -> 200   a token fetched for you, after signing in
   ```
 
-- **`nomic-embed`** — embeddings, with `$.data[*].embedding` deliberately kept
-  first in the cascade so you can watch it miss and `$.embeddings` take over.
-- **`qwen3-scripted`** — the same model decoded by a Rhai script instead of
-  cascades: it strips a reasoning block and turns Ollama's nanosecond counters
-  into tokens per second, neither of which a path can do.
-- **`qwen3-mcp`** — agent mode against the MCP server, with tools that are
-  really called rather than simulated.
+- **`nomic`** — embeddings, straight at Ollama with no credential, and with
+  `$.data[*].embedding` deliberately kept first in the cascade so you can watch
+  it miss and `$.embeddings` take over. No `auth:`, so it calls as `anonymous`
+  and the panel says as much.
+
+Both files are commented with the edit that turns them into the next experiment
+— `qwen3` in particular is two lines away from Ollama's *own* chat API, where the
+content sits at `$.message.content`, the stop reason is called `done_reason` and
+the token counters are at the top level. Its cascades already list both shapes,
+so nothing has to change to follow it and the decode trace names the path that
+won. That divergence — same model, same weights, two answers to "are you
+finished?" — is the sort of thing this tool exists to make visible.
 
 Ollama runs on the CPU inside the container, which on a laptop means well under
 one token per second. Keep `max_tokens` small, and leave qwen3's thinking off
@@ -316,6 +336,18 @@ works), or the UI. `auth.yaml` is safe to commit; it only says where to look.
 `anonymous` always exists without being declared. That is what lets you ask "is
 this route actually protected?" — and a `401` from it is a *passing* result, not
 a failure.
+
+Any provider may add `allowed_hosts`, and every kind honours it:
+
+```yaml
+    allowed_hosts:
+      - models.internal
+```
+
+An empty list — the default — means anywhere. A non-empty one is a rule about
+where that credential may be sent, refused before anything goes out, and it is
+also what keeps the UI from offering a provider against a profile pointing
+somewhere it is not allowed to go.
 
 ### Testing with a workload identity
 
@@ -406,7 +438,7 @@ profile, the matrix is two `POST /api/call` bodies apart:
 ```sh
 for auth in anonymous static-token keycloak-workload; do
   curl -s localhost:8787/api/call -H 'content-type: application/json' \
-    -d "{\"profile\": \"qwen3-guarded\", \"auth\": \"$auth\", \"prompt\": \"ping\"}" |
+    -d "{\"profile\": \"qwen3\", \"auth\": \"$auth\", \"prompt\": \"ping\"}" |
     jq -r '"\(.auth): \(.response.http.status)"'
 done
 ```
@@ -433,7 +465,7 @@ the thing you paste into a ticket:
 ```sh
 curl -s localhost:8787/api/call \
   -H 'content-type: application/json' \
-  -d '{"profile": "qwen3-chat", "prompt": "ping"}' | jq -r .curl
+  -d '{"profile": "qwen3", "prompt": "ping"}' | jq -r .curl
 ```
 
 Credentials are masked in the `curl` export, in the request view, and in every
@@ -471,8 +503,9 @@ went wrong:
 ```
 
 That is the fast way to fix a profile: look at the raw tree, pick the right path,
-edit the file. See [`profiles/qwen3-native.yaml`](profiles/qwen3-native.yaml) for
-a worked example — one `decode:` block covering two unrelated response shapes.
+edit the file. See [`profiles/qwen3.yaml`](profiles/qwen3.yaml) for a worked
+example — one `decode:` block covering two unrelated response shapes, of which
+only the first wins until you point the profile at the other endpoint.
 
 A profile with no `decode:` block at all is valid — that is the normal state of
 an endpoint you have not figured out yet.
@@ -519,8 +552,10 @@ test asserts it stays that way. A decode script that fails is *not* fatal: its
 message lands in the decode trace next to the raw response, exactly like a path
 that missed.
 
-See [`profiles/qwen3-scripted.yaml`](profiles/qwen3-scripted.yaml) for a worked
-example against the local stack.
+Neither shipped profile uses one, on purpose: they are meant to be read, and a
+script is what you add once a cascade has already failed you. The snippet above
+is the real motivating case — qwen3 emits its reasoning inside a
+`<think>…</think>` block, and no path can strip a prefix.
 
 ## Really calling tools
 
@@ -747,7 +782,7 @@ request body — which is why the flag goes through the template rather than bei
 something `mire` does on your behalf.
 
 ```console
-$ curl -N -X POST localhost:8787/api/call/stream -d '{"profile":"qwen3-chat","prompt":"…"}'
+$ curl -N -X POST localhost:8787/api/call/stream -d '{"profile":"qwen3","prompt":"…"}'
 event: open
 data: {"event":"open","status":200,…}
 
@@ -801,7 +836,7 @@ An embedding profile takes `input` — a string or a list of strings — instead
 ```sh
 curl -s localhost:8787/api/call \
   -H 'content-type: application/json' \
-  -d '{"profile": "nomic-embed", "input": ["one", "two"], "repeat": 2}' | jq .response.decoded
+  -d '{"profile": "nomic", "input": ["one", "two"], "repeat": 2}' | jq .response.decoded
 ```
 
 ```json
@@ -912,9 +947,9 @@ reported. The others are `stopped` (a predicate held), `maxIterations`,
 `deadline`, and `repeatedCall` — the model asking for the same tool with the same
 arguments twice, which is a loop rather than progress.
 
-Try it against the local stack: `qwen3-native` declares a `get_weather` tool and
-qwen3 does call it. On a CPU-only Ollama a two-turn run takes about ninety
-seconds.
+Try it against the local stack: `qwen3` fetches `get_weather` from the `dev` MCP
+server and really calls it. On a CPU-only Ollama a two-turn run takes about
+ninety seconds.
 
 ## API
 
@@ -924,7 +959,7 @@ seconds.
 | --- | --- |
 | `GET /api/profiles` | Every profile, plus the files that failed to load and why |
 | `GET /api/profiles/{name}` | One profile, as declared |
-| `GET /api/auth` | Auth providers, for the selector, with session status |
+| `GET /api/auth` | Auth providers, with session status |
 | `GET /api/mcp` | MCP servers declared in `mcp.yaml` |
 | `GET /api/mcp/{name}/tools` | Ask a server what it offers, right now, and on which revision |
 | `POST /api/auth/{name}/login` | Start a browser login; returns where to send it |

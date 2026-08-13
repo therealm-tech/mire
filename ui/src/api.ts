@@ -31,7 +31,10 @@ export const profileSummarySchema = z.object({
   name: z.string(),
   kind: profileKindSchema,
   url: z.string(),
+  /** The model call's default credential. Not the MCP servers' — see `mcp`. */
   auth: z.string().nullable(),
+  /** Registry names of the MCP servers this profile's loop may reach. */
+  mcp: z.array(z.string()),
   source: z.string(),
   hasDecode: z.boolean(),
 })
@@ -54,6 +57,8 @@ export const authDescriptorSchema = z.object({
   kind: z.enum(['anonymous', 'token', 'oidc', 'oidc_browser']),
   needsValue: z.boolean(),
   needsLogin: z.boolean(),
+  /** Where this credential may be sent. Empty means anywhere. */
+  allowedHosts: z.array(z.string()),
   session: sessionViewSchema.optional(),
   lastError: z.string().optional(),
 })
@@ -70,6 +75,29 @@ export const logoutResponseSchema = z.object({
 
 export const authResponseSchema = z.object({
   providers: z.array(authDescriptorSchema),
+  issues: z.array(loadIssueSchema),
+})
+
+/**
+ * One MCP server, as declared.
+ *
+ * Its credential is settled here, in `mcp.yaml`, and resolved when a tool is
+ * actually called — so it is described rather than chosen: `auth` names a
+ * provider outright, `usesAuth` names the ones its header templates read, and a
+ * server with neither talks to its endpoint anonymously.
+ */
+export const mcpDescriptorSchema = z.object({
+  name: z.string(),
+  url: z.string(),
+  auth: z.string().optional(),
+  tools: z.array(z.string()),
+  /** Names only. The values are rendered per request and are usually secrets. */
+  headers: z.array(z.string()),
+  usesAuth: z.array(z.string()),
+})
+
+export const mcpResponseSchema = z.object({
+  servers: z.array(mcpDescriptorSchema),
   issues: z.array(loadIssueSchema),
 })
 
@@ -305,6 +333,8 @@ export type ProfileSummary = z.infer<typeof profileSummarySchema>
 export type ProfilesResponse = z.infer<typeof profilesResponseSchema>
 export type AuthDescriptor = z.infer<typeof authDescriptorSchema>
 export type AuthResponse = z.infer<typeof authResponseSchema>
+export type McpDescriptor = z.infer<typeof mcpDescriptorSchema>
+export type McpResponse = z.infer<typeof mcpResponseSchema>
 export type SessionView = z.infer<typeof sessionViewSchema>
 export type LoginResponse = z.infer<typeof loginResponseSchema>
 export type Decoded = z.infer<typeof decodedSchema>
@@ -325,7 +355,12 @@ export type ErrorBody = z.infer<typeof errorBodySchema>
 /** What a call needs. Mirrors `CallRequest` on the server. */
 export interface CallRequest {
   profile: string
-  auth: string
+  /**
+   * Overrides the profile's `auth:`. The UI never sends it — the profile is
+   * where the identity is declared, and a second copy on the wire is a second
+   * thing to keep in step.
+   */
+  auth?: string
   prompt?: string
   /** The conversation so far. Takes precedence over `prompt` on the server. */
   messages?: Message[]
@@ -394,6 +429,10 @@ export function fetchProfiles(): Promise<ProfilesResponse> {
 
 export function fetchAuth(): Promise<AuthResponse> {
   return request('api/auth', authResponseSchema)
+}
+
+export function fetchMcp(): Promise<McpResponse> {
+  return request('api/mcp', mcpResponseSchema)
 }
 
 /**

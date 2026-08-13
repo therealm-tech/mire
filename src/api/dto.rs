@@ -30,8 +30,14 @@ pub struct ProfileSummary {
     pub kind: ProfileKind,
     /// Where it points.
     pub url: Url,
-    /// Auth provider the profile defaults to.
+    /// Auth provider the profile defaults to, for the call to the model.
     pub auth: Option<String>,
+    /// MCP servers this profile's agent loop may reach, by registry name.
+    ///
+    /// Their credentials are a separate matter — declared in `mcp.yaml`, resolved
+    /// when a tool is actually called, and not what `auth` above selects. The UI
+    /// shows the two apart because they *are* apart.
+    pub mcp: Vec<String>,
     /// File it was read from.
     pub source: String,
     /// `false` when the profile has no `decode:` block yet, so the UI can offer
@@ -46,6 +52,7 @@ impl From<&Profile> for ProfileSummary {
             kind: profile.kind,
             url: profile.url.clone(),
             auth: profile.auth.clone(),
+            mcp: profile.mcp.clone(),
             source: profile.source.display().to_string(),
             has_decode: !profile.decode.is_empty(),
         }
@@ -395,7 +402,7 @@ mod tests {
 #[derive(Debug, Deserialize, JsonSchema, Validate)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 #[schemars(extend("example" = serde_json::json!({
-    "profile": "qwen3-native",
+    "profile": "qwen3",
     "prompt": "What is the weather in Paris?",
     "maxIterations": 6
 })))]

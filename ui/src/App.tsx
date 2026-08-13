@@ -8,8 +8,10 @@ import {
   call,
   callbackUri,
   fetchAuth,
+  fetchMcp,
   fetchProfiles,
   logout,
+  type McpResponse,
   type Message,
   type ProfilesResponse,
   runAgent,
@@ -19,8 +21,9 @@ import {
   type Turn,
 } from './api'
 import { AgentPanel } from './components/AgentPanel'
-import { AuthSelector } from './components/AuthSelector'
 import { ConversationPanel } from './components/ConversationPanel'
+import { McpAuth } from './components/McpAuth'
+import { ModelAuth } from './components/ModelAuth'
 import { ProfileList } from './components/ProfileList'
 import { Badge, Panel, Spinner } from './components/primitives'
 import { RenderedRequest, RequestPanel } from './components/RequestPanel'
@@ -113,10 +116,10 @@ async function waitForSession(provider: string, popup: Window | null): Promise<A
 export function App() {
   const [profiles, setProfiles] = useState<ProfilesResponse | null>(null)
   const [auth, setAuth] = useState<AuthResponse | null>(null)
+  const [mcp, setMcp] = useState<McpResponse | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
 
   const [selectedProfile, setSelectedProfile] = useState<string | null>(null)
-  const [selectedAuth, setSelectedAuth] = useState(ANONYMOUS)
   const [token, setToken] = useState('')
 
   const [prompt, setPrompt] = useState('ping')
@@ -128,7 +131,9 @@ export function App() {
   const [maxIterations, setMaxIterations] = useState(6)
 
   const [signingIn, setSigningIn] = useState<string | null>(null)
-  const [loginError, setLoginError] = useState<string | null>(null)
+  // Carries the provider, because two places can start a login now and an error
+  // shown against the wrong one is worse than no error at all.
+  const [loginError, setLoginError] = useState<{ provider: string; message: string } | null>(null)
 
   const [busy, setBusy] = useState(false)
   const [outcome, setOutcome] = useState<CallOutcome | null>(null)
@@ -138,14 +143,16 @@ export function App() {
   const [callError, setCallError] = useState<ApiError | null>(null)
 
   useEffect(() => {
-    Promise.all([fetchProfiles(), fetchAuth()])
-      .then(([loadedProfiles, loadedAuth]) => {
+    Promise.all([fetchProfiles(), fetchAuth(), fetchMcp()])
+      .then(([loadedProfiles, loadedAuth, loadedMcp]) => {
         setProfiles(loadedProfiles)
         setAuth(loadedAuth)
+        setMcp(loadedMcp)
         setSelectedProfile((current) => current ?? loadedProfiles.profiles[0]?.name ?? null)
         logger.info('config.loaded', {
           profiles: loadedProfiles.profiles.length,
           providers: loadedAuth.providers.length,
+          servers: loadedMcp.servers.length,
         })
       })
       .catch((error: unknown) => {
@@ -156,6 +163,17 @@ export function App() {
   }, [])
 
   const profile = profiles?.profiles.find((candidate) => candidate.name === selectedProfile)
+
+  /**
+   * The identity this profile calls with. `auth:` when it names one, otherwise
+   * the anonymous provider that always exists — the same resolution the server
+   * does, so what is shown is what goes out.
+   *
+   * The request bodies below leave `auth` out entirely rather than sending this:
+   * the server would only work it out again, and a UI that sends it is a UI that
+   * can disagree with the file.
+   */
+  const provider = auth?.providers.find((entry) => entry.name === (profile?.auth ?? ANONYMOUS))
 
   const signIn = useCallback((provider: string, prompt?: string) => {
     // Opened *before* awaiting anything: a popup opened after an await has lost
@@ -178,13 +196,12 @@ export function App() {
       })
       .then((latest) => {
         setAuth(latest)
-        setSelectedAuth(provider)
         logger.info('login.done', { provider })
       })
       .catch((error: unknown) => {
         const message = error instanceof ApiError ? error.body.message : String(error)
         logger.error('login.failed', { provider, message })
-        setLoginError(message)
+        setLoginError({ provider, message })
         popup?.close()
       })
       .finally(() => setSigningIn(null))
@@ -195,7 +212,7 @@ export function App() {
     logout(provider)
       .then(() => fetchAuth())
       .then(setAuth)
-      .catch((error: unknown) => setLoginError(String(error)))
+      .catch((error: unknown) => setLoginError({ provider, message: String(error) }))
   }, [])
 
   /**
@@ -214,7 +231,6 @@ export function App() {
 
     const body: CallRequest = {
       profile: profile.name,
-      auth: selectedAuth,
       input: input.split('\n').filter((line) => line.trim().length > 0),
       repeat,
       includeVectors,
@@ -241,7 +257,7 @@ export function App() {
         }
       })
       .finally(() => setBusy(false))
-  }, [profile, selectedAuth, token, input, repeat, includeVectors])
+  }, [profile, token, input, repeat, includeVectors])
 
   const stream = useCallback(() => {
     if (!profile) {
@@ -257,7 +273,7 @@ export function App() {
     setLive('')
 
     const sent = withPrompt(messages, prompt)
-    const body: CallRequest = { profile: profile.name, auth: selectedAuth, messages: sent }
+    const body: CallRequest = { profile: profile.name, messages: sent }
     if (token.length > 0) {
       body.token = token
     }
@@ -299,7 +315,7 @@ export function App() {
         }
       })
       .finally(() => setBusy(false))
-  }, [profile, selectedAuth, token, prompt, messages])
+  }, [profile, token, prompt, messages])
 
   /**
    * A chat profile, run in a loop. This is what **Send** does, whether or not the
@@ -320,7 +336,6 @@ export function App() {
     const sent = withPrompt(messages, prompt)
     const body: AgentRequest = {
       profile: profile.name,
-      auth: selectedAuth,
       messages: sent,
       maxIterations,
     }
@@ -362,7 +377,7 @@ export function App() {
         }
       })
       .finally(() => setBusy(false))
-  }, [profile, selectedAuth, token, prompt, messages, maxIterations])
+  }, [profile, token, prompt, messages, maxIterations])
 
   if (loadError) {
     return (
@@ -374,7 +389,7 @@ export function App() {
     )
   }
 
-  if (!profiles || !auth) {
+  if (!profiles || !auth || !mcp) {
     return (
       <main className="p-6">
         <Spinner label="Loading configuration…" />
@@ -382,8 +397,8 @@ export function App() {
     )
   }
 
-  const expectUnauthorized =
-    auth.providers.find((provider) => provider.name === selectedAuth)?.kind === 'anonymous'
+  // Sending nothing and being refused is the route proving it is protected.
+  const expectUnauthorized = provider?.kind === 'anonymous'
 
   return (
     <div className="mx-auto max-w-6xl space-y-4 p-3 sm:p-6">
@@ -395,18 +410,45 @@ export function App() {
       </header>
 
       <Panel title="Auth">
-        <AuthSelector
-          providers={auth.providers}
-          issues={auth.issues}
-          selected={selectedAuth}
-          token={token}
-          signingIn={signingIn}
-          loginError={loginError}
-          onSelect={setSelectedAuth}
-          onToken={setToken}
-          onLogin={signIn}
-          onLogout={signOut}
-        />
+        <div className="space-y-3">
+          <section className="space-y-2">
+            <h3 className="font-semibold text-stone-600 text-xs dark:text-stone-400">
+              Model endpoint
+            </h3>
+            <ModelAuth
+              provider={provider}
+              profile={profile}
+              issues={auth.issues}
+              token={token}
+              signingIn={signingIn}
+              loginError={loginError}
+              onToken={setToken}
+              onLogin={signIn}
+              onLogout={signOut}
+            />
+          </section>
+
+          {/*
+            Its own section because it is its own question: the model's identity
+            comes from the profile, a server's from `mcp.yaml`, and one says
+            nothing about the other.
+          */}
+          {profile && profile.mcp.length > 0 ? (
+            <section className="space-y-2 border-stone-200 border-t pt-3 dark:border-stone-800">
+              <h3 className="font-semibold text-stone-600 text-xs dark:text-stone-400">
+                MCP servers
+              </h3>
+              <McpAuth
+                names={profile.mcp}
+                servers={mcp.servers}
+                providers={auth.providers}
+                signingIn={signingIn}
+                loginError={loginError}
+                onLogin={signIn}
+              />
+            </section>
+          ) : null}
+        </div>
       </Panel>
 
       <div className="grid gap-4 lg:grid-cols-[18rem_1fr]">

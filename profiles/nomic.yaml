@@ -5,10 +5,13 @@
 # precisely to watch it miss and the second one win. Point this same profile at
 # `/v1/embeddings` instead and the first path takes over, unchanged.
 #
+# No `auth:`: this one goes straight at Ollama, so it calls as `anonymous` —
+# which is what makes the auth panel read differently here than on `qwen3`.
+#
 # nomic-embed-text:v1.5 returns 768 dimensions, and `expect.dimensions` is what
 # turns that into a check rather than a number you have to eyeball.
 ---
-name: nomic-embed
+name: nomic
 kind: embedding
 url: http://127.0.0.1:11434/api/embed
 timeout_ms: 60000

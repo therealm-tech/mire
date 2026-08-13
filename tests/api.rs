@@ -680,7 +680,7 @@ async fn the_profile_listing_reports_broken_files_without_hiding_the_good_ones()
 async fn the_auth_listing_always_offers_anonymous() {
     let harness = Harness::start(&[(
         "auth.yaml",
-        "providers:\n  - name: gateway\n    kind: token\n    value:\n      env: MODEL_TOKEN\n"
+        "providers:\n  - name: gateway\n    kind: token\n    value:\n      env: MODEL_TOKEN\n    allowed_hosts:\n      - models.internal\n"
             .to_owned(),
     )])
     .await;
@@ -691,6 +691,10 @@ async fn the_auth_listing_always_offers_anonymous() {
     assert_eq!(providers[0]["name"], "anonymous");
     assert_eq!(providers[1]["name"], "gateway");
     assert_eq!(providers[1]["needsValue"], false);
+    // Where the credential may go, said on the wire: the UI stops offering it
+    // against a profile pointing anywhere else.
+    assert_eq!(providers[1]["allowedHosts"][0], "models.internal");
+    assert_eq!(providers[0]["allowedHosts"].as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]

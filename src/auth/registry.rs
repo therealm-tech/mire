@@ -62,6 +62,14 @@ pub struct AuthDescriptor {
     /// `true` when using this provider requires signing in through a browser
     /// first, so the UI knows to offer the button.
     pub needs_login: bool,
+    /// Hosts this credential may be sent to. Empty — the default — means
+    /// anywhere.
+    ///
+    /// Advertised so the UI can stop offering a provider against a profile it
+    /// could never authenticate. The rule itself is enforced here, on every
+    /// call; this is the same statement said early enough to be a choice rather
+    /// than an error.
+    pub allowed_hosts: Vec<String>,
     /// The live session, for a browser provider that has one. Filled in per
     /// request rather than at load time — the session outlives the registry.
     /// Never carries a token.
@@ -74,13 +82,18 @@ pub struct AuthDescriptor {
 }
 
 impl AuthDescriptor {
-    /// A descriptor that sends something and asks nothing of the UI.
-    fn new(name: &str, kind: AuthKind) -> Self {
+    /// A descriptor for a provider of `kind`, pinned to `allowed_hosts`.
+    ///
+    /// `needs_login` follows from the kind rather than being set alongside it:
+    /// a browser flow is the only credential a human has to go and fetch, so
+    /// there is nothing here for the two to disagree about.
+    fn new(name: &str, kind: AuthKind, allowed_hosts: &[String]) -> Self {
         Self {
             name: name.to_owned(),
             kind,
             needs_value: false,
-            needs_login: false,
+            needs_login: matches!(kind, AuthKind::OidcBrowser),
+            allowed_hosts: allowed_hosts.to_vec(),
             session: None,
             last_error: None,
         }
@@ -89,12 +102,6 @@ impl AuthDescriptor {
     /// The registry declares no source, so the UI has to prompt.
     fn prompting(mut self) -> Self {
         self.needs_value = true;
-        self
-    }
-
-    /// Nothing works until a human has been through their browser.
-    fn signing_in(mut self) -> Self {
-        self.needs_login = true;
         self
     }
 }
@@ -174,7 +181,7 @@ impl AuthRegistry {
         );
         registry
             .descriptors
-            .push(AuthDescriptor::new(ANONYMOUS, AuthKind::Anonymous));
+            .push(AuthDescriptor::new(ANONYMOUS, AuthKind::Anonymous, &[]));
         registry
     }
 
@@ -242,7 +249,7 @@ fn build(
             name,
             allowed_hosts,
         } => {
-            let descriptor = AuthDescriptor::new(&name, AuthKind::Anonymous);
+            let descriptor = AuthDescriptor::new(&name, AuthKind::Anonymous, &allowed_hosts);
             let provider = Auth::Anonymous(Anonymous::new(name.clone(), allowed_hosts));
             Ok((name, provider, descriptor))
         }
@@ -254,7 +261,7 @@ fn build(
             allowed_hosts,
         } => {
             let header = header_name(path, &name, &header)?;
-            let mut descriptor = AuthDescriptor::new(&name, AuthKind::Token);
+            let mut descriptor = AuthDescriptor::new(&name, AuthKind::Token, &allowed_hosts);
             if value.env.is_none() && value.file.is_none() {
                 descriptor = descriptor.prompting();
             }
@@ -284,7 +291,7 @@ fn build(
             let credential = client_credential(path, &name, client_secret, client_assertion)?;
             // A machine identity: never something the UI could sensibly ask a
             // human to paste, and never something to sign in to.
-            let descriptor = AuthDescriptor::new(&name, AuthKind::Oidc);
+            let descriptor = AuthDescriptor::new(&name, AuthKind::Oidc, &allowed_hosts);
             let provider = Auth::Oidc(Box::new(OidcAuth::new(
                 OidcConfig {
                     name: name.clone(),
@@ -318,7 +325,7 @@ fn build(
             let header = header_name(path, &name, &header)?;
             // The credential is fetched, not typed: prompting for one would be
             // asking the human to do the flow's job.
-            let descriptor = AuthDescriptor::new(&name, AuthKind::OidcBrowser).signing_in();
+            let descriptor = AuthDescriptor::new(&name, AuthKind::OidcBrowser, &allowed_hosts);
             let provider = Auth::OidcBrowser(Box::new(OidcBrowserAuth::new(
                 OidcBrowserConfig {
                     name: name.clone(),
@@ -653,6 +660,33 @@ providers:
         let registry = load(&both);
         assert!(registry.get("workload").is_none());
         assert!(registry.issues()[0].message.contains("not both"));
+    }
+
+    #[test]
+    fn the_host_allow_list_reaches_the_descriptor() {
+        let dir = write_registry(
+            "hosts",
+            "providers:\n  \
+             - name: pinned\n    kind: token\n    value:\n      env: MODEL_TOKEN\n    allowed_hosts:\n      - models.internal\n  \
+             - name: anywhere\n    kind: token\n    value:\n      env: MODEL_TOKEN\n",
+        );
+        let registry = load(&dir);
+
+        let pinned = registry
+            .descriptors()
+            .iter()
+            .find(|d| d.name == "pinned")
+            .unwrap();
+        assert_eq!(pinned.allowed_hosts, vec!["models.internal".to_owned()]);
+
+        // Empty is the default and means anywhere, so the UI has nothing to
+        // filter on — not "nowhere".
+        let anywhere = registry
+            .descriptors()
+            .iter()
+            .find(|d| d.name == "anywhere")
+            .unwrap();
+        assert!(anywhere.allowed_hosts.is_empty());
     }
 
     #[test]
