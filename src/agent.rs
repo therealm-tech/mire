@@ -71,7 +71,8 @@ pub enum StopOutcome {
         /// How long the loop had run.
         after_ms: u64,
     },
-    /// The model asked for the same thing twice — a loop, not progress.
+    /// The model asked for the same thing twice — a loop, not progress. Only
+    /// ever reported by a profile that set `stop_when.repeated_call`.
     RepeatedCall {
         /// Tool that was called again with identical arguments.
         tool: String,
@@ -346,8 +347,13 @@ pub async fn run(
             break StopOutcome::Stopped { reason };
         }
 
-        // The model wants tools. Answer them, and watch for it asking twice.
-        let repeated = detect_repeat(&mut seen_calls, &completion.tool_calls);
+        // The model wants tools. Answer them, and — when the profile asked for
+        // it — watch for it asking twice.
+        let repeated = spec
+            .stop_when
+            .repeated_call
+            .then(|| detect_repeat(&mut seen_calls, &completion.tool_calls))
+            .flatten();
 
         let invocations = invoke_tools(&tools, &completion.tool_calls, index).await;
         let decision = decide(repeated.as_ref(), invocations.len(), index);
@@ -397,9 +403,10 @@ pub async fn run(
 
 /// What to do after a turn that asked for tools.
 ///
-/// The same tool with the same arguments twice is a loop rather than progress,
-/// and stopping on it is the only way that shows up as a finding instead of as a
-/// run that merely took a while.
+/// `repeated` is only ever `Some` under `stop_when.repeated_call`, where the
+/// same tool with the same arguments twice is read as a loop rather than
+/// progress — the only way that shows up as a finding instead of as a run that
+/// merely took a while.
 fn decide(repeated: Option<&String>, tools: usize, index: u32) -> Decision {
     repeated.map_or(Decision::Continue { tools }, |tool| Decision::Stop {
         stop: StopOutcome::RepeatedCall {
@@ -920,6 +927,8 @@ mod tests {
             Some(StopReason::NoToolCalls)
         ));
         assert!(should_stop(&stop_when, &completion(None, &["get_weather"])).is_none());
+        // Repeat watching is opt-in: a model re-reading a tool is often working.
+        assert!(!stop_when.repeated_call);
     }
 
     #[test]
@@ -927,6 +936,7 @@ mod tests {
         let stop_when = StopWhen {
             no_tool_calls: false,
             finish_reason_in: vec!["stop".to_owned(), "end_turn".to_owned()],
+            ..StopWhen::default()
         };
 
         let stopped = should_stop(&stop_when, &completion(Some("end_turn"), &["get_weather"]));
@@ -943,6 +953,7 @@ mod tests {
         let only_finish_reason = StopWhen {
             no_tool_calls: false,
             finish_reason_in: vec!["stop".to_owned()],
+            ..StopWhen::default()
         };
         assert_eq!(
             describe_predicate(&only_finish_reason),

@@ -984,6 +984,7 @@ agent:
   stop_when:
     no_tool_calls: true          # the default, and almost always what you want
     finish_reason_in: [stop, end_turn]
+    repeated_call: true          # off by default: stop on the same call twice
   max_iterations: 6
   max_duration_ms: 600000
 tools:
@@ -1030,7 +1031,9 @@ reports one, would otherwise run to `max_iterations` and look like a slow agent.
 It is not — the condition could never be evaluated once, and that is what gets
 reported. The others are `stopped` (a predicate held), `maxIterations`,
 `deadline`, and `repeatedCall` — the model asking for the same tool with the same
-arguments twice, which is a loop rather than progress.
+arguments twice, which is a loop rather than progress. That last one is opt-in
+(`stop_when.repeated_call`): re-reading a tool it already called is often a model
+working rather than spinning, and `max_iterations` bounds the run either way.
 
 Try it against the local stack: `qwen3` fetches `get_weather` from the `dev` MCP
 server and really calls it. On a CPU-only Ollama a two-turn run takes about
