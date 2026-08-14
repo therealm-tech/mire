@@ -34,15 +34,16 @@ export function ChatPanel({
   stopped,
   prompt,
   maxIterations,
+  streaming,
   error,
   revisions,
   mcpProtocol,
   showProtocol,
   onPrompt,
   onMaxIterations,
+  onStreaming,
   onMcpProtocol,
   onSend,
-  onStream,
   onStop,
   onRetry,
   onReveal,
@@ -56,6 +57,8 @@ export function ChatPanel({
   stopped: boolean
   prompt: string
   maxIterations: number
+  /** How **Send** sends: chunk by chunk on one turn, or the loop on all of them. */
+  streaming: boolean
   error: { code: string; message: string; detail?: unknown } | null
   revisions: string[]
   mcpProtocol: string | null
@@ -63,9 +66,9 @@ export function ChatPanel({
   showProtocol: boolean
   onPrompt: (value: string) => void
   onMaxIterations: (value: number) => void
+  onStreaming: (value: boolean) => void
   onMcpProtocol: (revision: string | null) => void
   onSend: () => void
-  onStream: () => void
   onStop: () => void
   onRetry: (id: string) => void
   onReveal: (exchange: string) => void
@@ -154,14 +157,15 @@ export function ChatPanel({
           turns={turns}
           busy={busy}
           maxIterations={maxIterations}
+          streaming={streaming}
           revisions={revisions}
           mcpProtocol={mcpProtocol}
           showProtocol={showProtocol}
           onPrompt={onPrompt}
           onMaxIterations={onMaxIterations}
+          onStreaming={onStreaming}
           onMcpProtocol={onMcpProtocol}
           onSend={onSend}
-          onStream={onStream}
           onStop={onStop}
         />
       </div>
@@ -362,28 +366,30 @@ function Composer({
   turns,
   busy,
   maxIterations,
+  streaming,
   revisions,
   mcpProtocol,
   showProtocol,
   onPrompt,
   onMaxIterations,
+  onStreaming,
   onMcpProtocol,
   onSend,
-  onStream,
   onStop,
 }: {
   prompt: string
   turns: number
   busy: boolean
   maxIterations: number
+  streaming: boolean
   revisions: string[]
   mcpProtocol: string | null
   showProtocol: boolean
   onPrompt: (value: string) => void
   onMaxIterations: (value: number) => void
+  onStreaming: (value: boolean) => void
   onMcpProtocol: (revision: string | null) => void
   onSend: () => void
-  onStream: () => void
   onStop: () => void
 }) {
   // An empty box is nothing to say, not an instruction to send the history
@@ -419,39 +425,58 @@ function Composer({
       />
 
       <div className="flex flex-wrap items-center gap-2">
+        {/*
+          One button, because there was only ever one thing to do with what is in
+          the box. How it goes out is a setting, and a setting is a checkbox.
+        */}
         <Button
           variant="primary"
           size="md"
           disabled={busy || empty}
           onClick={onSend}
-          title="Run the profile in a loop, answering its tools. A profile with none stops on turn one."
+          title={
+            streaming
+              ? 'One turn, read chunk by chunk. Tool calls do not reassemble in a stream, so this does not loop.'
+              : 'Run the profile in a loop, answering its tools. A profile with none stops on turn one.'
+          }
         >
           Send
         </Button>
-        <Button
-          size="md"
-          disabled={busy || empty}
-          onClick={onStream}
-          title="One turn, read chunk by chunk. Tool calls do not reassemble in a stream, so this one does not loop."
-        >
-          Stream
-        </Button>
+        <label className="flex items-center gap-1.5 text-muted text-xs">
+          <input
+            type="checkbox"
+            checked={streaming}
+            disabled={busy}
+            onChange={(event) => onStreaming(event.target.checked)}
+          />
+          stream
+        </label>
         {/*
           Only while there is something to stop. A permanently disabled Stop
-          would be a third button competing with the two that do something.
+          would be a second button competing with the one that does something.
         */}
         {busy ? (
           <Button size="md" onClick={onStop} title="Drop this request. What has arrived stays.">
             Stop
           </Button>
         ) : null}
-        <label className="ml-auto flex items-center gap-1.5 text-muted text-xs">
+        {/*
+          Inert while streaming, and shown as inert rather than quietly ignored:
+          a stream is one turn, so there is no second one to cap.
+        */}
+        <label
+          className={`ml-auto flex items-center gap-1.5 text-muted text-xs ${
+            streaming ? 'opacity-50' : ''
+          }`}
+          title={streaming ? 'A stream is one turn. Uncheck stream to run the loop.' : undefined}
+        >
           max turns
           <input
             type="number"
             min={1}
             max={50}
             value={maxIterations}
+            disabled={streaming}
             onChange={(event) => onMaxIterations(Number(event.target.value))}
             className={`${INPUT_CLASSES} w-16`}
           />
@@ -459,20 +484,24 @@ function Composer({
       </div>
 
       <p className="text-faint text-xs">
-        <strong className="font-medium">Send</strong> runs the loop, answering the tools the model
-        asks for until it stops asking. <strong className="font-medium">Stream</strong> is one turn,
-        read as it arrives — tool calls do not reassemble in a stream, so it does not loop.
+        With <strong className="font-medium">stream</strong> on, <strong>Send</strong> is one turn,
+        read as it arrives — which is the only way to see time to first token, and the only way to
+        watch the answer being written. Tool calls do not reassemble in a stream, so it does not
+        loop: turn it off and <strong>Send</strong> runs the loop instead, answering the tools the
+        model asks for until it stops asking.
       </p>
 
       {/*
         A run parameter, so it sits with the other one. It used to live in the
-        auth panel, which is the one thing on the page it is not about.
+        auth panel, which is the one thing on the page it is not about. Inert
+        while streaming for the same reason **max turns** is: a stream calls no
+        tools, so it never speaks to a server at all.
       */}
       {showProtocol ? (
         <McpProtocol
           revisions={revisions}
           selected={mcpProtocol}
-          disabled={busy}
+          disabled={busy || streaming}
           onSelect={onMcpProtocol}
         />
       ) : null}
