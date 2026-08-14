@@ -219,6 +219,7 @@ decode:
   tool_calls: ["$.choices[0].message.tool_calls"]
   finish_reason: ["$.choices[0].finish_reason", "$.stop_reason"]
   usage: ["$.usage"]
+  error: ["$.error", "$.detail"]
 "#
     )
 }
@@ -583,6 +584,131 @@ async fn every_decode_path_missing_is_reported_rather_than_hidden() {
     assert_eq!(
         body["response"]["decode"]["missed"]["content"],
         json!(["$.choices[0].message.content", "$.output.text"])
+    );
+}
+
+#[tokio::test]
+async fn a_refusal_comes_back_with_the_endpoints_own_sentence() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "error": {
+                "message": "This model's maximum context length is 32768 tokens.",
+                "type": "invalid_request_error",
+                "code": "context_length_exceeded",
+                "param": "messages"
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let harness = Harness::start(&[(
+        "chat.yaml",
+        openai_profile(&format!("{}/v1/chat/completions", server.uri())),
+    )])
+    .await;
+
+    let (status, _, body) = harness
+        .call(json!({"profile": "chat", "prompt": "ping"}))
+        .await;
+
+    // The call worked. The endpoint is the one that said no.
+    assert_eq!(status, 200);
+    assert_eq!(body["response"]["http"]["status"], 400);
+    let error = &body["response"]["error"];
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("maximum context length"),
+        "{error}"
+    );
+    assert_eq!(error["type"], "invalid_request_error");
+    assert_eq!(error["code"], "context_length_exceeded");
+    // Whatever normalisation did not understand is still there.
+    assert_eq!(error["raw"]["param"], "messages");
+    assert_eq!(body["response"]["decode"]["matched"]["error"], "$.error");
+}
+
+/// The case that makes this worth decoding at all: a gateway that swallows the
+/// upstream failure, answers `200`, and puts the complaint in the body — where
+/// nothing watching the status would ever look.
+#[tokio::test]
+async fn an_error_reported_under_a_two_hundred_is_still_found() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"detail": "no capacity upstream"})),
+        )
+        .mount(&server)
+        .await;
+
+    let harness = Harness::start(&[(
+        "chat.yaml",
+        openai_profile(&format!("{}/v1/chat/completions", server.uri())),
+    )])
+    .await;
+
+    let (status, _, body) = harness
+        .call(json!({"profile": "chat", "prompt": "ping"}))
+        .await;
+
+    assert_eq!(status, 200);
+    assert_eq!(body["response"]["http"]["status"], 200);
+    assert_eq!(body["response"]["error"]["message"], "no capacity upstream");
+    assert_eq!(body["response"]["decode"]["matched"]["error"], "$.detail");
+}
+
+/// The other half of the rule: a good answer carries no error, and the paths
+/// that went looking for one do not clutter the trace.
+#[tokio::test]
+async fn a_good_answer_reports_no_error_and_no_error_miss() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_response()))
+        .mount(&server)
+        .await;
+
+    let harness = Harness::start(&[(
+        "chat.yaml",
+        openai_profile(&format!("{}/v1/chat/completions", server.uri())),
+    )])
+    .await;
+
+    let (status, _, body) = harness
+        .call(json!({"profile": "chat", "prompt": "ping"}))
+        .await;
+
+    assert_eq!(status, 200);
+    assert!(body["response"]["error"].is_null());
+    assert!(body["response"]["decode"]["missed"]["error"].is_null());
+}
+
+/// A refusal no path reaches is a blind spot in the profile, and saying so is
+/// the whole point of the trace.
+#[tokio::test]
+async fn a_refusal_no_path_reaches_lists_what_was_tried() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(503).set_body_json(json!({"failure": "overloaded"})))
+        .mount(&server)
+        .await;
+
+    let harness = Harness::start(&[(
+        "chat.yaml",
+        openai_profile(&format!("{}/v1/chat/completions", server.uri())),
+    )])
+    .await;
+
+    let (status, _, body) = harness
+        .call(json!({"profile": "chat", "prompt": "ping"}))
+        .await;
+
+    assert_eq!(status, 200);
+    assert!(body["response"]["error"].is_null());
+    assert_eq!(
+        body["response"]["decode"]["missed"]["error"],
+        json!(["$.error", "$.detail"])
     );
 }
 
@@ -4430,6 +4556,7 @@ decode:
   delta: ["$.choices[0].delta.content", "$.message.content"]
   finish_reason: ["$.choices[0].finish_reason", "$.done_reason"]
   usage: ["$.usage", "$"]
+  error: ["$.error"]
 "#
     )
 }
@@ -4492,6 +4619,35 @@ async fn a_streamed_call_arrives_in_pieces_and_adds_up_to_the_answer() {
     assert_eq!(stream["deltas"], 2);
     assert_eq!(stream["unparsable"], 0);
     assert_eq!(stream["terminated"], true);
+}
+
+/// A refused stream is not a stream: the endpoint answers in one shot, and that
+/// single object is the last frame there is. The error still decodes out of it.
+#[tokio::test]
+async fn a_stream_refused_before_it_started_still_reports_why() {
+    let endpoint = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "error": "model 'qwen3:0.6b' not found, try pulling it first"
+        })))
+        .mount(&endpoint)
+        .await;
+
+    let harness = Harness::start(&[("chat.yaml", streaming_profile(&endpoint.uri()))]).await;
+
+    let (status, events) = harness
+        .stream(json!({"profile": "chat", "prompt": "hi"}))
+        .await;
+
+    assert_eq!(status, 200);
+    let done = &events.last().expect("done").1;
+    assert_eq!(done["response"]["http"]["status"], 404);
+    assert_eq!(
+        done["response"]["error"]["message"],
+        "model 'qwen3:0.6b' not found, try pulling it first"
+    );
+    // Nothing was streamed, and the stream view says exactly that.
+    assert_eq!(done["response"]["stream"]["deltas"], 0);
 }
 
 #[tokio::test]

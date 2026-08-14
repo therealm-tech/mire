@@ -274,7 +274,7 @@ came back:
 | --- | --- | --- | --- |
 | **Request** | Method, URL, masked headers, body, *Copy as curl* | The JSON-RPC that went out, with its headers and the revision it went out on | The arguments the model produced |
 | **Decode** | Which configured path matched which field, which missed, and everything that was tried | — | Whether those arguments match the schema the tool was declared with |
-| **Response** | Status, latency, decoded content and tool calls, stream counters, the body, the raw JSON as a tree | Status, latency, and the JSON-RPC that came back | What the tool handed back, and whether it reported a problem |
+| **Response** | Status, latency, decoded content and tool calls, whatever the endpoint said went wrong, stream counters, the body, the raw JSON as a tree | Status, latency, and the JSON-RPC that came back | What the tool handed back, and whether it reported a problem |
 
 **The transcript points at the cards.** A tool row in the conversation is a
 summary of one of these, so it takes you to it: the tool's name opens its own
@@ -617,6 +617,40 @@ decode:
     - $.stop_reason
 ```
 
+One of those fields is not about the answer at all. `decode.error` points at
+whatever the endpoint says when there is no answer, and what comes back is
+normalised the same way everything else is:
+
+```yaml
+decode:
+  error:
+    - $               # read wherever the complaint sits inside the body
+    - $.detail        # a gateway that answers like FastAPI
+```
+
+```json
+{
+  "error": {
+    "message": "This model's maximum context length is 32768 tokens.",
+    "type": "invalid_request_error",
+    "code": "context_length_exceeded",
+    "raw": {"message": "…", "type": "…", "code": "…", "param": "messages"}
+  }
+}
+```
+
+`{"error": {"message": …}}`, a bare `{"error": "model not found"}`, a flat
+`{"message": …, "code": 503}` and an OAuth2 `{"error": "invalid_token",
+"error_description": …}` all land in those three fields, and `raw` keeps the node
+verbatim so nothing normalisation did not understand is lost.
+
+**The status is never consulted.** A gateway that swallows an upstream failure
+and answers `200` with the complaint in the body is exactly the mismatch this
+catches — the UI badges it, and the traffic panel's failures filter finds it. The
+rule runs the other way too: a cascade that finds nothing under a `2xx` is not
+reported as a miss, because there was nothing to find; under a `4xx` or a `5xx`
+it is, because that is a profile with a blind spot.
+
 Decoding never fails the call. If nothing matches you still get the raw JSON, the
 status, the latency — plus a trace saying exactly which paths were tried and what
 went wrong:
@@ -664,8 +698,21 @@ decode:
 A request script sees `messages`, `input`, `tools`, `model` and `params`, and
 returns the body — a string used verbatim, or a map or array that gets serialised
 for you. A decode script sees `raw`, `status` and `headers`, and returns a map:
-`content` / `tool_calls` / `finish_reason` / `usage` for a chat profile,
-`vectors` / `usage` for an embedding one.
+`content` / `tool_calls` / `finish_reason` / `usage` / `error` for a chat profile,
+`vectors` / `usage` / `error` for an embedding one. `error` is read like the
+cascade reads one — a string is the message, a map is looked at for the usual
+keys — so a script can report a failure the body alone does not admit to:
+
+```yaml
+decode:
+  script: |
+    let upstream = headers["x-upstream-status"];
+    if upstream != "200" {
+      #{ error: #{ message: `upstream answered ${upstream}`, code: upstream } }
+    } else {
+      #{ content: raw.message.content }
+    }
+```
 
 **Reach for a cascade first, every time.** A script is code in a config file: it
 is harder to read, harder to review, and it survives worse. It earns its place

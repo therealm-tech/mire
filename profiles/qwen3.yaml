@@ -80,6 +80,24 @@ decode:
   usage:
     - $.usage
     - $
+  # The one field that is not about the answer: what the endpoint says when there
+  # is no answer. Three shapes reach this profile, and `$` covers all three
+  # because the node is read wherever the complaint sits inside it:
+  #
+  #   {"error": {"message": "…", "type": "…", "code": "…"}}   the OpenAI-compatible endpoint
+  #   {"error": "model 'qwen3:0.6b' not found"}               Ollama's own API
+  #   {"error": "invalid_token", "error_description": "…"}    the gateway, when the credential is the problem
+  #
+  # `$.error` would look like the obvious path and is the wrong one for the third:
+  # OAuth2 puts the *code* in `error` and the sentence in `error_description`, so
+  # pointing one level down hands back `invalid_token` and drops the only line
+  # that explains it.
+  #
+  # The status is never consulted. An endpoint answering 200 with a complaint in
+  # the body is precisely the mismatch worth catching, and a 400 with nothing in
+  # it leaves this empty rather than inventing a sentence.
+  error:
+    - $
 
 # Agent mode runs this profile in a loop. Stop as soon as the model asks for no
 # more tools, or says it is done.

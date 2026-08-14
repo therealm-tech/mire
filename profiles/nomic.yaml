@@ -30,6 +30,12 @@ decode:
   usage:
     - $.usage
     - $
+  # Ollama's whole error is a string — `{"error": "model 'nomic' not found, try
+  # pulling it first"}` — and a string is a message, so nothing more is needed
+  # here. Asking a chat model to embed lands exactly here, which is the mistake
+  # this line turns into a sentence instead of an empty vector list.
+  error:
+    - $.error
 
 expect:
   dimensions: 768

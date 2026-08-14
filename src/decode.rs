@@ -10,6 +10,7 @@
 
 pub mod chat;
 pub mod embedding;
+pub mod error;
 pub mod paths;
 pub mod script;
 pub mod stream;
@@ -35,6 +36,8 @@ pub enum DecodeField {
     FinishReason,
     /// Token accounting.
     Usage,
+    /// What the endpoint said went wrong.
+    Error,
     /// Embedding vectors.
     Vectors,
     /// The decode script, when there is one, rather than any one field.

@@ -210,6 +210,15 @@ pub struct DecodeSpec {
     /// Token accounting. Both kinds.
     #[serde(default)]
     pub usage: Vec<JsonPathExpr>,
+    /// What the endpoint says went wrong. Both kinds.
+    ///
+    /// Point it at the node carrying the complaint — `$.error` for almost
+    /// everything, `$.detail` for a gateway in front of it — and a refusal comes
+    /// back with the sentence normalised out of it instead of only as raw JSON.
+    /// The status is not consulted: an endpoint answering `200` with an error in
+    /// the body is precisely what this is for.
+    #[serde(default)]
+    pub error: Vec<JsonPathExpr>,
     /// The vectors themselves. `kind: embedding`.
     #[serde(default)]
     pub vectors: Vec<JsonPathExpr>,
@@ -231,6 +240,7 @@ impl DecodeSpec {
             && self.tool_calls.is_empty()
             && self.finish_reason.is_empty()
             && self.usage.is_empty()
+            && self.error.is_empty()
             && self.vectors.is_empty())
     }
 }
@@ -455,6 +465,7 @@ request:
 decode:
   content: ["$.choices[0].message.content", "$.output.text"]
   finish_reason: ["$.choices[0].finish_reason"]
+  error: ["$.error", "$.detail"]
 agent:
   stop_when:
     no_tool_calls: true
@@ -482,6 +493,7 @@ tools:
             profile.decode.content[0].source(),
             "$.choices[0].message.content"
         );
+        assert_eq!(profile.decode.error[1].source(), "$.detail");
         assert_eq!(profile.tools[0].name, "get_weather");
         // Declared without `repeated_call`, so the loop does not watch for one.
         assert!(!profile.agent.as_ref().unwrap().stop_when.repeated_call);

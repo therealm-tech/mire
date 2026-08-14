@@ -216,18 +216,24 @@ export function statusTone(status: number, expectUnauthorized: boolean): Tone {
 /**
  * Whether this exchange is one of the ones you are looking for.
  *
- * The failures, in the four shapes they come in: a status the endpoint should
- * not have answered, a stream that stopped rather than ended, a protocol round
- * trip that never landed, and a tool that failed, reported a problem, or was
- * called with arguments its own schema refuses. `expectUnauthorized` is carried
- * through because a `401` asked anonymously is a pass, and a filter that hid the
- * passes would hide it.
+ * The failures, in the five shapes they come in: a status the endpoint should
+ * not have answered, an error the endpoint reported in the body whatever status
+ * it put on top, a stream that stopped rather than ended, a protocol round trip
+ * that never landed, and a tool that failed, reported a problem, or was called
+ * with arguments its own schema refuses. `expectUnauthorized` is carried through
+ * because a `401` asked anonymously is a pass, and a filter that hid the passes
+ * would hide it.
  */
 export function failed(exchange: Exchange, expectUnauthorized: boolean): boolean {
   switch (exchange.kind) {
     case 'model': {
-      const { http, stream } = exchange.outcome.response
+      const { http, error, stream } = exchange.outcome.response
       if (statusTone(http.status, expectUnauthorized) === 'bad') {
+        return true
+      }
+      // A gateway that swallows the upstream failure and answers `200` has
+      // still failed, and this filter is where you go looking for it.
+      if (error !== undefined) {
         return true
       }
       return stream !== undefined && !stream.terminated
