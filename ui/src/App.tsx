@@ -160,6 +160,10 @@ export function App() {
   const [includeVectors, setIncludeVectors] = usePersisted('vectors', z.boolean(), false)
 
   const [maxIterations, setMaxIterations] = usePersisted('maxTurns', z.number(), 6)
+  // On by default: reading the answer as it is written is what you came for, and
+  // time to first token cannot be measured any other way. Off is the loop, which
+  // is the only mode that answers tool calls.
+  const [streaming, setStreaming] = usePersisted('stream', z.boolean(), true)
   // `null` is auto: every server settles its own revision the way it always did.
   const [mcpProtocol, setMcpProtocol] = usePersisted<string | null>(
     'mcpProtocol',
@@ -404,76 +408,86 @@ export function App() {
     return [...messages, asked]
   }, [messages, prompt, setPrompt])
 
-  const stream = useCallback(() => {
-    if (!profile) {
-      return
-    }
-    const signal = begin()
-    setEmbedding(null)
-    // Empty rather than null: the bubble appears immediately, so a stream that
-    // never produces a token is visibly a stream that never produced a token.
-    setLive('')
+  /**
+   * The same history, read chunk by chunk instead of whole.
+   *
+   * One turn and no loop: tool calls do not reassemble from a stream, so there
+   * is nothing to answer and nothing to run again. Like `runChat`, it takes the
+   * history rather than reading it, so **Retry** can shorten the timeline and
+   * run it in the same breath.
+   */
+  const runStream = useCallback(
+    (sent: Message[]) => {
+      if (!profile) {
+        return
+      }
+      const signal = begin()
+      setEmbedding(null)
+      // Empty rather than null: the bubble appears immediately, so a stream that
+      // never produces a token is visibly a stream that never produced a token.
+      setLive('')
 
-    const sent = ask()
-    const body: CallRequest = { profile: profile.name, messages: sent }
-    if (token.length > 0) {
-      body.token = token
-    }
+      const body: CallRequest = { profile: profile.name, messages: sent }
+      if (token.length > 0) {
+        body.token = token
+      }
 
-    streamCall(
-      body,
-      (event) => {
-        switch (event.event) {
-          case 'open':
-            logger.debug('stream.open', { status: event.status })
-            break
-          case 'delta':
-            setLive((current) => (current ?? '') + event.text)
-            break
-          case 'done': {
-            setExchanges((current) => [...current, callExchange(event)])
-            // The `done` event carries the same decoded answer the non-streaming
-            // endpoint returns, so the conversation is built from that rather
-            // than from the deltas: one source of truth, and it survives a
-            // stream whose last chunk arrived in a shape the delta reader
-            // skipped.
-            const answer = assistantTurn(event)
-            if (answer) {
-              setTimeline((current) => [...current, messageItem(answer)])
-              setLive(null)
+      streamCall(
+        body,
+        (event) => {
+          switch (event.event) {
+            case 'open':
+              logger.debug('stream.open', { status: event.status })
+              break
+            case 'delta':
+              setLive((current) => (current ?? '') + event.text)
+              break
+            case 'done': {
+              setExchanges((current) => [...current, callExchange(event)])
+              // The `done` event carries the same decoded answer the
+              // non-streaming endpoint returns, so the conversation is built
+              // from that rather than from the deltas: one source of truth, and
+              // it survives a stream whose last chunk arrived in a shape the
+              // delta reader skipped.
+              const answer = assistantTurn(event)
+              if (answer) {
+                setTimeline((current) => [...current, messageItem(answer)])
+                setLive(null)
+              }
+              logger.info('stream.done', {
+                status: event.response?.http.status ?? null,
+                ttftMs: event.response?.http.ttftMs ?? null,
+                chunks: event.response?.stream?.chunks ?? null,
+              })
+              break
             }
-            logger.info('stream.done', {
-              status: event.response?.http.status ?? null,
-              ttftMs: event.response?.http.ttftMs ?? null,
-              chunks: event.response?.stream?.chunks ?? null,
-            })
-            break
+            case 'failed':
+              setCallError(new ApiError(500, { code: event.code, message: event.message }))
+              break
           }
-          case 'failed':
-            setCallError(new ApiError(500, { code: event.code, message: event.message }))
-            break
-        }
-      },
-      signal,
-    )
-      .catch((error: unknown) => {
-        if (abandoned(error)) {
-          return
-        }
-        if (error instanceof ApiError) {
-          setCallError(error)
-        } else {
-          logger.error('stream.failed', { message: String(error) })
-        }
-      })
-      .finally(settle)
-  }, [profile, token, ask, begin, settle])
+        },
+        signal,
+      )
+        .catch((error: unknown) => {
+          if (abandoned(error)) {
+            return
+          }
+          if (error instanceof ApiError) {
+            setCallError(error)
+          } else {
+            logger.error('stream.failed', { message: String(error) })
+          }
+        })
+        .finally(settle)
+    },
+    [profile, token, begin, settle],
+  )
 
   /**
    * A chat profile, run in a loop over the history it is handed. This is what
-   * **Send** and **Retry** both do, whether or not the profile declares a single
-   * tool: a profile with nothing to call stops on turn one, which is the same one
-   * turn a plain call would have made.
+   * **Send** and **Retry** do with **stream** off, whether or not the profile
+   * declares a single tool: a profile with nothing to call stops on turn one,
+   * which is the same one turn a plain call would have made.
    *
    * It takes the history rather than reading it, because **Retry** shortens the
    * timeline and then runs it in the same breath — and `setTimeline` has not
@@ -563,7 +577,19 @@ export function App() {
     [profile, token, maxIterations, mcpProtocol, begin, settle],
   )
 
-  const send = useCallback(() => runChat(ask()), [runChat, ask])
+  /**
+   * One history, sent whichever way the composer is set to send it.
+   *
+   * The choice lives here rather than on a second button: **Send** and **Retry**
+   * are the same request twice, and a **Retry** that quietly changed mode would
+   * be answering a different question than the one it repeats.
+   */
+  const run = useCallback(
+    (sent: Message[]) => (streaming ? runStream(sent) : runChat(sent)),
+    [streaming, runStream, runChat],
+  )
+
+  const send = useCallback(() => run(ask()), [run, ask])
 
   /**
    * That turn again, and nothing after it.
@@ -583,9 +609,9 @@ export function App() {
       }
       const kept = timeline.slice(0, item.message.role === 'user' ? index + 1 : index)
       setTimeline(kept)
-      runChat(wireMessages(kept))
+      run(wireMessages(kept))
     },
-    [timeline, runChat],
+    [timeline, run],
   )
 
   /**
@@ -731,15 +757,16 @@ export function App() {
               stopped={stopped}
               prompt={prompt}
               maxIterations={maxIterations}
+              streaming={streaming}
               error={callError ? callError.body : null}
               revisions={mcp.revisions}
               mcpProtocol={profile.mcp.length > 0 ? mcpProtocol : null}
               showProtocol={profile.mcp.length > 0}
               onPrompt={setPrompt}
               onMaxIterations={setMaxIterations}
+              onStreaming={setStreaming}
               onMcpProtocol={setMcpProtocol}
               onSend={send}
-              onStream={stream}
               onStop={stop}
               onRetry={retry}
               onReveal={setRevealed}

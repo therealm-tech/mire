@@ -171,11 +171,15 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   server `mcp.yaml` does not declare is called out there too.
 - **Conversation**, for chat profiles. A transcript: your question on the right,
   the answer on the left, the tools the run called in between, and a composer at
-  the bottom. `Enter` sends, `Shift`+`Enter` starts a line. **Send** runs the
-  [loop](#agent-mode) — always, because a profile with no tools stops on turn one
-  and that is the same one turn a single call would have made. **Stream** is the
-  exception: one turn, read chunk by chunk, the text appearing as it arrives.
-  While either is in flight, **Stop** drops the request where it stands and
+  the bottom. `Enter` sends, `Shift`+`Enter` starts a line. There is one button,
+  **Send**, and a **stream** checkbox next to it saying how it goes out. Ticked,
+  which is how it starts: one turn, read chunk by chunk, the text appearing as it
+  arrives — the only way to see time to first token. Cleared: the
+  [loop](#agent-mode), which answers the tool calls the model makes until it
+  stops making them, and which a profile with no tools ends on turn one anyway —
+  the same one turn a single call would have made. **max turns** and **Protocol**
+  are shown as inert while streaming, because a stream is one turn and calls no
+  tool. While a run is in flight, **Stop** drops the request where it stands and
   whatever had arrived stays on the page — a stream cut off after four tokens
   produced four tokens, and that is a finding rather than a mess to clear up.
   Nothing is sent upstream to call the work off: an endpoint that has been asked
@@ -242,9 +246,9 @@ Four things follow, each of which is a decision:
   without their results is how you get a `400` from an endpoint that was working
   fine. They still appear in the transcript, where they happened, as a line
   naming the tool and whether it really ran — the full exchange is in
-  **Traffic**. A tool call that *does* land in the history — from a **Stream**,
-  which does not loop, or from a run that stopped on one — is flagged on its
-  bubble, because most endpoints refuse the next turn until it has a result.
+  **Traffic**. A tool call that *does* land in the history — from a streamed
+  send, which does not loop, or from a run that stopped on one — is flagged on
+  its bubble, because most endpoints refuse the next turn until it has a result.
 - **Nothing waits for the endpoint.** The question appears the moment you press
   Enter, tool calls appear as the loop makes them, streamed text appears as it
   arrives. A call that fails leaves the question in the history, which is
@@ -913,7 +917,8 @@ decode:
 ```
 
 `stream` comes from the call, not from the file, so one profile serves both
-modes: **Send** asks for a whole answer, **Stream** asks for chunks. Keep the
+modes: the **stream** box next to **Send** is what asks for chunks rather than a
+whole answer, and it starts ticked because the number is worth having. Keep the
 `| tojson`. MiniJinja renders a bare boolean as `True`, which is Python and is
 not JSON — rendering catches it and shows you the body, but it is a nicer trap to
 avoid than to diagnose.
@@ -1036,10 +1041,11 @@ Agent mode is not a third payload format and not a second profile. It is the sam
 is not met, answer the tool calls with their simulated results, feed them back,
 go round again. `POST /api/call` runs one turn of exactly the same thing.
 
-Which is why the UI has no separate chat mode: **Send** is the loop, always. A
-profile that declares no tool stops on turn one, and turn one is the single call
-a chat mode would have made — one button, one shape of answer, one less thing to
-choose before you have any evidence.
+Which is why the UI has no separate chat mode: **Send** with the **stream** box
+cleared is the loop, whatever the profile declares. A profile that declares no
+tool stops on turn one, and turn one is the single call a chat mode would have
+made — one button, one shape of answer, one less thing to choose before you have
+any evidence.
 
 It runs on the [conversation](#having-a-conversation) in the browser, and when it
 stops it appends the answer it finished on. The turns in between — the tool calls
