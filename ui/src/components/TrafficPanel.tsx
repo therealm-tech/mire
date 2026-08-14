@@ -39,6 +39,7 @@ export function TrafficPanel({
   expectUnauthorized,
   reveal,
   onRevealed,
+  onExport,
   onClear,
 }: {
   exchanges: Exchange[]
@@ -46,6 +47,7 @@ export function TrafficPanel({
   /** An exchange the conversation above is pointing at, or `null`. */
   reveal: string | null
   onRevealed: () => void
+  onExport: () => void
   onClear: () => void
 }) {
   const [closed, setClosed] = useState<ReadonlySet<string>>(new Set())
@@ -135,6 +137,15 @@ export function TrafficPanel({
                 }
               >
                 {allClosed ? 'Expand all' : 'Collapse all'}
+              </Button>
+              {/*
+                Next to the list it exports, and only once there is something to
+                export. What *Copy as curl* does for one request, this does for
+                the run: the order, the turns, and what the decoder made of each
+                answer — the half a single reproduced call loses.
+              */}
+              <Button onClick={onExport} title="Every exchange above, as a JSON file">
+                Export
               </Button>
               <Button onClick={onClear}>Clear</Button>
             </>

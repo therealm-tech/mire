@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { z } from 'zod'
 import {
   type AgentRequest,
   ApiError,
@@ -23,10 +24,11 @@ import { AuthPanel } from './components/AuthPanel'
 import { ChatPanel } from './components/ChatPanel'
 import { EmbeddingPanel } from './components/EmbeddingPanel'
 import { EmbeddingRequest } from './components/EmbeddingRequest'
+import { Failure } from './components/Failure'
 import { Mark } from './components/Mark'
 import { Preflight } from './components/Preflight'
 import { ProfileList } from './components/ProfileList'
-import { Panel, Spinner } from './components/primitives'
+import { Button, Panel, Spinner } from './components/primitives'
 import { TrafficPanel } from './components/TrafficPanel'
 import {
   activityItem,
@@ -39,8 +41,11 @@ import {
   verdictItem,
   wireMessages,
 } from './conversation'
+import { download, exportFilename, runExport } from './export'
 import { logger } from './logger'
+import { useMediaQuery } from './media'
 import { preflight } from './preflight'
+import { usePersisted } from './storage'
 
 const ANONYMOUS = 'anonymous'
 
@@ -139,18 +144,28 @@ export function App() {
   const [mcp, setMcp] = useState<McpResponse | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
 
-  const [selectedProfile, setSelectedProfile] = useState<string | null>(null)
+  // Remembered across a reload, all of it small and none of it secret — see
+  // `storage.ts` for what is deliberately left out, starting with the token.
+  const [selectedProfile, setSelectedProfile] = usePersisted<string | null>(
+    'profile',
+    z.string().nullable(),
+    null,
+  )
   const [token, setToken] = useState('')
 
-  const [prompt, setPrompt] = useState('ping')
+  const [prompt, setPrompt] = usePersisted('prompt', z.string(), 'ping')
   const [timeline, setTimeline] = useState<ChatItem[]>([])
-  const [input, setInput] = useState('one\ntwo')
-  const [repeat, setRepeat] = useState(1)
-  const [includeVectors, setIncludeVectors] = useState(false)
+  const [input, setInput] = usePersisted('input', z.string(), 'one\ntwo')
+  const [repeat, setRepeat] = usePersisted('repeat', z.number(), 1)
+  const [includeVectors, setIncludeVectors] = usePersisted('vectors', z.boolean(), false)
 
-  const [maxIterations, setMaxIterations] = useState(6)
+  const [maxIterations, setMaxIterations] = usePersisted('maxTurns', z.number(), 6)
   // `null` is auto: every server settles its own revision the way it always did.
-  const [mcpProtocol, setMcpProtocol] = useState<string | null>(null)
+  const [mcpProtocol, setMcpProtocol] = usePersisted<string | null>(
+    'mcpProtocol',
+    z.string().nullable(),
+    null,
+  )
 
   const [signingIn, setSigningIn] = useState<string | null>(null)
   // Carries the provider, because two places can start a login now and an error
@@ -162,6 +177,10 @@ export function App() {
   // you actually came to type in starts near the top of the page.
   const [authOpen, setAuthOpen] = useState(false)
   const [stopped, setStopped] = useState(false)
+  // Laptop or phone. The list is a column on one and a disclosure on the other,
+  // which is two different sets of controls rather than two stylesheets.
+  const wide = useMediaQuery('(min-width: 64rem)')
+  const [picking, setPicking] = useState(false)
   // The exchange the transcript is pointing at, held only until the traffic has
   // jumped to it: it is an instruction, not a selection.
   const [revealed, setRevealed] = useState<string | null>(null)
@@ -226,7 +245,14 @@ export function App() {
         setProfiles(loadedProfiles)
         setAuth(loadedAuth)
         setMcp(loadedMcp)
-        setSelectedProfile((current) => current ?? loadedProfiles.profiles[0]?.name ?? null)
+        // A remembered name is only good while the file behind it still is:
+        // profiles are a directory somebody edits, and coming back to a
+        // selection that no longer exists would be an empty page with no
+        // explanation for it.
+        setSelectedProfile((current) => {
+          const kept = loadedProfiles.profiles.some((entry) => entry.name === current)
+          return kept ? current : (loadedProfiles.profiles[0]?.name ?? null)
+        })
         logger.info('config.loaded', {
           profiles: loadedProfiles.profiles.length,
           providers: loadedAuth.providers.length,
@@ -238,7 +264,7 @@ export function App() {
         logger.error('config.load_failed', { message })
         setLoadError(message)
       })
-  }, [])
+  }, [setSelectedProfile])
 
   const profile = profiles?.profiles.find((candidate) => candidate.name === selectedProfile)
 
@@ -376,7 +402,7 @@ export function App() {
     setTimeline((current) => [...current, messageItem(asked)])
     setPrompt('')
     return [...messages, asked]
-  }, [messages, prompt])
+  }, [messages, prompt, setPrompt])
 
   const stream = useCallback(() => {
     if (!profile) {
@@ -562,12 +588,33 @@ export function App() {
     [timeline, runChat],
   )
 
+  /**
+   * The run, as a file.
+   *
+   * Built here rather than asked of the server, because the server was never
+   * told: it answers one call at a time and keeps none of them, so this page is
+   * the only place the run exists as a whole.
+   */
+  const exportRun = useCallback(() => {
+    const at = new Date()
+    const payload = runExport({
+      profile: profile?.name ?? null,
+      endpoint: profile?.url ?? null,
+      identity: provider?.name ?? null,
+      messages,
+      exchanges,
+      at,
+    })
+    download(exportFilename(profile?.name ?? null, at), JSON.stringify(payload, null, 2))
+    logger.info('run.exported', { exchanges: exchanges.length, messages: messages.length })
+  }, [profile, provider, messages, exchanges])
+
   const reset = useCallback(() => {
     setTimeline([])
     setLive(null)
     setCallError(null)
     setPrompt('')
-  }, [])
+  }, [setPrompt])
 
   if (loadError) {
     return (
@@ -608,13 +655,34 @@ export function App() {
       */}
       <div className="grid gap-4 lg:grid-cols-[18rem_1fr]">
         <div className="min-w-0 space-y-4">
-          <Panel title="Profiles">
-            <ProfileList
-              profiles={profiles.profiles}
-              issues={profiles.issues}
-              selected={selectedProfile}
-              onSelect={setSelectedProfile}
-            />
+          {/*
+            A column where there is room for one, and a fold-away where there is
+            not: on a phone this list was a screenful to scroll past before
+            reaching the thing it configures, every single time.
+          */}
+          <Panel
+            title="Profiles"
+            actions={
+              wide ? undefined : (
+                <Button aria-expanded={picking} onClick={() => setPicking((open) => !open)}>
+                  {picking ? 'Hide' : 'Change'}
+                </Button>
+              )
+            }
+          >
+            {wide || picking ? (
+              <ProfileList
+                profiles={profiles.profiles}
+                issues={profiles.issues}
+                selected={selectedProfile}
+                onSelect={(name) => {
+                  setSelectedProfile(name)
+                  setPicking(false)
+                }}
+              />
+            ) : (
+              <p className="truncate font-medium text-sm">{selectedProfile ?? 'None selected'}</p>
+            )}
           </Panel>
         </div>
 
@@ -696,11 +764,7 @@ export function App() {
               {busy ? <Spinner label="Calling…" /> : null}
               {stopped && !busy ? <Spinner label="Stopped." /> : null}
 
-              {callError ? (
-                <Panel title="mire could not run this call">
-                  <p className="text-sm">{callError.body.message}</p>
-                </Panel>
-              ) : null}
+              {callError ? <Failure error={callError.body} /> : null}
 
               {embedding ? (
                 <Panel title="Embedding">
@@ -715,6 +779,7 @@ export function App() {
             expectUnauthorized={expectUnauthorized}
             reveal={revealed}
             onRevealed={clearReveal}
+            onExport={exportRun}
             onClear={() => setExchanges([])}
           />
         </div>

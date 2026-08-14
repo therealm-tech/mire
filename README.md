@@ -188,6 +188,9 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   order it left, one card per exchange, filtered by kind or down to the failures
   — and reachable from the transcript above, which names the card each of its
   rows summarises. See [below](#reading-the-traffic).
+- **Profiles**, a column where there is room for one and a fold-away where there
+  is not — on a phone the list was a screenful to scroll past before reaching the
+  thing it configures.
 - **Embedding.** Count, width, encoding, the five checks, and per vector its
   norm, a sample of the first values and a distribution histogram. Never a wall
   of floats.
@@ -196,6 +199,16 @@ A credential typed into the UI lives in that tab and nowhere else: it is sent
 with the call and never stored, never logged, never echoed back. A credential
 `mire` fetched for you never reaches the tab at all — the browser sees a
 username, the granted scopes and a countdown.
+
+**The tab remembers a little, and never that.** Which profile you were on, what
+you had half typed, how many turns you allow, which revision you pinned — small
+settings whose loss is pure annoyance, kept in the browser's own storage. The
+credential is not among them, and neither is the conversation or the traffic: a
+session's bodies are unbounded, and the first oversized run would start throwing
+quota errors at a tool whose job is to be dependable while other things fail.
+Storage that is missing or full is a browser with no memory, never a page that
+fails to load. `mire` still holds nothing — this is the same side of the wire the
+conversation has always been on.
 
 ### Having a conversation
 
@@ -265,6 +278,16 @@ landed, or a tool that failed, reported a problem, or was called with arguments
 its own schema refuses. A `401` you asked for anonymously is a pass, so it is not
 one of them. When nothing failed the button says so rather than offering an empty
 list.
+
+**And the whole run comes out as a file.** *Export* writes every exchange above
+to JSON, with the endpoint it was pointed at, the identity it went as, and the
+history as the next request would have carried it. What *Copy as curl* does for
+one request, this does for the run — the order, the turns, and what the decoder
+made of each answer, which a single reproduced call loses. Nothing is summarised
+on the way out: the person you send it to will want the part you did not think
+was interesting. It is built in the page, because the page is the only place the
+run exists as a whole — the server answers one call at a time and keeps none of
+them.
 
 **Every body is a foldable tree**, in both directions and on all three cards —
 the same view the raw response always had, because finding where an endpoint hid

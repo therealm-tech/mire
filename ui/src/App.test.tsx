@@ -1767,3 +1767,127 @@ describe('reading a run', () => {
     expect(traffic.getByText('5 exchanges')).toBeInTheDocument()
   })
 })
+
+describe('coming back to it', () => {
+  it('reopens on the profile and the draft it was left on', async () => {
+    const user = userEvent.setup()
+    const first = render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: /guarded/ }))
+    await user.clear(screen.getByLabelText('Message'))
+    await user.type(screen.getByLabelText('Message'), 'half a thought')
+    first.unmount()
+
+    render(<App />)
+    expect(await screen.findByLabelText('Message')).toHaveValue('half a thought')
+    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent(
+      'http://127.0.0.1:11435/v1/messages',
+    )
+  })
+
+  it('never keeps the credential, whatever else it keeps', async () => {
+    const user = userEvent.setup()
+    const first = render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: /guarded/ }))
+    await user.type(await screen.findByPlaceholderText('paste the credential'), 'sk-secret')
+    first.unmount()
+
+    // Not under a key of ours, and not under anybody else's either.
+    const stored = Object.keys(window.localStorage).map((key) => window.localStorage.getItem(key))
+    expect(JSON.stringify(stored)).not.toContain('sk-secret')
+
+    render(<App />)
+    expect(await screen.findByPlaceholderText('paste the credential')).toHaveValue('')
+  })
+
+  it('falls back to a profile that exists when the remembered one is gone', async () => {
+    const user = userEvent.setup()
+    const first = render(<App />)
+    await user.click(await screen.findByRole('button', { name: /as-me/ }))
+    first.unmount()
+
+    // The file was deleted between the two visits.
+    const fewer = { ...PROFILES, profiles: PROFILES.profiles.filter((one) => one.name !== 'as-me') }
+    vi.stubGlobal('fetch', mockApi({ 'api/profiles': fewer, 'api/auth': AUTH, 'api/mcp': MCP }))
+
+    render(<App />)
+    await screen.findByRole('button', { name: /^chat/ })
+    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent(
+      'https://models.internal/v1/chat/completions',
+    )
+  })
+})
+
+describe('taking the run away with you', () => {
+  it('writes out every exchange, with what the run was pointed at', async () => {
+    const user = userEvent.setup()
+    vi.stubGlobal('fetch', toolRunApi())
+
+    const written: string[] = []
+    // The two statics only, defined rather than spied on: jsdom has no object
+    // URLs at all, and replacing the whole of `URL` would take the constructor
+    // every other module builds its request paths with.
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: () => 'blob:mire' })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: () => {} })
+    // The blob is the file: reading it back is reading what would be saved.
+    const OriginalBlob = globalThis.Blob
+    vi.stubGlobal(
+      'Blob',
+      class extends OriginalBlob {
+        constructor(parts: BlobPart[], options?: BlobPropertyBag) {
+          super(parts, options)
+          written.push(String(parts[0]))
+        }
+      },
+    )
+    const clicked = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+    render(<App />)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+    await waitFor(() =>
+      expect(within(panel('Traffic')).getByText('5 exchanges')).toBeInTheDocument(),
+    )
+
+    await user.click(within(panel('Traffic')).getByRole('button', { name: 'Export' }))
+
+    expect(clicked).toHaveBeenCalled()
+    const payload = JSON.parse(written[0] ?? '{}')
+    expect(payload.tool).toBe('mire')
+    expect(payload.profile).toBe('chat')
+    expect(payload.endpoint).toBe('https://models.internal/v1/chat/completions')
+    expect(payload.exchanges).toHaveLength(5)
+    // The history as the next request would have carried it, not a rendering of it.
+    expect(payload.messages[0]).toEqual({ role: 'user', content: 'ping' })
+
+    clicked.mockRestore()
+  })
+})
+
+describe('on a narrow screen', () => {
+  it('folds the profile list away, and closes it again once one is picked', async () => {
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      writable: true,
+      value: (query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }),
+    })
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    // One line saying where you are, rather than a screenful to scroll past.
+    await waitFor(() => expect(within(panel('Profiles')).getByText('chat')).toBeInTheDocument())
+    expect(screen.queryByRole('button', { name: /guarded/ })).not.toBeInTheDocument()
+
+    await user.click(within(panel('Profiles')).getByRole('button', { name: 'Change' }))
+    await user.click(screen.getByRole('button', { name: /guarded/ }))
+
+    expect(screen.queryByRole('button', { name: /guarded/ })).not.toBeInTheDocument()
+    expect(within(panel('Profiles')).getByText('guarded')).toBeInTheDocument()
+  })
+})

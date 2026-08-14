@@ -7,6 +7,7 @@ import {
   messagePositions,
   type VerdictItem,
 } from '../conversation'
+import { Failure } from './Failure'
 import { McpProtocol } from './McpProtocol'
 import { Badge, Button, INPUT_CLASSES, Panel } from './primitives'
 
@@ -142,19 +143,7 @@ export function ChatPanel({
             </p>
           ) : null}
 
-          {error ? (
-            <div className="rounded border border-bad bg-bad-soft p-2">
-              <p className="flex flex-wrap items-baseline gap-2 text-sm">
-                <Badge tone="bad">{error.code}</Badge>
-                <span>{error.message}</span>
-              </p>
-              {error.detail === undefined ? null : (
-                <pre className="mt-2 overflow-x-auto rounded bg-well p-2 font-mono text-xs">
-                  {JSON.stringify(error.detail, null, 2)}
-                </pre>
-              )}
-            </div>
-          ) : null}
+          {error ? <Failure error={error} /> : null}
 
           <div ref={foot} />
         </div>
