@@ -1381,6 +1381,26 @@ describe('conversation', () => {
     })
   })
 
+  it('reads the answer as markdown and the question as what was typed', async () => {
+    const { fetchMock, sent } = recordingApi(['Use **`serde`**, not a hand-written parser.'])
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await type(user, 'Which crate for **json**?')
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    const conversation = within(panel('Conversation'))
+    await waitFor(() => expect(conversation.getByText('serde')).toBeInTheDocument())
+    expect(conversation.getByText('serde').tagName).toBe('CODE')
+
+    // A question is text somebody typed, so its asterisks are asterisks — and
+    // what goes back on the wire is that text, not the render of it.
+    expect(conversation.getByText('Which crate for **json**?')).toBeInTheDocument()
+    expect(sent[0]?.messages).toEqual([{ role: 'user', content: 'Which crate for **json**?' }])
+  })
+
   it('empties the box so the next turn starts clean', async () => {
     const { fetchMock } = recordingApi(['pong'])
     vi.stubGlobal('fetch', fetchMock)
