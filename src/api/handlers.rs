@@ -3,7 +3,7 @@
 use std::convert::Infallible;
 
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Multipart, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, Response};
@@ -17,7 +17,7 @@ use super::AppState;
 use super::dto::{
     AgentEvent, AgentRequest, AuthPath, AuthResponse, CallRequest, CallbackQuery, LoginRequest,
     LoginResponse, LogoutResponse, McpPath, McpResponse, McpToolsResponse, ProfilePath,
-    ProfilesResponse, StreamEvent,
+    ProfilesResponse, StreamEvent, UploadResponse,
 };
 use super::sse::EventStream;
 use super::ui;
@@ -28,6 +28,7 @@ use crate::error::ApiError;
 use crate::exec::{CallInput, CallOutcome};
 use crate::mcp::{McpCredentials, McpError, Revision};
 use crate::profile::{Profile, ProfileKind};
+use crate::uploads::UploadError;
 
 /// Liveness probe. Deliberately outside the `OpenAPI` document.
 pub async fn healthz() -> &'static str {
@@ -199,6 +200,78 @@ pub async fn logout(
     let signed_out = provider.sessions().clear(&path.name);
     info!(provider = %path.name, signed_out, "signed out");
     Ok(Json(LogoutResponse { signed_out }))
+}
+
+/// Reads every requested upload off the disk, in the order it was asked for.
+///
+/// Here rather than in [`crate::exec`] on purpose: this is the only layer that
+/// is allowed to touch a directory, which is what keeps rendering a pure
+/// function of its input and keeps a call reproducible from what it carried.
+///
+/// Sequential, and it stops on the first one that will not load. A run that
+/// silently dropped an attachment would render a body missing a file with
+/// nothing to say so, and the whole point of this tool is that what went out is
+/// what you think went out.
+///
+/// # Errors
+///
+/// `400` for something that is not an id, `404` for one nothing carries, `500`
+/// when the directory or the file cannot be read.
+async fn resolve_uploads(
+    state: &AppState,
+    ids: &[String],
+) -> Result<Vec<crate::uploads::UploadRef>, ApiError> {
+    let mut resolved = Vec::with_capacity(ids.len());
+    for id in ids {
+        resolved.push(state.uploads.load(id).await?);
+    }
+    if !resolved.is_empty() {
+        info!(
+            count = resolved.len(),
+            bytes = resolved.iter().map(|file| file.size).sum::<u64>(),
+            "attachments handed to the template"
+        );
+    }
+    Ok(resolved)
+}
+
+/// Writes one attached file to the upload directory.
+///
+/// One file per request, deliberately. A picker that allows several sends
+/// several requests, which is what gives a failure — a name that will not write,
+/// a file over the cap — a file to point at instead of a partial success covering
+/// an unknown number of them.
+///
+/// The file part is the one carrying a `filename`; anything else in the body is
+/// skipped rather than refused, so a client that also sends ordinary form fields
+/// is not a client that gets a `400`.
+///
+/// # Errors
+///
+/// `400` when the body carries no file or cannot be read, `413` past the size
+/// cap, `500` when the directory or the file cannot be written.
+pub async fn upload(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> Result<Json<UploadResponse>, ApiError> {
+    let malformed =
+        |error: axum::extract::multipart::MultipartError| UploadError::Malformed(error.to_string());
+
+    while let Some(field) = multipart.next_field().await.map_err(malformed)? {
+        let Some(name) = field.file_name().map(str::to_owned) else {
+            continue;
+        };
+        let content_type = field.content_type().map(str::to_owned);
+        let bytes = field.bytes().await.map_err(malformed)?;
+
+        let stored = state
+            .uploads
+            .store(&name, content_type, bytes.into())
+            .await?;
+        return Ok(Json(stored.into()));
+    }
+
+    Err(UploadError::NoFile.into())
 }
 
 /// Where the identity provider sends the browser back.
@@ -469,7 +542,12 @@ pub async fn call(
     Json(request): Json<CallRequest>,
 ) -> Result<Json<CallOutcome>, ApiError> {
     request.validate()?;
-    Ok(Json(state.runner.call(request.into()).await?))
+
+    let uploads = resolve_uploads(&state, &request.uploads).await?;
+    let mut input: CallInput = request.into();
+    input.uploads = uploads;
+
+    Ok(Json(state.runner.call(input).await?))
 }
 
 /// Runs one call, streaming the answer as it arrives.
@@ -510,9 +588,14 @@ pub async fn call_stream(
             ),
         ));
     }
+    // Before the stream opens, so a file that will not load is a status code
+    // rather than a stream that opens and immediately fails.
+    let uploads = resolve_uploads(&state, &request.uploads).await?;
+
     let (sender, mut receiver) = mpsc::unbounded_channel::<StreamEvent>();
     let runner = state.runner.clone();
     let mut input: CallInput = request.into();
+    input.uploads = uploads;
     // This endpoint *is* the streaming one. Whatever the body said, the template
     // is told to ask for a stream.
     input.stream = true;
@@ -611,9 +694,13 @@ pub async fn agent(
         }
     }
 
+    // Same reasoning as the streamed call: settled before the stream opens.
+    let uploads = resolve_uploads(&state, &request.call.uploads).await?;
+
     let (sender, mut receiver) = mpsc::unbounded_channel::<AgentEvent>();
     let runner = state.runner.clone();
-    let input: AgentInput = request.into();
+    let mut input: AgentInput = request.into();
+    input.call.uploads = uploads;
 
     tokio::spawn(async move {
         let updates = sender.clone();

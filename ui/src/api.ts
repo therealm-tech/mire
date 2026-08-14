@@ -109,6 +109,26 @@ export const mcpResponseSchema = z.object({
   issues: z.array(loadIssueSchema),
 })
 
+/**
+ * A file `mire` has written to its upload directory.
+ *
+ * `name` is what you called it and `storedAs` is what it is called on disk —
+ * they differ on purpose, because the server reduces the name to one safe path
+ * segment and prefixes it. Show the first, never the second.
+ */
+export const uploadedFileSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  storedAs: z.string(),
+  /** Where it landed on the machine running `mire`, for a human to go and look. */
+  path: z.string(),
+  size: z.number(),
+  /** What the browser claimed it was. Unverified, and nothing acts on it. */
+  contentType: z.string().optional(),
+})
+
+export type UploadedFile = z.infer<typeof uploadedFileSchema>
+
 const usageSchema = z.object({
   promptTokens: z.number().nullable(),
   completionTokens: z.number().nullable(),
@@ -416,6 +436,14 @@ export interface CallRequest {
   repeat?: number
   /** Told to the template as `stream`. `POST /api/call/stream` forces it on. */
   stream?: boolean
+  /**
+   * Ids of stored files, from `uploadFile`.
+   *
+   * They reach the template as `uploads`, whole. Like `stream`, they only reach
+   * the wire if the profile's template says so — sending one changes nothing
+   * about a template that never mentions them.
+   */
+  uploads?: string[]
 }
 
 /** An API failure, carrying the server's structured error when there was one. */
@@ -520,6 +548,26 @@ export function startLogin(
 export function logout(provider: string): Promise<{ signedOut: boolean }> {
   return request(`api/auth/${encodeURIComponent(provider)}/logout`, logoutResponseSchema, {
     method: 'POST',
+  })
+}
+
+/**
+ * Hands one file to the server, which writes it to its upload directory.
+ *
+ * One request per file, which is what the endpoint takes: a picker that allows
+ * several produces several of these, so a file that will not go up is a file
+ * that can be named rather than a batch that half-worked.
+ *
+ * No `content-type` header here — `FormData` sets its own, boundary included,
+ * and a hand-written one would be a boundary the server cannot find.
+ */
+export function uploadFile(file: File, signal?: AbortSignal): Promise<UploadedFile> {
+  const body = new FormData()
+  body.append('file', file)
+  return request('api/uploads', uploadedFileSchema, {
+    method: 'POST',
+    body,
+    ...(signal ? { signal } : {}),
   })
 }
 

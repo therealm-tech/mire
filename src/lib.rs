@@ -20,6 +20,8 @@
 //! * [`agent`] — the same four steps, in a loop, answering simulated tools.
 //! * [`api`] — the HTTP surface the UI talks to.
 //! * [`redact`] — credentials, and the guarantee they do not leave the process.
+//! * [`uploads`] — the one thing here that writes to disk, and the rules that
+//!   keep it from writing anywhere it was not pointed at.
 //!
 //! # A note on wire naming
 //!
@@ -43,3 +45,4 @@ pub mod redact;
 pub mod render;
 pub mod script;
 pub mod transport;
+pub mod uploads;

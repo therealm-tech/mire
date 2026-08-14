@@ -11,6 +11,7 @@ use mire::api::{AppState, normalise_base_path, router};
 use mire::config::{self, ConfigStore};
 use mire::exec::Runner;
 use mire::transport::{self, TransportOptions};
+use mire::uploads::UploadStore;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -68,6 +69,7 @@ async fn run(cli: Cli) -> Result<(), StartupError> {
     let base_path = normalise_base_path(&cli.base_path);
     let state = AppState {
         runner: Runner::new(config, client),
+        uploads: Arc::new(UploadStore::new(&cli.uploads)),
         base_path: base_path.clone().into(),
         public_url: cli.public_url.clone().map(Into::into),
     };

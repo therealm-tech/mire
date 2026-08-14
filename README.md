@@ -36,6 +36,7 @@ also an environment variable:
 | Flag | Variable | Default | What it does |
 | --- | --- | --- | --- |
 | `--profiles` | `PROFILES_DIR` | `./profiles` | Directory of profile YAML files |
+| `--uploads` | `UPLOADS_DIR` | `./uploads` | Where **Attach** writes — see [below](#attaching-a-file) |
 | `--host` | `HOST` | `127.0.0.1` | Listen address; widening it is deliberate |
 | `--port` | `PORT` | `8787` | Listen port |
 | `--base-path` | `BASE_PATH` | *(none)* | Path prefix, when a proxy forwards one — see [below](#from-a-notebook-behind-a-path-proxy) |
@@ -53,7 +54,21 @@ docker run --rm --read-only -p 127.0.0.1:8787:8787 \
 
 One static binary on `distroless/static` — a certificate bundle, timezone data,
 `/etc/passwd`, and nothing else. No shell, no package manager, and nothing to
-patch. It runs as UID 65532 and never writes, so `--read-only` costs nothing.
+patch. It runs as UID 65532 and writes nothing, so `--read-only` costs nothing —
+right up until somebody presses **Attach**, which is the one thing here that
+wants a disk. Give it one, owned by the user the container runs as:
+
+```sh
+docker run --rm --read-only -p 127.0.0.1:8787:8787 \
+  -v "$PWD/profiles:/etc/mire/profiles:ro" \
+  -v "$PWD/uploads:/var/lib/mire/uploads" \
+  -e UPLOADS_DIR=/var/lib/mire/uploads mire:0.1.0
+```
+
+Without the mount `--read-only` is still exactly right, and the only thing that
+fails is an upload — with a `500` naming the path it could not write. The
+directory is created on the first attachment rather than at startup, so nothing
+about this changes how the container comes up.
 
 The profiles are **mounted, not baked in**. They are the input to the tool, not
 part of it: an image carrying them would ship endpoints pointing at somebody
@@ -263,6 +278,99 @@ Four things follow, each of which is a decision:
   `<script>` in an answer is text about a script, and a `javascript:` link is not
   a link. And the raw string is never more than a glance away — the response body
   the endpoint actually sent is a card down in **Traffic**, byte for byte.
+
+### Attaching a file
+
+**Attach** writes a file to `mire`'s upload directory — `--uploads`, `./uploads`
+by default — and lists what it stored. That is the whole feature, and the next
+sentence is the important one.
+
+**The file goes to the template, not to the endpoint.** The next **Send** hands
+it over as `uploads`, and what happens next is the profile's decision: a template
+that never mentions `uploads` sends exactly what it always sent, the same way one
+that never mentions `stream` never streams. That is not a limitation to work
+around — it is the only arrangement in which "what did we send?" has one answer,
+written down, in a file you can read.
+
+So an attachment is an ingredient, and the profile is the recipe:
+
+```jinja
+{
+  "model": "gpt-4o",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": {{ messages[-1].content | tojson }}}
+        {% for file in uploads %},
+        {"type": "image_url", "image_url": {"url": "{{ file.dataUrl }}"}}
+        {% endfor %}
+      ]
+    }
+  ]
+}
+```
+
+Each entry of `uploads` carries the file whole, three ways, so the template picks
+the one its endpoint reads:
+
+| Field | What it is |
+| --- | --- |
+| `base64` | The bytes, standard base64 |
+| `dataUrl` | The same, as `data:<type>;base64,…` — what most vision endpoints want |
+| `text` | The file decoded as UTF-8, or `null` when it is not text |
+| `name` | File name, without the random prefix |
+| `storedAs` | What it is called on disk, prefix included |
+| `path` | Where it is, for a template that only wants to say so |
+| `size` | Bytes |
+| `contentType` | Guessed from the extension; `null` when the extension says nothing |
+
+`text` is the test for "is this readable", which is what makes the other common
+case a two-line template — a log or a CSV inlined into the question:
+
+```jinja
+"messages": [
+  {% for file in uploads %}{% if file.text %}
+  {"role": "user", "content": {{ ("Contents of " ~ file.name ~ ":\n" ~ file.text) | tojson }}},
+  {% endif %}{% endfor %}
+  {% for message in messages %}{{ message | tojson }}{% if not loop.last %},{% endif %}{% endfor %}
+]
+```
+
+A request `script:` sees the same `uploads`, because it is the same context
+serialised — nothing is reachable from one request source and not the other.
+
+Two things the fields cannot tell you, both of them the price of `mire` keeping
+no state: `name` is the **sanitised** name rather than what your browser called
+the file, and `contentType` is guessed from the extension rather than taken from
+what the browser claimed. Neither was written to disk, and the disk is the only
+thing that survives a restart. A template that knows better writes the type
+itself.
+
+Attachments are re-rendered on **every turn** of an agent loop, since the body is
+built from the template each time. And they are inlined into a request body, so
+they arrive in **Traffic** at their full base64 size — a 12 MB photo is a 16 MB
+request to scroll past. Attach the file you meant to test with.
+
+What the server does with the name it is given is worth knowing, since it is the
+one place `mire` writes anything:
+
+- **The name is a display name, never a path.** It is reduced to its last
+  segment, non-portable characters are replaced, and leading dots go. A file
+  called `../../.ssh/authorized_keys` is stored as `authorized_keys`, in the
+  upload directory, like everything else. Nothing a client sends can write
+  outside it.
+- **Nothing is overwritten.** Every stored name carries a random prefix, so
+  attaching `payload.json` twice is two files. The response says which name is
+  yours and which is the one on disk; they are never the same string.
+- **25 MB per file**, refused with a `413` naming the limit rather than a
+  truncated file.
+- **The directory is created on the first upload**, not at startup — so a
+  read-only filesystem is only a problem for somebody who actually attaches
+  something.
+- **× forgets, it does not delete.** The file stays where it was written.
+  Deleting things off a disk because a browser tab said so is not a thing this
+  process does; the directory is yours to empty.
 
 ### Reading the traffic
 
@@ -1132,6 +1240,7 @@ ninety seconds.
 | `POST /api/call` | Render, authenticate, send, decode |
 | `POST /api/call/stream` | The same, read chunk by chunk, with time to first token |
 | `POST /api/agent` | The same, in a loop, streamed as server-sent events |
+| `POST /api/uploads` | Store one attached file; returns the id a call names it by |
 | `GET /auth/callback` | Where the identity provider sends the browser back |
 | `GET /healthz` | Liveness |
 

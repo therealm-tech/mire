@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import type { Message } from '../api'
+import type { Message, UploadedFile } from '../api'
 import {
   type ActivityItem,
   type ChatItem,
@@ -39,10 +39,15 @@ export function ChatPanel({
   revisions,
   mcpProtocol,
   showProtocol,
+  attachments,
+  attaching,
+  attachError,
   onPrompt,
   onMaxIterations,
   onStreaming,
   onMcpProtocol,
+  onAttach,
+  onDetach,
   onSend,
   onStop,
   onRetry,
@@ -64,10 +69,17 @@ export function ChatPanel({
   mcpProtocol: string | null
   /** Only a profile that names a server has a revision to speak. */
   showProtocol: boolean
+  /** Files already written to `mire`'s upload directory. */
+  attachments: UploadedFile[]
+  /** A file is on its way up. */
+  attaching: boolean
+  attachError: { code: string; message: string; detail?: unknown } | null
   onPrompt: (value: string) => void
   onMaxIterations: (value: number) => void
   onStreaming: (value: boolean) => void
   onMcpProtocol: (revision: string | null) => void
+  onAttach: (files: File[]) => void
+  onDetach: (id: string) => void
   onSend: () => void
   onStop: () => void
   onRetry: (id: string) => void
@@ -161,10 +173,15 @@ export function ChatPanel({
           revisions={revisions}
           mcpProtocol={mcpProtocol}
           showProtocol={showProtocol}
+          attachments={attachments}
+          attaching={attaching}
+          attachError={attachError}
           onPrompt={onPrompt}
           onMaxIterations={onMaxIterations}
           onStreaming={onStreaming}
           onMcpProtocol={onMcpProtocol}
+          onAttach={onAttach}
+          onDetach={onDetach}
           onSend={onSend}
           onStop={onStop}
         />
@@ -374,6 +391,93 @@ function Writing({ text, done }: { text: string; done: boolean }) {
   )
 }
 
+/**
+ * What **Attach** has actually done, said plainly.
+ *
+ * The bluntness is the point, and the sentence is a careful one. These files go
+ * out with the next **Send** — as `uploads`, to the *template*, not to the
+ * endpoint. Whether any of it reaches a wire is the profile's decision: a
+ * template that never mentions `uploads` sends exactly what it always sent, and
+ * a chip promising otherwise would be this tool lying about what it transmitted.
+ * So the line says where they go and stops there, and **Traffic** below settles
+ * the rest — byte for byte, as always.
+ */
+function Attachments({
+  files,
+  error,
+  busy,
+  onDetach,
+}: {
+  files: UploadedFile[]
+  error: { code: string; message: string; detail?: unknown } | null
+  busy: boolean
+  onDetach: (id: string) => void
+}) {
+  if (files.length === 0 && error === null) {
+    return null
+  }
+
+  return (
+    <div className="space-y-2">
+      {error ? <Failure error={error} /> : null}
+
+      {files.length > 0 ? (
+        <>
+          <ul className="flex flex-wrap gap-1.5">
+            {files.map((file) => (
+              <li
+                key={file.id}
+                className="flex items-center gap-1.5 rounded border border-line bg-well px-2 py-1 text-xs"
+                // The stored name is the one to go looking for; the name shown
+                // is the one you recognise. Both, because they are not the same.
+                title={`${file.path}\n${formatBytes(file.size)}${
+                  file.contentType ? ` · ${file.contentType}` : ''
+                }`}
+              >
+                <span className="max-w-[16rem] truncate">{file.name}</span>
+                <span className="text-faint">{formatBytes(file.size)}</span>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => onDetach(file.id)}
+                  aria-label={`Forget ${file.name}`}
+                  title="Take it off this list. The file stays on disk — mire does not delete."
+                  className="text-faint disabled:opacity-50 hover:text-ink"
+                >
+                  ×
+                </button>
+              </li>
+            ))}
+          </ul>
+          <p className="text-faint text-xs">
+            Stored on the machine running <strong className="font-medium">mire</strong>, and handed
+            to this profile's template as <code className="font-mono">uploads</code> on the next{' '}
+            <strong>Send</strong>. Whether {files.length === 1 ? 'it reaches' : 'they reach'} the
+            endpoint is the template's call — one that never mentions{' '}
+            <code className="font-mono">uploads</code> sends what it always sent.{' '}
+            <strong>Traffic</strong> below shows what actually went out.
+          </p>
+        </>
+      ) : null}
+    </div>
+  )
+}
+
+/** Bytes, at the precision a human reading a chip actually wants. */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} B`
+  }
+  const units = ['kB', 'MB', 'GB']
+  let value = bytes / 1024
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`
+}
+
 function Composer({
   prompt,
   turns,
@@ -383,10 +487,15 @@ function Composer({
   revisions,
   mcpProtocol,
   showProtocol,
+  attachments,
+  attaching,
+  attachError,
   onPrompt,
   onMaxIterations,
   onStreaming,
   onMcpProtocol,
+  onAttach,
+  onDetach,
   onSend,
   onStop,
 }: {
@@ -398,16 +507,26 @@ function Composer({
   revisions: string[]
   mcpProtocol: string | null
   showProtocol: boolean
+  attachments: UploadedFile[]
+  attaching: boolean
+  attachError: { code: string; message: string; detail?: unknown } | null
   onPrompt: (value: string) => void
   onMaxIterations: (value: number) => void
   onStreaming: (value: boolean) => void
   onMcpProtocol: (revision: string | null) => void
+  onAttach: (files: File[]) => void
+  onDetach: (id: string) => void
   onSend: () => void
   onStop: () => void
 }) {
   // An empty box is nothing to say, not an instruction to send the history
   // again — that is what **Retry** is for, and it says which turn it repeats.
   const empty = prompt.trim().length === 0
+
+  // The real control is the input; the button is what you can see. Styling a
+  // file input into something that matches the rest of the page is a fight
+  // nobody wins, so it stays hidden and gets clicked from here.
+  const picker = useRef<HTMLInputElement>(null)
 
   return (
     <div className="space-y-2 border-line border-t pt-3">
@@ -464,6 +583,36 @@ function Composer({
           />
           stream
         </label>
+
+        {/*
+          Hidden rather than styled, and reset after every pick: an input that
+          remembers its last file will not fire `change` when you choose that same
+          file again, which reads as a button that stopped working.
+        */}
+        <input
+          ref={picker}
+          type="file"
+          multiple
+          className="hidden"
+          aria-hidden="true"
+          tabIndex={-1}
+          onChange={(event) => {
+            const files = Array.from(event.target.files ?? [])
+            event.target.value = ''
+            if (files.length > 0) {
+              onAttach(files)
+            }
+          }}
+        />
+        <Button
+          size="md"
+          disabled={attaching}
+          onClick={() => picker.current?.click()}
+          title="Write a file to mire's upload directory and hand it to the template as `uploads`."
+        >
+          {attaching ? 'Attaching…' : 'Attach'}
+        </Button>
+
         {/*
           Only while there is something to stop. A permanently disabled Stop
           would be a second button competing with the one that does something.
@@ -495,6 +644,8 @@ function Composer({
           />
         </label>
       </div>
+
+      <Attachments files={attachments} error={attachError} busy={attaching} onDetach={onDetach} />
 
       <p className="text-faint text-xs">
         With <strong className="font-medium">stream</strong> on, <strong>Send</strong> is one turn,

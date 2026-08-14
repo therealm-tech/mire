@@ -11,6 +11,16 @@
 # somebody else's laptop, and a new endpoint to test would mean a new image.
 # `/etc/mire/profiles` exists in the image so that a run without a mount starts
 # cleanly with nothing to offer, rather than failing on a missing directory.
+#
+# `--read-only` above is not a leftover: the process writes nothing until a file
+# is attached, and the upload directory is created on the first one rather than
+# at startup. Somewhere to put them is a mount and a variable:
+#
+#   -v "$PWD/uploads:/var/lib/mire/uploads" -e UPLOADS_DIR=/var/lib/mire/uploads
+#
+# Deliberately not baked into the image and not defaulted below. An upload
+# directory on the container's own filesystem is a directory that disappears with
+# the container, which is a worse answer than a clear failure.
 
 # --- the UI ------------------------------------------------------------------
 #

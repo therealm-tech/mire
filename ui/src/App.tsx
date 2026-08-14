@@ -19,6 +19,8 @@ import {
   runAgent,
   startLogin,
   streamCall,
+  type UploadedFile,
+  uploadFile,
 } from './api'
 import { AuthPanel } from './components/AuthPanel'
 import { ChatPanel } from './components/ChatPanel'
@@ -195,6 +197,13 @@ export function App() {
   const [embedding, setEmbedding] = useState<Embedding | null>(null)
   const [exchanges, setExchanges] = useState<Exchange[]>([])
   const [callError, setCallError] = useState<ApiError | null>(null)
+
+  // Files written to `mire`'s upload directory. Not persisted and not part of
+  // the conversation: they are on a disk somewhere, and the list is a receipt
+  // for that rather than a queue waiting to be sent.
+  const [attachments, setAttachments] = useState<UploadedFile[]>([])
+  const [attaching, setAttaching] = useState(false)
+  const [attachError, setAttachError] = useState<ApiError | null>(null)
 
   // The history is the timeline, not a copy of it: the two cannot drift, so what
   // the transcript shows is exactly what the next request will carry.
@@ -431,6 +440,9 @@ export function App() {
       if (token.length > 0) {
         body.token = token
       }
+      if (attachments.length > 0) {
+        body.uploads = attachments.map((file) => file.id)
+      }
 
       streamCall(
         body,
@@ -480,7 +492,7 @@ export function App() {
         })
         .finally(settle)
     },
-    [profile, token, begin, settle],
+    [profile, token, attachments, begin, settle],
   )
 
   /**
@@ -509,6 +521,9 @@ export function App() {
       }
       if (token.length > 0) {
         body.token = token
+      }
+      if (attachments.length > 0) {
+        body.uploads = attachments.map((file) => file.id)
       }
       // Left out entirely on auto: the field's absence is what tells the server
       // to settle the revision itself, and sending a value it worked out anyway
@@ -574,7 +589,7 @@ export function App() {
         })
         .finally(settle)
     },
-    [profile, token, maxIterations, mcpProtocol, begin, settle],
+    [profile, token, attachments, maxIterations, mcpProtocol, begin, settle],
   )
 
   /**
@@ -590,6 +605,51 @@ export function App() {
   )
 
   const send = useCallback(() => run(ask()), [run, ask])
+
+  /**
+   * Writes the picked files to `mire`'s upload directory, one request each.
+   *
+   * Sequential rather than parallel, and it stops on the first refusal: these
+   * all land in the same directory on somebody's machine, and firing ten at a
+   * time to find out that the directory is not writable is ten answers to one
+   * question. What went up before the failure stays on the list — it is up.
+   *
+   * Deliberately not tied to `begin()`: attaching is not a run, and a file going
+   * up should not abort the call you are waiting on.
+   */
+  const attach = useCallback((files: File[]) => {
+    setAttachError(null)
+    setAttaching(true)
+    void (async () => {
+      try {
+        for (const file of files) {
+          const stored = await uploadFile(file)
+          logger.info('upload.stored', { name: stored.name, size: stored.size })
+          setAttachments((current) => [...current, stored])
+        }
+      } catch (error) {
+        if (error instanceof ApiError) {
+          setAttachError(error)
+        } else {
+          logger.error('upload.failed', { message: String(error) })
+        }
+      } finally {
+        setAttaching(false)
+      }
+    })()
+  }, [])
+
+  /**
+   * Takes a file off the list.
+   *
+   * Off the list, and nowhere else: the file stays where it was written. `mire`
+   * does not delete things on somebody's disk on the strength of a click in a
+   * browser tab, and a button that quietly did would be a worse surprise than
+   * one that leaves a file behind.
+   */
+  const detach = useCallback((id: string) => {
+    setAttachments((current) => current.filter((file) => file.id !== id))
+  }, [])
 
   /**
    * That turn again, and nothing after it.
@@ -640,6 +700,10 @@ export function App() {
     setLive(null)
     setCallError(null)
     setPrompt('')
+    // The list goes, the files stay. A new conversation is a clean composer, not
+    // a licence to delete what was written to disk.
+    setAttachments([])
+    setAttachError(null)
   }, [setPrompt])
 
   if (loadError) {
@@ -762,10 +826,15 @@ export function App() {
               revisions={mcp.revisions}
               mcpProtocol={profile.mcp.length > 0 ? mcpProtocol : null}
               showProtocol={profile.mcp.length > 0}
+              attachments={attachments}
+              attaching={attaching}
+              attachError={attachError ? attachError.body : null}
               onPrompt={setPrompt}
               onMaxIterations={setMaxIterations}
               onStreaming={setStreaming}
               onMcpProtocol={setMcpProtocol}
+              onAttach={attach}
+              onDetach={detach}
               onSend={send}
               onStop={stop}
               onRetry={retry}

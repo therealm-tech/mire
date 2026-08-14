@@ -26,6 +26,7 @@ use crate::profile::{DecodeSpec, HttpMethod, Profile, ProfileKind};
 use crate::redact::{Redactor, Secret};
 use crate::render::{RenderContext, RenderError, RenderedRequest, render_body};
 use crate::transport::{self, TransportError};
+use crate::uploads::UploadRef;
 
 /// Everything one call needs, already validated.
 #[derive(Debug, Default)]
@@ -41,6 +42,12 @@ pub struct CallInput {
     pub input: Vec<String>,
     /// Template knobs.
     pub params: Map<String, Value>,
+    /// Attached files, already read off the disk.
+    ///
+    /// Resolved before the call rather than here: reading a directory is the API
+    /// layer's business, and keeping it there is what lets this module — and
+    /// rendering with it — stay a pure function of its input.
+    pub uploads: Vec<UploadRef>,
     /// Model override handed to the template.
     pub model: Option<String>,
     /// Credential typed in the UI, for a provider that declares no source.
@@ -677,6 +684,7 @@ fn render_context(profile: &Profile, input: &CallInput) -> RenderContext {
         input: input.input.clone(),
         model: input.model.clone(),
         params: input.params.clone(),
+        uploads: input.uploads.clone(),
         stream: input.stream,
         ..RenderContext::default()
     }

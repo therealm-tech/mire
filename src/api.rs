@@ -18,6 +18,7 @@ use std::sync::Arc;
 use aide::axum::routing::{get_with, post_with};
 use aide::axum::{ApiRouter, IntoApiResponse};
 use aide::openapi::{Info, OpenApi};
+use axum::extract::DefaultBodyLimit;
 use axum::response::Redirect;
 use axum::routing::get;
 use axum::{Extension, Json, Router};
@@ -25,12 +26,15 @@ use tower_http::trace::TraceLayer;
 
 use crate::error::ApiError;
 use crate::exec::Runner;
+use crate::uploads::{self, UploadStore};
 
 /// What the handlers need.
 #[derive(Clone, Debug)]
 pub struct AppState {
     /// Profiles, auth registry and HTTP client.
     pub runner: Runner,
+    /// Where an attached file is written.
+    pub uploads: Arc<UploadStore>,
     /// Normalised base path: either empty or `/something` with no trailing slash.
     pub base_path: Arc<str>,
     /// Origin the outside world reaches us on, when it cannot be worked out.
@@ -61,7 +65,46 @@ fn documented(api: &mut OpenApi) -> Router<AppState> {
         .merge(auth_routes())
         .merge(mcp_routes())
         .merge(call_routes())
+        .merge(upload_routes())
         .finish_api(api)
+}
+
+/// Attaching a file.
+///
+/// The only route that writes anything. It sits under `/api` like everything
+/// else the UI talks to, and carries its own body limit: the global default is
+/// sized for a JSON request body, which no file clears.
+fn upload_routes() -> ApiRouter<AppState> {
+    ApiRouter::new()
+        .api_route(
+            "/api/uploads",
+            post_with(handlers::upload, |op| {
+                op.summary("Store an attached file")
+                    .description(
+                        "Takes one file off a `multipart/form-data` body and writes it to the \
+                         upload directory (`--uploads`, `./uploads` by default), under a name \
+                         with a random prefix. Answers where it landed.\n\n\
+                         One file per request: a picker that allows several sends several \
+                         requests, so a file that will not write is a file you can name.\n\n\
+                         The name the browser sends is treated as a display name and nothing \
+                         else — it is reduced to one path segment before it touches the \
+                         filesystem, so nothing can be written outside the directory. The \
+                         `contentType` that comes back is the client's word about its own \
+                         file, unverified.\n\n\
+                         The `id` that comes back is how a call names it: put it in \
+                         `uploads` on `POST /api/call`, `/api/call/stream` or `/api/agent` \
+                         and the file reaches the template as an entry of `uploads`, whole. \
+                         Whether it reaches the endpoint is the profile's decision — a \
+                         template that never mentions `uploads` sends what it always sent.",
+                    )
+                    .tag("uploads")
+                    .response::<200, Json<dto::UploadResponse>>()
+            }),
+        )
+        // Above the cap the store enforces, not at it: an over-sized file should
+        // come back as a `413` naming the limit, which is our error, rather than
+        // as the router quietly cutting the body off.
+        .layer(DefaultBodyLimit::max(uploads::MAX_BYTES + 1024 * 1024))
 }
 
 /// Reading the configuration directory.

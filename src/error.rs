@@ -133,6 +133,39 @@ impl From<crate::mcp::McpError> for ApiError {
     }
 }
 
+impl From<crate::uploads::UploadError> for ApiError {
+    fn from(error: crate::uploads::UploadError) -> Self {
+        use crate::uploads::UploadError;
+
+        let message = error.to_string();
+        match error {
+            UploadError::NoFile => Self::new(StatusCode::BAD_REQUEST, "no_file", message),
+            UploadError::Malformed(_) => {
+                Self::new(StatusCode::BAD_REQUEST, "malformed_upload", message)
+            }
+            UploadError::InvalidId { .. } => {
+                Self::new(StatusCode::BAD_REQUEST, "invalid_upload_id", message)
+            }
+            // A `404` and not a silent skip: a call that quietly dropped an
+            // attachment would send a body missing a file and say nothing.
+            UploadError::UnknownUpload { .. } => Self::not_found("unknown_upload", message),
+            UploadError::TooLarge { limit, .. } => {
+                Self::new(StatusCode::PAYLOAD_TOO_LARGE, "upload_too_large", message)
+                    .with_detail(serde_json::json!({"limitBytes": limit}))
+            }
+            // The one failure here that is genuinely ours: the directory does not
+            // exist and cannot be made, or the filesystem is read-only. The path
+            // goes in the message on purpose — "permission denied" without it is
+            // a support ticket.
+            UploadError::Io { .. } => Self::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "upload_write_failed",
+                message,
+            ),
+        }
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.status, Json(self.body)).into_response()
