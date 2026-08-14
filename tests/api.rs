@@ -3398,6 +3398,61 @@ async fn the_agent_really_calls_an_mcp_tool_and_feeds_the_result_back() {
     );
 }
 
+/// One turn sets nothing up, whatever the profile declares.
+///
+/// The loop is what discovers a server, lists its tools and calls them; a single
+/// call has no second turn to feed a result into, so it opens no connection at
+/// all. The profile here declares `mcp:` and both single-turn endpoints are
+/// asked to run it — a spent credential, a session prompt, or a line in
+/// somebody's audit log for a tool that was never going to be called is a
+/// side effect nobody asked this endpoint for.
+#[tokio::test]
+async fn a_single_turn_never_speaks_to_the_profiles_mcp_servers() {
+    let mcp = mcp_server(weather_tool(), vec![]).await;
+    let endpoint = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"content": "pong"}, "finish_reason": "stop"}],
+        })))
+        .mount(&endpoint)
+        .await;
+
+    let harness = Harness::start(&[
+        (
+            "mcp.yaml",
+            format!("servers:\n  - name: weather\n    url: {}/mcp\n", mcp.uri()),
+        ),
+        (
+            "chat.yaml",
+            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+        ),
+    ])
+    .await;
+
+    let (status, text, body) = harness
+        .call(json!({"profile": "chat", "prompt": "ping"}))
+        .await;
+    assert_eq!(status, 200, "{text}");
+
+    // And the model was offered nothing either: the tool list a live server
+    // would have filled is empty, rather than filled from a listing nobody made.
+    let sent: Value = serde_json::from_str(body["request"]["body"].as_str().unwrap()).unwrap();
+    assert_eq!(sent["tools"], json!([]));
+
+    let (status, events) = harness
+        .stream(json!({"profile": "chat", "prompt": "ping"}))
+        .await;
+    assert_eq!(status, 200);
+    assert!(events.iter().any(|(name, _)| name == "done"), "{events:?}");
+
+    // Not one word, on either route: no discovery, no listing, no tool call.
+    assert!(
+        mcp.received_requests().await.unwrap_or_default().is_empty(),
+        "a single turn spoke to an MCP server"
+    );
+}
+
 #[tokio::test]
 async fn the_required_headers_are_mirrored_from_the_body() {
     let mcp = mcp_server(

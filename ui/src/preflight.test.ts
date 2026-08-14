@@ -26,6 +26,8 @@ function run(overrides: {
   providers?: AuthDescriptor[]
   servers?: McpDescriptor[]
   token?: string
+  /** Agent mode unless a test says otherwise: a chat sets no server up. */
+  usesMcp?: boolean
 }) {
   const provider =
     'provider' in overrides && overrides.provider === undefined
@@ -38,6 +40,7 @@ function run(overrides: {
     providers: overrides.providers ?? (provider ? [provider] : []),
     servers: overrides.servers ?? [],
     token: overrides.token ?? '',
+    usesMcp: overrides.usesMcp ?? true,
   })
 }
 
@@ -121,6 +124,33 @@ describe('preflight', () => {
       servers,
     })
     expect(signedIn.blockers).toEqual([])
+  })
+
+  it('leaves the servers out entirely on a run that will not speak to them', () => {
+    const human: AuthDescriptor = {
+      name: 'me',
+      kind: 'oidc_browser',
+      needsValue: false,
+      needsLogin: true,
+      allowedHosts: [],
+    }
+    const overrides = {
+      profile: { mcp: ['named', 'ghost'] },
+      providers: [PROVIDER, human],
+      servers: [
+        { name: 'named', url: 'https://a', auth: 'me', tools: [], headers: [], usesAuth: [] },
+      ] as McpDescriptor[],
+    }
+
+    // In agent mode both are the run's business: one is undeclared, the other
+    // needs a session.
+    expect(run(overrides).blockers).toHaveLength(2)
+
+    // In chat mode neither is. A single turn calls no tool, so a credential it
+    // never uses cannot refuse it — and the bar stays green, correctly.
+    const chat = run({ ...overrides, usesMcp: false })
+    expect(chat.blockers).toEqual([])
+    expect(chat.servers).toEqual([])
   })
 
   it('counts a missing decode block as a note rather than a refusal', () => {

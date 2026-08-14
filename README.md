@@ -184,17 +184,24 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   the **Sign out** that drops that identity again — a server's provider is often
   not the profile's, so this row is the only place it appears. A profile naming a
   server `mcp.yaml` does not declare is called out there too.
+
+  That whole section is there in **Agent** mode and gone in **Chat**, along with
+  the servers on the bar above and any refusal they would have caused. A chat is
+  one turn: it discovers nothing, lists nothing and calls nothing, so the
+  profile's servers are not idle during it — they are not in the run at all, and
+  neither are the sign-ins they would have needed.
 - **Conversation**, for chat profiles. A transcript: your question on the right,
   the answer on the left, the tools the run called in between, and a composer at
   the bottom. `Enter` sends, `Shift`+`Enter` starts a line. There is one button,
-  **Send**, and a **stream** checkbox next to it saying how it goes out. Ticked,
-  which is how it starts: one turn, read chunk by chunk, the text appearing as it
-  arrives — the only way to see time to first token. Cleared: the
-  [loop](#agent-mode), which answers the tool calls the model makes until it
-  stops making them, and which a profile with no tools ends on turn one anyway —
-  the same one turn a single call would have made. **max turns** and **Protocol**
-  are shown as inert while streaming, because a stream is one turn and calls no
-  tool. While a run is in flight, **Stop** drops the request where it stands and
+  **Send**, and a **mode** dropdown next to it saying how it goes out. **Agent**,
+  which is how it starts: the [loop](#agent-mode), which answers the tool calls
+  the model makes until it stops making them, and which a profile with no tools
+  ends on turn one anyway — the same one turn a single call would have made.
+  **Chat**: one turn, streamed — read chunk by chunk, the text appearing as it
+  arrives, the only way to see time to first token. **max turns** is shown as
+  inert on **Chat**, because a stream has no second turn to cap, and
+  **Protocol** goes away entirely, because there is no server for it to be about.
+  While a run is in flight, **Stop** drops the request where it stands and
   whatever had arrived stays on the page — a stream cut off after four tokens
   produced four tokens, and that is a finding rather than a mess to clear up.
   Nothing is sent upstream to call the work off: an endpoint that has been asked
@@ -953,6 +960,10 @@ takes the same thing:
 { "profile": "chat", "prompt": "weather in Paris?", "mcpProtocol": "2025-03-26" }
 ```
 
+The dropdown is there in **Agent** mode only, and so is the endpoint that reads
+it: a chat opens no connection to a server, so there is no revision for it to be
+spoken in.
+
 `auto` — the default, and the field simply left out — is the negotiation as
 described above, with `protocol_version:` still in charge where a server declares
 one. Naming a revision overrides both, for that run and no other: it applies to
@@ -1072,11 +1083,11 @@ decode:
 ```
 
 `stream` comes from the call, not from the file, so one profile serves both
-modes: the **stream** box next to **Send** is what asks for chunks rather than a
-whole answer, and it starts ticked because the number is worth having. Keep the
-`| tojson`. MiniJinja renders a bare boolean as `True`, which is Python and is
-not JSON — rendering catches it and shows you the body, but it is a nicer trap to
-avoid than to diagnose.
+modes: the **mode** dropdown next to **Send** is what asks for chunks rather than
+a whole answer, and **Chat** is the mode to be on when time to first token is the
+number you came for. Keep the `| tojson`. MiniJinja renders a bare boolean as
+`True`, which is Python and is not JSON — rendering catches it and shows you the
+body, but it is a nicer trap to avoid than to diagnose.
 
 `decode.delta` is a separate cascade from `decode.content` because a chunk is not
 a small response: OpenAI moves the text from `message` to `delta`, Ollama keeps
@@ -1196,11 +1207,18 @@ Agent mode is not a third payload format and not a second profile. It is the sam
 is not met, answer the tool calls with their simulated results, feed them back,
 go round again. `POST /api/call` runs one turn of exactly the same thing.
 
-Which is why the UI has no separate chat mode: **Send** with the **stream** box
-cleared is the loop, whatever the profile declares. A profile that declares no
-tool stops on turn one, and turn one is the single call a chat mode would have
-made — one button, one shape of answer, one less thing to choose before you have
-any evidence.
+Which is why the UI's two modes are not two profiles: **Send** on **Agent** is
+the loop, whatever the profile declares, and **Send** on **Chat** is one streamed
+turn of the very same thing. A profile that declares no tool stops on turn one,
+and turn one is the single call **Chat** would have made — so the choice is about
+how the answer arrives, not about which of two mechanisms the profile is for.
+
+The one thing that does not carry over is the servers. Only the loop sets an MCP
+server up, so **Chat** speaks to none of them — `POST /api/call` and `POST
+/api/call/stream` never discover, list or call a tool, whatever the profile's
+`mcp:` says, and the UI drops their identities and their revision from the page
+while that is the mode. The tool list the model is offered is then the profile's
+own `tools:` and nothing else.
 
 It runs on the [conversation](#having-a-conversation) in the browser, and when it
 stops it appends the answer it finished on. The turns in between — the tool calls

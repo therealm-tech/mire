@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { z } from 'zod'
 import type { Message, UploadedFile } from '../api'
 import {
   type ActivityItem,
@@ -11,6 +12,25 @@ import { Failure } from './Failure'
 import { Markdown } from './Markdown'
 import { McpProtocol } from './McpProtocol'
 import { Badge, Button, INPUT_CLASSES, Panel } from './primitives'
+
+/**
+ * How **Send** sends what is in the box.
+ *
+ * `agent` is the loop: render, call, answer the tool calls, go round again until
+ * the profile says stop. `chat` is one turn, read chunk by chunk as it arrives —
+ * which is the only way to see time to first token, and the reason chat mode is
+ * the streamed one rather than a slower spelling of the same request.
+ *
+ * A schema rather than a bare union, because this is remembered across a reload
+ * and a value coming back out of storage is untrusted input like any other.
+ */
+export const runModeSchema = z.enum(['agent', 'chat'])
+export type RunMode = z.infer<typeof runModeSchema>
+
+const MODE_LABELS: Record<RunMode, string> = {
+  agent: 'Agent',
+  chat: 'Chat',
+}
 
 /**
  * The conversation, as a conversation.
@@ -34,7 +54,7 @@ export function ChatPanel({
   stopped,
   prompt,
   maxIterations,
-  streaming,
+  mode,
   error,
   revisions,
   mcpProtocol,
@@ -44,7 +64,7 @@ export function ChatPanel({
   attachError,
   onPrompt,
   onMaxIterations,
-  onStreaming,
+  onMode,
   onMcpProtocol,
   onAttach,
   onDetach,
@@ -62,12 +82,12 @@ export function ChatPanel({
   stopped: boolean
   prompt: string
   maxIterations: number
-  /** How **Send** sends: chunk by chunk on one turn, or the loop on all of them. */
-  streaming: boolean
+  /** How **Send** sends: the loop on every turn, or one turn read chunk by chunk. */
+  mode: RunMode
   error: { code: string; message: string; detail?: unknown } | null
   revisions: string[]
   mcpProtocol: string | null
-  /** Only a profile that names a server has a revision to speak. */
+  /** Only a run that will speak to a server has a revision to speak to it in. */
   showProtocol: boolean
   /** Files already written to `mire`'s upload directory. */
   attachments: UploadedFile[]
@@ -76,7 +96,7 @@ export function ChatPanel({
   attachError: { code: string; message: string; detail?: unknown } | null
   onPrompt: (value: string) => void
   onMaxIterations: (value: number) => void
-  onStreaming: (value: boolean) => void
+  onMode: (value: RunMode) => void
   onMcpProtocol: (revision: string | null) => void
   onAttach: (files: File[]) => void
   onDetach: (id: string) => void
@@ -169,7 +189,7 @@ export function ChatPanel({
           turns={turns}
           busy={busy}
           maxIterations={maxIterations}
-          streaming={streaming}
+          mode={mode}
           revisions={revisions}
           mcpProtocol={mcpProtocol}
           showProtocol={showProtocol}
@@ -178,7 +198,7 @@ export function ChatPanel({
           attachError={attachError}
           onPrompt={onPrompt}
           onMaxIterations={onMaxIterations}
-          onStreaming={onStreaming}
+          onMode={onMode}
           onMcpProtocol={onMcpProtocol}
           onAttach={onAttach}
           onDetach={onDetach}
@@ -483,7 +503,7 @@ function Composer({
   turns,
   busy,
   maxIterations,
-  streaming,
+  mode,
   revisions,
   mcpProtocol,
   showProtocol,
@@ -492,7 +512,7 @@ function Composer({
   attachError,
   onPrompt,
   onMaxIterations,
-  onStreaming,
+  onMode,
   onMcpProtocol,
   onAttach,
   onDetach,
@@ -503,7 +523,7 @@ function Composer({
   turns: number
   busy: boolean
   maxIterations: number
-  streaming: boolean
+  mode: RunMode
   revisions: string[]
   mcpProtocol: string | null
   showProtocol: boolean
@@ -512,7 +532,7 @@ function Composer({
   attachError: { code: string; message: string; detail?: unknown } | null
   onPrompt: (value: string) => void
   onMaxIterations: (value: number) => void
-  onStreaming: (value: boolean) => void
+  onMode: (value: RunMode) => void
   onMcpProtocol: (revision: string | null) => void
   onAttach: (files: File[]) => void
   onDetach: (id: string) => void
@@ -527,6 +547,11 @@ function Composer({
   // file input into something that matches the rest of the page is a fight
   // nobody wins, so it stays hidden and gets clicked from here.
   const picker = useRef<HTMLInputElement>(null)
+
+  // Chat is the streamed one. The controls below ask this rather than the mode
+  // itself, because what makes them inert is the streaming: one turn has no
+  // second turn to cap, and calls no tool, so it speaks to no server at all.
+  const streaming = mode === 'chat'
 
   return (
     <div className="space-y-2 border-line border-t pt-3">
@@ -559,7 +584,9 @@ function Composer({
       <div className="flex flex-wrap items-center gap-2">
         {/*
           One button, because there was only ever one thing to do with what is in
-          the box. How it goes out is a setting, and a setting is a checkbox.
+          the box. Which of the two runs it starts is a setting, and a setting
+          with two named answers is a dropdown rather than a box you tick: the
+          question is which mode, not whether to switch a mechanism on.
         */}
         <Button
           variant="primary"
@@ -575,13 +602,22 @@ function Composer({
           Send
         </Button>
         <label className="flex items-center gap-1.5 text-muted text-xs">
-          <input
-            type="checkbox"
-            checked={streaming}
+          mode
+          <select
+            value={mode}
             disabled={busy}
-            onChange={(event) => onStreaming(event.target.checked)}
-          />
-          stream
+            onChange={(event) => onMode(runModeSchema.parse(event.target.value))}
+            // Not `INPUT_CLASSES`: that one is `text-sm`, and a second size in
+            // the same list is settled by the stylesheet rather than by the
+            // order written here. Spelled out, like the other dropdown.
+            className="rounded border border-line-strong bg-panel px-2 py-1 text-ink text-xs disabled:opacity-50"
+          >
+            {runModeSchema.options.map((option) => (
+              <option key={option} value={option}>
+                {MODE_LABELS[option]}
+              </option>
+            ))}
+          </select>
         </label>
 
         {/*
@@ -623,14 +659,14 @@ function Composer({
           </Button>
         ) : null}
         {/*
-          Inert while streaming, and shown as inert rather than quietly ignored:
-          a stream is one turn, so there is no second one to cap.
+          Inert in chat mode, and shown as inert rather than quietly ignored: a
+          stream is one turn, so there is no second one to cap.
         */}
         <label
           className={`ml-auto flex items-center gap-1.5 text-muted text-xs ${
             streaming ? 'opacity-50' : ''
           }`}
-          title={streaming ? 'A stream is one turn. Uncheck stream to run the loop.' : undefined}
+          title={streaming ? 'A chat is one turn. Pick Agent to run the loop.' : undefined}
         >
           max turns
           <input
@@ -648,24 +684,26 @@ function Composer({
       <Attachments files={attachments} error={attachError} busy={attaching} onDetach={onDetach} />
 
       <p className="text-faint text-xs">
-        With <strong className="font-medium">stream</strong> on, <strong>Send</strong> is one turn,
-        read as it arrives — which is the only way to see time to first token, and the only way to
-        watch the answer being written. Tool calls do not reassemble in a stream, so it does not
-        loop: turn it off and <strong>Send</strong> runs the loop instead, answering the tools the
-        model asks for until it stops asking.
+        On <strong className="font-medium">Chat</strong>, <strong>Send</strong> is one turn,
+        streamed — read as it arrives, which is the only way to see time to first token and the only
+        way to watch the answer being written. Tool calls do not reassemble in a stream, so a chat
+        never loops. On <strong className="font-medium">Agent</strong>, <strong>Send</strong> runs
+        the loop instead, whole answers rather than chunks, answering the tools the model asks for
+        until it stops asking.
       </p>
 
       {/*
         A run parameter, so it sits with the other one. It used to live in the
-        auth panel, which is the one thing on the page it is not about. Inert
-        while streaming for the same reason **max turns** is: a stream calls no
-        tools, so it never speaks to a server at all.
+        auth panel, which is the one thing on the page it is not about. Gone
+        rather than inert on a chat: **max turns** is a cap this run ignores,
+        which is worth showing greyed, but a revision is spoken to a server this
+        run never opens a connection to — there is no run for it to be about.
       */}
       {showProtocol ? (
         <McpProtocol
           revisions={revisions}
           selected={mcpProtocol}
-          disabled={busy || streaming}
+          disabled={busy}
           onSelect={onMcpProtocol}
         />
       ) : null}
