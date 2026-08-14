@@ -229,7 +229,7 @@ dropping the model's last answer and putting the question back on the wire is
 how you find out whether it only said that because it had already said it.
 **New conversation** clears the lot.
 
-Three things follow, each of which is a decision:
+Four things follow, each of which is a decision:
 
 - **Only the last turn can be run again, and an empty box sends nothing.**
   **Retry** on an answer drops it and asks the question underneath it again;
@@ -249,6 +249,16 @@ Three things follow, each of which is a decision:
   Enter, tool calls appear as the loop makes them, streamed text appears as it
   arrives. A call that fails leaves the question in the history, which is
   exactly what **Retry** picks back up.
+- **The model's half is rendered as markdown, and only the model's half.**
+  Endpoints answer in markdown whether or not anyone asked them to, and reading
+  the asterisks and the backticks instead of what they meant is a tax on every
+  answer. So headings, lists, tables and fenced code are rendered — while the
+  answer is still streaming, too, caret and all. Your questions, tool results and
+  system prompts are shown exactly as they are, because those are not prose: they
+  are what is about to go on a wire. Nothing is rendered from HTML, so a
+  `<script>` in an answer is text about a script, and a `javascript:` link is not
+  a link. And the raw string is never more than a glance away — the response body
+  the endpoint actually sent is a card down in **Traffic**, byte for byte.
 
 ### Reading the traffic
 
@@ -1154,6 +1164,15 @@ follow `prefers-color-scheme` on their own, which is why no component carries a
 `dark:` variant. The mark itself is drawn in `ui/src/components/Mark.tsx` rather
 than shipped as an image: it inherits `currentColor`, so one tag serves both
 schemes.
+
+Markdown is the one place the front end takes a real dependency:
+`ui/src/components/Markdown.tsx` wraps `react-markdown` and `remark-gfm`, and
+maps every tag to the palette above rather than pulling in a typography plugin.
+It builds React elements instead of an HTML string, which is why nothing in this
+tool ever hands `dangerouslySetInnerHTML` a document written by the thing under
+test. It costs about 48 kB gzipped in the embedded bundle — a hand-rolled parser
+would cost less and be wrong about a corner of CommonMark nobody would find until
+a model landed on it.
 
 Outbound HTTP is covered by `wiremock` on every failure path that matters: an
 expected `401`, a timeout, a malformed body, an empty body, a decode path that

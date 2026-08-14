@@ -8,6 +8,7 @@ import {
   type VerdictItem,
 } from '../conversation'
 import { Failure } from './Failure'
+import { Markdown } from './Markdown'
 import { McpProtocol } from './McpProtocol'
 import { Badge, Button, INPUT_CLASSES, Panel } from './primitives'
 
@@ -223,9 +224,17 @@ function Bubble({
         }`}
       >
         {message.content ? (
-          // `break-words`: a URL or a base64 blob with no space in it is not a
-          // reason for the page to grow sideways.
-          <p className="whitespace-pre-wrap break-words">{message.content}</p>
+          // Only the model's half is prose that was written in markdown. A
+          // question was typed by hand, a tool result is JSON, and a system
+          // prompt is an instruction — rendering any of those would be showing
+          // someone something other than what is on the wire.
+          message.role === 'assistant' ? (
+            <Markdown>{message.content}</Markdown>
+          ) : (
+            // `break-words`: a URL or a base64 blob with no space in it is not a
+            // reason for the page to grow sideways.
+            <p className="whitespace-pre-wrap break-words">{message.content}</p>
+          )
         ) : (
           <p className="text-faint italic">no text content</p>
         )}
@@ -337,10 +346,11 @@ function Writing({ text, done }: { text: string; done: boolean }) {
         {text.length === 0 ? (
           <p className="text-faint italic">Connected. Nothing has arrived yet.</p>
         ) : (
-          <p className="whitespace-pre-wrap break-words">
-            {text}
-            {done ? null : <span className="animate-pulse">▍</span>}
-          </p>
+          // The caret goes into the source rather than after the render, which
+          // is the only way it lands at the end of the last line instead of on a
+          // line of its own — and inside an unclosed fence, which is where a
+          // half-arrived code block genuinely is.
+          <Markdown>{done ? text : `${text}▍`}</Markdown>
         )}
       </div>
     </div>
