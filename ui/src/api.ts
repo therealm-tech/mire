@@ -229,6 +229,21 @@ export const decodeTraceSchema = z.object({
   issues: z.array(z.object({ field: z.string(), path: z.string(), message: z.string() })),
 })
 
+/**
+ * What the endpoint said went wrong, when the profile's `decode.error` cascade
+ * found it saying so.
+ *
+ * Beside the decoded answer rather than inside it, and independent of the
+ * status: a gateway answering `200` with a complaint in the body is exactly the
+ * case this exists to surface.
+ */
+export const decodedErrorSchema = z.object({
+  message: z.string().nullable(),
+  type: z.string().nullable(),
+  code: z.string().nullable(),
+  raw: z.unknown(),
+})
+
 const httpMetaSchema = z.object({
   status: z.number(),
   headers: z.record(z.string(), z.string()),
@@ -260,6 +275,7 @@ const responseViewSchema = z.object({
   elided: z.boolean(),
   jsonError: z.string().optional(),
   decoded: decodedSchema.optional(),
+  error: decodedErrorSchema.optional(),
   decode: decodeTraceSchema,
   stream: streamViewSchema.optional(),
 })
@@ -407,6 +423,7 @@ export type Completion = Extract<Decoded, { kind: 'completion' }>
 export type Embedding = Extract<Decoded, { kind: 'embedding' }>
 export type CheckOutcome = z.infer<typeof checkOutcomeSchema>
 export type DecodeTrace = z.infer<typeof decodeTraceSchema>
+export type DecodedError = z.infer<typeof decodedErrorSchema>
 export type CallOutcome = z.infer<typeof callOutcomeSchema>
 export type StopOutcome = z.infer<typeof stopOutcomeSchema>
 export type ToolInvocation = z.infer<typeof toolInvocationSchema>

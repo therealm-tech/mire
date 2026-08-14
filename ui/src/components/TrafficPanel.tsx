@@ -362,7 +362,7 @@ function ModelCard({
   onToggle: () => void
 }) {
   const { outcome } = exchange
-  const { http, decoded, decode } = outcome.response
+  const { http, decoded, decode, error } = outcome.response
   const tone = statusTone(http.status, expectUnauthorized)
   const protectedAsExpected = expectUnauthorized && (http.status === 401 || http.status === 403)
 
@@ -384,6 +384,11 @@ function ModelCard({
           {outcome.retriedAfterUnauthorized ? (
             <Badge tone="warn">credential refreshed, replayed once</Badge>
           ) : null}
+          {/*
+            Only worth a badge when the status did not already say so: a `400`
+            with an error in it is not news, a `200` with one very much is.
+          */}
+          {error && http.status < 400 ? <Badge tone="bad">error in the body</Badge> : null}
         </>
       }
     >
@@ -415,16 +420,40 @@ function ModelCard({
           </p>
         ) : null}
 
+        {/*
+          First, above the decoded answer: when the endpoint refused, its own
+          sentence is the answer, and reading it should not mean unfolding the
+          raw body underneath.
+        */}
+        {error ? (
+          <div className="space-y-1 rounded bg-bad-soft p-2">
+            <p className="text-bad text-sm">
+              {error.message ?? 'The endpoint reported an error without saying what.'}
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {error.type ? <Badge tone="bad">{error.type}</Badge> : null}
+              {error.code ? <Badge tone="bad">code {error.code}</Badge> : null}
+            </div>
+          </div>
+        ) : null}
+
         {decoded?.kind === 'completion' ? (
           <div className="space-y-2">
-            {decoded.content === null ? (
+            {decoded.content === null ? null : (
+              <p className="whitespace-pre-wrap text-sm">{decoded.content}</p>
+            )}
+
+            {/*
+              Not said when the endpoint reported an error: there is nothing
+              wrong with the profile, and sending the reader off to fix its
+              paths would be sending them the wrong way.
+            */}
+            {decoded.content === null && !error ? (
               <p className="text-muted text-sm">
                 No configured path resolved the content. The raw response is below, and the decode
                 trace says what was tried.
               </p>
-            ) : (
-              <p className="whitespace-pre-wrap text-sm">{decoded.content}</p>
-            )}
+            ) : null}
 
             <div className="flex flex-wrap gap-2 text-xs">
               {decoded.finishReason ? <Badge>finish: {decoded.finishReason}</Badge> : null}

@@ -17,9 +17,11 @@ use tracing::{debug, info, warn};
 use crate::auth::{ANONYMOUS, AuthError, AuthProvider, Retry};
 use crate::config::ConfigStore;
 use crate::decode::embedding::{CheckOutcome, EmbeddingChecks, Vectors};
+use crate::decode::error::DecodedError;
 use crate::decode::stream::{Frame, FrameParser, Framing, StreamView};
 use crate::decode::{
-    Completion, DecodeTrace, Decoded, EmbeddingResult, HttpMeta, chat, embedding, script, stream,
+    Completion, DecodeTrace, Decoded, EmbeddingResult, HttpMeta, chat, embedding, error, script,
+    stream,
 };
 use crate::message::Message;
 use crate::profile::{DecodeSpec, HttpMethod, Profile, ProfileKind};
@@ -111,6 +113,16 @@ pub struct ResponseView {
     /// Normalised output, when the profile's kind has a decoder.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decoded: Option<Decoded>,
+    /// What the endpoint said went wrong, when a `decode.error` cascade — or a
+    /// decode script — found it saying so.
+    ///
+    /// Beside `decoded` rather than inside it, because a refusal is neither a
+    /// completion nor a set of vectors, and because both kinds of profile report
+    /// one the same way. It does not follow the status either way: an endpoint
+    /// can refuse under a `200`, and one that answers `500` with an empty body
+    /// leaves this `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<DecodedError>,
     /// Which paths matched, which missed, and what went wrong.
     pub decode: DecodeTrace,
     /// What the stream did, when the call streamed.
@@ -360,6 +372,7 @@ impl Runner {
         let mut accumulator = StreamAccumulator::new(
             &profile.decode,
             &redactor,
+            status,
             Framing::detect(open.content_type.as_deref()),
             started,
         );
@@ -479,6 +492,7 @@ pub enum CallEvent {
 /// Everything a finished stream produced.
 struct Streamed {
     completion: Completion,
+    error: Option<DecodedError>,
     decode: DecodeTrace,
     view: StreamView,
     ttft_ms: Option<u64>,
@@ -490,6 +504,9 @@ struct Streamed {
 struct StreamAccumulator<'a> {
     spec: &'a DecodeSpec,
     redactor: &'a Redactor,
+    /// Only used to decide whether a missing error is worth reporting — see
+    /// [`crate::decode::error::decode`].
+    status: u16,
     parser: FrameParser,
     trace: DecodeTrace,
     view: StreamView,
@@ -507,12 +524,14 @@ impl<'a> StreamAccumulator<'a> {
     fn new(
         spec: &'a DecodeSpec,
         redactor: &'a Redactor,
+        status: u16,
         framing: Framing,
         started: std::time::Instant,
     ) -> Self {
         Self {
             spec,
             redactor,
+            status,
             parser: FrameParser::new(framing),
             trace: DecodeTrace::default(),
             view: StreamView {
@@ -590,6 +609,12 @@ impl<'a> StreamAccumulator<'a> {
         // the trace claims it did.
         completion.content = (!self.text.is_empty()).then(|| self.text.clone());
 
+        // An endpoint that refuses a streamed call refuses it in one shot: the
+        // error body arrives as a single frame, which is the last one there is.
+        let error = last
+            .as_ref()
+            .and_then(|last| error::decode(last, self.spec, self.status, &mut self.trace));
+
         stream::record_miss(self.spec, &mut self.trace);
 
         // Two ways to end on purpose: the sentinel, or a final chunk that says
@@ -599,6 +624,7 @@ impl<'a> StreamAccumulator<'a> {
 
         Streamed {
             completion,
+            error,
             decode: self.trace,
             view: self.view,
             ttft_ms: self.ttft_ms,
@@ -633,6 +659,7 @@ fn streamed_response(
         // parse is counted in `stream.unparsable` instead.
         json_error: None,
         decoded: Some(Decoded::Completion(streamed.completion)),
+        error: streamed.error,
         decode: streamed.decode,
         stream: Some(streamed.view),
     }
@@ -770,24 +797,23 @@ fn response_view(
     // Nothing to decode out of a body that is not JSON. A `decode.script`
     // replaces the cascades entirely — validation rejects declaring both, so
     // there is no precedence rule here, just two paths.
-    let (decoded, decode, vectors) = match (&parsed, profile.kind) {
+    let (decoded, mut decode, vectors, scripted_error) = match (&parsed, profile.kind) {
         (Some(value), ProfileKind::Chat) => {
-            let (completion, trace) = match &profile.decode.script {
-                Some(source) => script::decode_chat(value, raw.status, &http.headers, source),
-                None => chat::decode(value, &profile.decode),
+            let (completion, error, trace) = if let Some(source) = &profile.decode.script {
+                script::decode_chat(value, raw.status, &http.headers, source)
+            } else {
+                let (completion, trace) = chat::decode(value, &profile.decode);
+                (completion, None, trace)
             };
-            (Some(Decoded::Completion(completion)), trace, None)
+            (Some(Decoded::Completion(completion)), trace, None, error)
         }
         (Some(value), ProfileKind::Embedding) => {
-            let (embedding, vectors, trace) = match &profile.decode.script {
-                Some(source) => script::decode_embedding(
-                    value,
-                    raw.status,
-                    &http.headers,
-                    source,
-                    include_vectors,
-                ),
-                None => embedding::decode(value, &profile.decode, include_vectors),
+            let (embedding, vectors, error, trace) = if let Some(source) = &profile.decode.script {
+                script::decode_embedding(value, raw.status, &http.headers, source, include_vectors)
+            } else {
+                let (embedding, vectors, trace) =
+                    embedding::decode(value, &profile.decode, include_vectors);
+                (embedding, vectors, None, trace)
             };
             let checks = EmbeddingChecks::evaluate(&embedding, inputs, profile.expect.dimensions);
             let result = EmbeddingResult { embedding, checks };
@@ -795,10 +821,21 @@ fn response_view(
                 Some(Decoded::Embedding(Box::new(result))),
                 trace,
                 Some(vectors),
+                error,
             )
         }
-        _ => (None, DecodeTrace::default(), None),
+        _ => (None, DecodeTrace::default(), None, None),
     };
+
+    // The error cascade is the one field both kinds share and neither owns, so
+    // it runs here rather than inside either decoder. A profile with a script has
+    // no cascades to run — declaring both fails to load — so the two never
+    // compete for the same answer.
+    let error = scripted_error.or_else(|| {
+        parsed
+            .as_ref()
+            .and_then(|value| error::decode(value, &profile.decode, raw.status, &mut decode))
+    });
 
     let view = ResponseView {
         http,
@@ -811,6 +848,7 @@ fn response_view(
         elided,
         json_error,
         decoded,
+        error,
         decode,
         stream: None,
     };

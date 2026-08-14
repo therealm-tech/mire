@@ -849,6 +849,67 @@ describe('agent mode', () => {
       expect(within(panel('Traffic')).getByText(/maximum context length/)).toBeInTheDocument()
     })
   })
+
+  it('reads the error out of a body whose status called it fine', async () => {
+    const user = userEvent.setup()
+    const swallowed = {
+      ...turnFixture(),
+      call: {
+        ...completion(200),
+        response: {
+          ...completion(200).response,
+          decoded: {
+            kind: 'completion',
+            content: null,
+            toolCalls: [],
+            finishReason: null,
+            usage: null,
+          },
+          error: {
+            message: 'no capacity upstream',
+            type: 'service_unavailable',
+            code: '503',
+            raw: { detail: 'no capacity upstream' },
+          },
+        },
+      },
+      tools: [],
+      decision: {
+        decision: 'stop',
+        stop: { outcome: 'stopped', reason: { predicate: 'noToolCalls' } },
+      },
+    }
+
+    vi.stubGlobal(
+      'fetch',
+      mockApi({
+        'api/profiles': PROFILES,
+        'api/auth': AUTH,
+        'api/mcp': MCP,
+        'api/agent': [
+          'event: turn',
+          `data: ${JSON.stringify({ event: 'turn', ...swallowed })}`,
+          '',
+          '',
+        ].join('\n'),
+      }),
+    )
+
+    render(<App />)
+    await loopMode(user)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    const traffic = within(panel('Traffic'))
+    await waitFor(() => {
+      expect(traffic.getByText('no capacity upstream')).toBeInTheDocument()
+    })
+    expect(traffic.getByText('service_unavailable')).toBeInTheDocument()
+    // The status said `200`, so the badge is the only thing that would ever
+    // have told you otherwise.
+    expect(traffic.getByText(/error in the body/)).toBeInTheDocument()
+    // And the profile is not the one at fault, so it is not accused of it.
+    expect(traffic.queryByText(/No configured path resolved the content/)).not.toBeInTheDocument()
+  })
 })
 
 function turnFixture() {

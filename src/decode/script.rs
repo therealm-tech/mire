@@ -17,6 +17,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::embedding::{Embedding, VectorEncoding, Vectors, summarise_all};
+use super::error::DecodedError;
 use super::{Completion, DecodeField, DecodeTrace, Usage};
 use crate::message::ToolCall;
 use crate::script::{ScriptError, ScriptSource, from_dynamic, to_dynamic};
@@ -32,6 +33,7 @@ struct ScriptCompletion {
     tool_calls: Vec<ToolCall>,
     finish_reason: Option<String>,
     usage: Option<Value>,
+    error: Option<Value>,
 }
 
 /// What an embedding script is expected to return.
@@ -43,6 +45,27 @@ struct ScriptCompletion {
 struct ScriptEmbedding {
     vectors: Vec<Vec<f64>>,
     usage: Option<Value>,
+    error: Option<Value>,
+}
+
+/// Normalises whatever a script called an error, and traces it.
+///
+/// A script gets the same latitude a cascade does: a string is the message, a map
+/// is read for the usual keys. What it must not do is invent an error out of
+/// nothing, so a returned node with nothing error-shaped in it is dropped the way
+/// [`super::error::decode`] drops one.
+fn script_error(returned: Option<&Value>, trace: &mut DecodeTrace) -> Option<DecodedError> {
+    let error = DecodedError::from_value(returned?);
+    if error.is_empty() {
+        trace.issue(
+            DecodeField::Error,
+            ORIGIN,
+            "the script returned an `error` carrying no message, type or code",
+        );
+        return None;
+    }
+    trace.hit(DecodeField::Error, ORIGIN);
+    Some(error)
 }
 
 #[expect(
@@ -74,25 +97,29 @@ fn run(
 }
 
 /// Decodes a `kind: chat` response with a script.
+///
+/// The error, when the script reported one, comes back next to the completion
+/// rather than inside it: an endpoint refusing a call has not produced a partial
+/// completion, and both kinds of profile report a refusal the same way.
 #[must_use]
 pub fn decode_chat(
     raw: &Value,
     status: u16,
     headers: &BTreeMap<String, String>,
     script: &ScriptSource,
-) -> (Completion, DecodeTrace) {
+) -> (Completion, Option<DecodedError>, DecodeTrace) {
     let mut trace = DecodeTrace::default();
 
     let returned = match run(script, raw, status, headers).and_then(|value| {
         from_dynamic::<ScriptCompletion>(
             &value,
-            "a map with `content`, `tool_calls`, `finish_reason` and `usage`",
+            "a map with `content`, `tool_calls`, `finish_reason`, `usage` and `error`",
         )
     }) {
         Ok(returned) => returned,
         Err(error) => {
             trace.issue(DecodeField::Script, ORIGIN, error.to_string());
-            return (Completion::default(), trace);
+            return (Completion::default(), None, trace);
         }
     };
 
@@ -111,6 +138,7 @@ pub fn decode_chat(
     if usage.is_some() {
         trace.hit(DecodeField::Usage, ORIGIN);
     }
+    let error = script_error(returned.error.as_ref(), &mut trace);
 
     let completion = Completion {
         content: returned.content,
@@ -118,7 +146,7 @@ pub fn decode_chat(
         finish_reason: returned.finish_reason,
         usage,
     };
-    (completion, trace)
+    (completion, error, trace)
 }
 
 /// Decodes a `kind: embedding` response with a script.
@@ -129,18 +157,18 @@ pub fn decode_embedding(
     headers: &BTreeMap<String, String>,
     script: &ScriptSource,
     include_vectors: bool,
-) -> (Embedding, Vectors, DecodeTrace) {
+) -> (Embedding, Vectors, Option<DecodedError>, DecodeTrace) {
     let mut trace = DecodeTrace::default();
 
     let returned = match run(script, raw, status, headers).and_then(|value| {
-        from_dynamic::<ScriptEmbedding>(&value, "a map with `vectors` and `usage`")
+        from_dynamic::<ScriptEmbedding>(&value, "a map with `vectors`, `usage` and `error`")
     }) {
         Ok(returned) => returned,
         Err(error) => {
             trace.issue(DecodeField::Script, ORIGIN, error.to_string());
             let empty = Vectors::default();
             let embedding = summarise_all(&empty, VectorEncoding::None, None, false);
-            return (embedding, empty, trace);
+            return (embedding, empty, None, trace);
         }
     };
 
@@ -148,6 +176,7 @@ pub fn decode_embedding(
     if usage.is_some() {
         trace.hit(DecodeField::Usage, ORIGIN);
     }
+    let error = script_error(returned.error.as_ref(), &mut trace);
 
     let vectors = Vectors::new(narrow(returned.vectors));
     let encoding = if vectors.as_slice().is_empty() {
@@ -160,7 +189,7 @@ pub fn decode_embedding(
     };
 
     let embedding = summarise_all(&vectors, encoding, usage, include_vectors);
-    (embedding, vectors, trace)
+    (embedding, vectors, error, trace)
 }
 
 #[cfg(test)]
@@ -189,7 +218,7 @@ mod tests {
             "counters": {"in": 12, "out": 5}
         });
 
-        let (completion, trace) = decode_chat(
+        let (completion, _, trace) = decode_chat(
             &raw,
             200,
             &headers(),
@@ -229,7 +258,7 @@ mod tests {
             "eval_duration": 16_000_000_000_i64,
         });
 
-        let (completion, _) = decode_chat(
+        let (completion, _, _) = decode_chat(
             &raw,
             200,
             &headers(),
@@ -258,7 +287,7 @@ mod tests {
             "done_reason": "stop"
         });
 
-        let (completion, _) = decode_chat(
+        let (completion, _, _) = decode_chat(
             &raw,
             200,
             &headers(),
@@ -280,7 +309,7 @@ mod tests {
 
     #[test]
     fn a_script_can_read_the_status_and_the_headers() {
-        let (completion, _) = decode_chat(
+        let (completion, _, _) = decode_chat(
             &serde_json::json!({}),
             503,
             &headers(),
@@ -291,7 +320,7 @@ mod tests {
 
     #[test]
     fn a_failing_script_is_traced_rather_than_fatal() {
-        let (completion, trace) = decode_chat(
+        let (completion, _, trace) = decode_chat(
             &serde_json::json!({"a": 1}),
             200,
             &headers(),
@@ -305,11 +334,73 @@ mod tests {
 
     #[test]
     fn a_script_returning_the_wrong_shape_says_what_was_wanted() {
-        let (_, trace) = decode_chat(&serde_json::json!({}), 200, &headers(), &script("42"));
+        let (_, _, trace) = decode_chat(&serde_json::json!({}), 200, &headers(), &script("42"));
         assert!(
             trace.issues[0].message.contains("expected a map"),
             "{}",
             trace.issues[0].message
+        );
+    }
+
+    /// The endpoint that reports its failure where nothing else does — in a
+    /// header, with the body carrying a perfectly ordinary-looking `200`.
+    #[test]
+    fn a_script_can_report_an_error_of_its_own() {
+        let mut headers = headers();
+        headers.insert("x-upstream-status".to_owned(), "503".to_owned());
+
+        let (completion, error, trace) = decode_chat(
+            &serde_json::json!({"message": {"content": ""}}),
+            200,
+            &headers,
+            &script(
+                r#"
+                let upstream = headers["x-upstream-status"];
+                if upstream != "200" {
+                    #{ error: #{ message: `upstream answered ${upstream}`, code: upstream } }
+                } else {
+                    #{ content: raw.message.content }
+                }
+                "#,
+            ),
+        );
+
+        assert!(completion.content.is_none());
+        let error = error.unwrap();
+        assert_eq!(error.message.as_deref(), Some("upstream answered 503"));
+        assert_eq!(error.code.as_deref(), Some("503"));
+        assert_eq!(trace.matched[&DecodeField::Error], ORIGIN);
+    }
+
+    /// A script saying `error: ""` has not found an error, and a red banner over
+    /// a good answer is worse than nothing.
+    #[test]
+    fn a_script_error_with_nothing_in_it_is_an_issue_not_an_error() {
+        let (_, error, trace) = decode_chat(
+            &serde_json::json!({}),
+            200,
+            &headers(),
+            &script(r#"#{ content: "fine", error: "" }"#),
+        );
+
+        assert!(error.is_none());
+        assert_eq!(trace.issues[0].field, DecodeField::Error);
+    }
+
+    #[test]
+    fn an_embedding_script_reports_an_error_the_same_way() {
+        let (embedding, _, error, _) = decode_embedding(
+            &serde_json::json!({"error": "the model is not an embedding model"}),
+            400,
+            &headers(),
+            &script("#{ vectors: [], error: raw.error }"),
+            false,
+        );
+
+        assert_eq!(embedding.count, 0);
+        assert_eq!(
+            error.unwrap().message.as_deref(),
+            Some("the model is not an embedding model")
         );
     }
 
@@ -323,7 +414,7 @@ mod tests {
             ]
         });
 
-        let (embedding, vectors, trace) = decode_embedding(
+        let (embedding, vectors, _, trace) = decode_embedding(
             &raw,
             200,
             &headers(),
@@ -341,7 +432,7 @@ mod tests {
 
     #[test]
     fn an_embedding_script_that_finds_nothing_reports_a_miss() {
-        let (embedding, _, trace) = decode_embedding(
+        let (embedding, _, _, trace) = decode_embedding(
             &serde_json::json!({}),
             200,
             &headers(),
@@ -354,7 +445,7 @@ mod tests {
 
     #[test]
     fn the_sandbox_still_applies_to_a_decode_script() {
-        let (completion, trace) = decode_chat(
+        let (completion, _, trace) = decode_chat(
             &serde_json::json!({}),
             200,
             &headers(),
