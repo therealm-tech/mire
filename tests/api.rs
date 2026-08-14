@@ -2144,7 +2144,7 @@ async fn an_agent_answers_a_tool_call_and_stops_when_the_model_is_done() {
 }
 
 #[tokio::test]
-async fn a_model_asking_for_the_same_thing_twice_is_stopped() {
+async fn a_model_asking_for_the_same_thing_twice_is_stopped_when_the_profile_asks() {
     let server = MockServer::start().await;
     // Always the same call: a loop, not progress.
     Mock::given(method("POST"))
@@ -2154,7 +2154,10 @@ async fn a_model_asking_for_the_same_thing_twice_is_stopped() {
 
     let harness = Harness::start(&[(
         "agent.yaml",
-        agent_profile(&format!("{}/v1", server.uri()), ""),
+        agent_profile(
+            &format!("{}/v1", server.uri()),
+            "agent:\n  stop_when:\n    repeated_call: true\n",
+        ),
     )])
     .await;
 
@@ -2168,6 +2171,34 @@ async fn a_model_asking_for_the_same_thing_twice_is_stopped() {
     assert_eq!(done["stop"]["atTurn"], 2);
     // Two turns, not ten: it did not burn the budget getting there.
     assert_eq!(done["turns"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn the_same_call_twice_is_not_watched_for_unless_asked() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(wants_tool("Paris")))
+        .mount(&server)
+        .await;
+
+    let harness = Harness::start(&[(
+        "agent.yaml",
+        agent_profile(
+            &format!("{}/v1", server.uri()),
+            "agent:\n  max_iterations: 3\n",
+        ),
+    )])
+    .await;
+
+    let (_, events) = harness
+        .agent(json!({"profile": "agent", "prompt": "weather?"}))
+        .await;
+
+    // The default lets it keep going; only the turn budget ends the run.
+    let (_, done) = events.last().unwrap();
+    assert_eq!(done["stop"]["outcome"], "maxIterations");
+    assert_eq!(done["stop"]["limit"], 3);
+    assert_eq!(done["turns"].as_array().unwrap().len(), 3);
 }
 
 #[tokio::test]

@@ -257,6 +257,12 @@ pub struct StopWhen {
     /// Stop when `finish_reason` is one of these values.
     #[serde(default)]
     pub finish_reason_in: Vec<String>,
+    /// Stop when the model asks for the same tool with the same arguments
+    /// twice. Off unless asked for: a model that re-reads a tool it already
+    /// called is often working, not looping, and `max_iterations` already
+    /// bounds the run.
+    #[serde(default)]
+    pub repeated_call: bool,
 }
 
 impl Default for StopWhen {
@@ -264,6 +270,7 @@ impl Default for StopWhen {
         Self {
             no_tool_calls: true,
             finish_reason_in: Vec::new(),
+            repeated_call: false,
         }
     }
 }
@@ -476,7 +483,20 @@ tools:
             "$.choices[0].message.content"
         );
         assert_eq!(profile.tools[0].name, "get_weather");
+        // Declared without `repeated_call`, so the loop does not watch for one.
+        assert!(!profile.agent.as_ref().unwrap().stop_when.repeated_call);
         profile.validate().unwrap();
+    }
+
+    #[test]
+    fn watching_for_a_repeated_call_is_opt_in() {
+        let yaml = CHAT_YAML.replace(
+            "    finish_reason_in: [stop, end_turn]",
+            "    finish_reason_in: [stop, end_turn]\n    repeated_call: true",
+        );
+
+        let profile: Profile = serde_yaml_ng::from_str(&yaml).unwrap();
+        assert!(profile.agent.unwrap().stop_when.repeated_call);
     }
 
     #[test]
