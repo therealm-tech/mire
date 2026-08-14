@@ -22,6 +22,7 @@ import {
 import { ChatPanel } from './components/ChatPanel'
 import { EmbeddingPanel } from './components/EmbeddingPanel'
 import { EmbeddingRequest } from './components/EmbeddingRequest'
+import { Mark } from './components/Mark'
 import { McpAuth } from './components/McpAuth'
 import { McpProtocol } from './components/McpProtocol'
 import { ModelAuth } from './components/ModelAuth'
@@ -480,19 +481,18 @@ export function App() {
 
   return (
     <div className="mx-auto max-w-6xl space-y-4 p-3 sm:p-6">
-      <header className="flex flex-wrap items-baseline justify-between gap-2">
-        <h1 className="font-semibold text-xl">mire</h1>
-        <p className="text-stone-500 text-xs dark:text-stone-400">
-          A known signal in, a look at what comes out.
-        </p>
+      <header className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2.5">
+          <Mark />
+          <h1 className="font-semibold text-xl tracking-tight">mire</h1>
+        </div>
+        <p className="text-faint text-xs">A known signal in, a look at what comes out.</p>
       </header>
 
       <Panel title="Auth">
         <div className="space-y-3">
           <section className="space-y-2">
-            <h3 className="font-semibold text-stone-600 text-xs dark:text-stone-400">
-              Model endpoint
-            </h3>
+            <h3 className="font-semibold text-muted text-xs">Model endpoint</h3>
             <ModelAuth
               provider={provider}
               profile={profile}
@@ -512,10 +512,8 @@ export function App() {
             nothing about the other.
           */}
           {profile && profile.mcp.length > 0 ? (
-            <section className="space-y-2 border-stone-200 border-t pt-3 dark:border-stone-800">
-              <h3 className="font-semibold text-stone-600 text-xs dark:text-stone-400">
-                MCP servers
-              </h3>
+            <section className="space-y-2 border-line border-t pt-3">
+              <h3 className="font-semibold text-muted text-xs">MCP servers</h3>
               {/*
                 Above the servers rather than on each one: the revision is a
                 property of the run, and one trace speaking two of them is a
@@ -561,9 +559,7 @@ export function App() {
         <div className="min-w-0 space-y-4">
           {profile === undefined ? (
             <Panel title="Request">
-              <p className="text-stone-500 text-sm dark:text-stone-400">
-                Select a profile to get started.
-              </p>
+              <p className="text-muted text-sm">Select a profile to get started.</p>
             </Panel>
           ) : null}
 

@@ -8,13 +8,13 @@ import { useState } from 'react'
  */
 export function JsonTree({ value, depth = 0 }: { value: unknown; depth?: number }) {
   if (value === null) {
-    return <span className="text-stone-500">null</span>
+    return <span className="text-faint">null</span>
   }
   if (typeof value === 'string') {
-    return <span className="text-emerald-700 dark:text-emerald-300">"{value}"</span>
+    return <span className="text-string">"{value}"</span>
   }
   if (typeof value === 'number' || typeof value === 'boolean') {
-    return <span className="text-sky-700 dark:text-sky-300">{String(value)}</span>
+    return <span className="text-number">{String(value)}</span>
   }
   if (Array.isArray(value)) {
     return <Branch label={`array · ${value.length}`} entries={[...value.entries()]} depth={depth} />
@@ -23,7 +23,7 @@ export function JsonTree({ value, depth = 0 }: { value: unknown; depth?: number 
     const entries = Object.entries(value as Record<string, unknown>)
     return <Branch label={`object · ${entries.length}`} entries={entries} depth={depth} />
   }
-  return <span className="text-stone-500">{String(value)}</span>
+  return <span className="text-faint">{String(value)}</span>
 }
 
 function Branch({
@@ -47,16 +47,16 @@ function Branch({
       <button
         type="button"
         onClick={() => setOpen(!open)}
-        className="text-stone-500 text-xs hover:underline dark:text-stone-400"
+        className="text-faint text-xs hover:text-ink hover:underline"
       >
         {open ? '▾' : '▸'} {label}
       </button>
       {open ? (
-        <ul className="ml-3 border-stone-200 border-l pl-2 dark:border-stone-800">
+        <ul className="ml-3 border-line border-l pl-2">
           {entries.map(([key, nested]) => (
             <li key={String(key)} className="py-px">
-              <span className="text-stone-600 dark:text-stone-400">{key}</span>
-              <span className="text-stone-400">: </span>
+              <span className="text-muted">{key}</span>
+              <span className="text-faint">: </span>
               <JsonTree value={nested} depth={depth + 1} />
             </li>
           ))}

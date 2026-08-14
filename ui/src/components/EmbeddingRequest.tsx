@@ -1,4 +1,4 @@
-import { Field, Panel } from './primitives'
+import { Button, Field, INPUT_CLASSES, Panel } from './primitives'
 
 /**
  * The input side of an embedding profile.
@@ -34,7 +34,7 @@ export function EmbeddingRequest({
             value={input}
             onChange={(event) => onInput(event.target.value)}
             rows={4}
-            className="w-full rounded border border-stone-300 bg-white px-2 py-1 font-mono text-sm dark:border-stone-700 dark:bg-stone-950"
+            className={`${INPUT_CLASSES} w-full font-mono`}
           />
         </Field>
 
@@ -46,7 +46,7 @@ export function EmbeddingRequest({
               max={5}
               value={repeat}
               onChange={(event) => onRepeat(Number(event.target.value))}
-              className="w-20 rounded border border-stone-300 bg-white px-2 py-1 text-sm dark:border-stone-700 dark:bg-stone-950"
+              className={`${INPUT_CLASSES} w-20`}
             />
           </Field>
           <label className="flex items-center gap-2 pb-1 text-xs">
@@ -59,14 +59,9 @@ export function EmbeddingRequest({
           </label>
         </div>
 
-        <button
-          type="button"
-          disabled={busy}
-          onClick={onSend}
-          className="rounded-lg bg-stone-900 px-4 py-1.5 font-medium text-sm text-stone-50 disabled:opacity-50 dark:bg-stone-100 dark:text-stone-900"
-        >
+        <Button variant="primary" size="md" disabled={busy} onClick={onSend}>
           Send
-        </button>
+        </Button>
       </div>
     </Panel>
   )

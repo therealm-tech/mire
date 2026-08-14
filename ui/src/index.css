@@ -1,6 +1,153 @@
 @import 'tailwindcss';
 
+/*
+ * The palette is the mark: near-black ink on a cream sheet, and nothing else.
+ *
+ * Two layers. Below, the brand scale — the two colours sampled from the logo and
+ * the steps between them, fixed values that mean the same thing in any scheme.
+ * Above it, the roles: `paper` is whatever the page is printed on, `ink` is
+ * whatever it is printed with. In the dark the press runs inverted — cream ink
+ * on a near-black sheet — and the roles swap while the utilities do not, which
+ * is why not one component below carries a `dark:` variant.
+ */
+
 @theme {
   --font-mono:
     'JetBrains Mono', 'SFMono-Regular', ui-monospace, 'Menlo', 'Consolas', monospace;
+
+  /*
+   * Nothing but the brand. Dropping the stock palette means an unconverted
+   * `text-stone-400` compiles to no utility at all — a colour that is plainly
+   * missing, rather than one that nearly fits and quietly stays wrong.
+   */
+  --color-*: initial;
+  --color-transparent: transparent;
+
+  /* The sheet. `cream-100` is the logo's own background. */
+  --color-cream-50: #fdf9f0;
+  --color-cream-100: #f6eddb;
+  --color-cream-200: #efe6d2;
+  --color-cream-300: #e0d3b6;
+  --color-cream-400: #c3b18e;
+
+  /* The ink. `navy-950` is the solid block at the centre of the mark. */
+  --color-navy-500: #616978;
+  --color-navy-600: #4e5666;
+  --color-navy-700: #33415a;
+  --color-navy-800: #1f2a3a;
+  --color-navy-900: #121a29;
+  --color-navy-950: #0b1220;
+  --color-navy-990: #070c16;
+}
+
+/*
+ * The roles, as utilities. `inline` is what makes them follow the scheme: it
+ * compiles `bg-paper` to the indirection itself rather than freezing whatever
+ * the light value happened to be at build time.
+ */
+@theme inline {
+  --color-paper: var(--paper);
+  --color-panel: var(--panel);
+  --color-well: var(--well);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+
+  --color-brand: var(--brand);
+  --color-on-brand: var(--on-brand);
+
+  --color-good: var(--good);
+  --color-good-soft: var(--good-soft);
+  --color-bad: var(--bad);
+  --color-bad-soft: var(--bad-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-flag-soft: var(--flag-soft);
+
+  /* JSON leaves: a string and a number, told apart without a third hue. */
+  --color-string: var(--string);
+  --color-number: var(--number);
+}
+
+:root {
+  --paper: var(--color-cream-100);
+  --panel: var(--color-cream-50);
+  --well: var(--color-cream-200);
+  --line: var(--color-cream-300);
+  --line-strong: var(--color-cream-400);
+
+  --ink: var(--color-navy-950);
+  --muted: var(--color-navy-600);
+  --faint: var(--color-navy-500);
+
+  --brand: var(--color-navy-950);
+  --on-brand: var(--color-cream-100);
+
+  /* Verdicts, mixed towards the sheet so they read as tinted paper. */
+  --good: #1f5c3d;
+  --good-soft: #dfebda;
+  --bad: #8c2b22;
+  --bad-soft: #f3ded6;
+  --warn: #7a5210;
+  --warn-soft: #f1e3be;
+  --flag-soft: #e9ddc2;
+
+  --string: #1f5c3d;
+  --number: #2c5578;
+
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: var(--color-navy-950);
+    --panel: var(--color-navy-900);
+    --well: var(--color-navy-990);
+    --line: var(--color-navy-800);
+    --line-strong: var(--color-navy-700);
+
+    --ink: #f2e9d7;
+    --muted: #a49e90;
+    --faint: #7e8798;
+
+    --brand: #f2e9d7;
+    --on-brand: var(--color-navy-950);
+
+    --good: #8fcba5;
+    --good-soft: #10241a;
+    --bad: #f0a091;
+    --bad-soft: #2a1310;
+    --warn: #e0bc75;
+    --warn-soft: #271c09;
+    --flag-soft: #1b2434;
+
+    --string: #8fcba5;
+    --number: #8fb6de;
+  }
+}
+
+@layer base {
+  /*
+   * One focus ring for the whole app, in the brand colour. The stock outline is
+   * a blue nobody chose and the only colour on the page from outside the mark.
+   */
+  :focus-visible {
+    outline: 2px solid var(--brand);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: var(--brand);
+    color: var(--on-brand);
+  }
+
+  /* Checkboxes, radios and the number spinners, tinted rather than left blue. */
+  input,
+  select,
+  textarea {
+    accent-color: var(--brand);
+  }
 }

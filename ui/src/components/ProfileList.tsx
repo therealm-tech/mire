@@ -21,10 +21,10 @@ export function ProfileList({
               type="button"
               aria-current={profile.name === selected ? 'true' : undefined}
               onClick={() => onSelect(profile.name)}
-              className={`w-full rounded border px-2 py-1.5 text-left ${
+              className={`w-full rounded border px-2 py-1.5 text-left transition-colors ${
                 profile.name === selected
-                  ? 'border-stone-400 bg-stone-100 dark:border-stone-600 dark:bg-stone-800'
-                  : 'border-transparent hover:bg-stone-100 dark:hover:bg-stone-800'
+                  ? 'border-line-strong bg-well'
+                  : 'border-transparent hover:bg-well'
               }`}
             >
               <span className="flex items-center gap-2">
@@ -34,7 +34,7 @@ export function ProfileList({
                 </Badge>
                 {profile.hasDecode ? null : <Badge tone="warn">no decode</Badge>}
               </span>
-              <span className="mt-0.5 block truncate font-mono text-[11px] text-stone-500 dark:text-stone-400">
+              <span className="mt-0.5 block truncate font-mono text-[11px] text-faint">
                 {profile.url}
               </span>
             </button>
@@ -43,7 +43,7 @@ export function ProfileList({
       </ul>
 
       {profiles.length === 0 ? (
-        <p className="text-stone-500 text-xs dark:text-stone-400">
+        <p className="text-muted text-xs">
           No profile loaded. Drop a YAML file in the profiles directory — it is picked up without a
           restart.
         </p>
@@ -51,16 +51,14 @@ export function ProfileList({
 
       {issues.length > 0 ? (
         <div className="space-y-1">
-          <h3 className="font-semibold text-stone-600 text-xs dark:text-stone-400">
-            Files that did not load
-          </h3>
+          <h3 className="font-semibold text-muted text-xs">Files that did not load</h3>
           {issues.map((issue) => (
             <p key={`${issue.file}:${issue.message}`} className="text-xs">
-              <span className="break-all font-mono text-rose-700 dark:text-rose-300">
+              <span className="break-all font-mono text-bad">
                 {issue.file}
                 {issue.line === null ? '' : `:${issue.line}:${issue.column ?? 0}`}
               </span>
-              <span className="block text-stone-600 dark:text-stone-400">{issue.message}</span>
+              <span className="block text-muted">{issue.message}</span>
             </p>
           ))}
         </div>

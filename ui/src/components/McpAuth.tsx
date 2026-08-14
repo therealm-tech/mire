@@ -1,5 +1,5 @@
 import type { AuthDescriptor, McpDescriptor } from '../api'
-import { Badge } from './primitives'
+import { Badge, Button } from './primitives'
 
 /**
  * Which providers a server authenticates with, `auth:` first.
@@ -57,7 +57,7 @@ export function McpAuth({
           return (
             <li key={name} className="text-xs">
               <Badge tone="bad">{name}</Badge>{' '}
-              <span className="text-stone-600 dark:text-stone-400">
+              <span className="text-muted">
                 named by this profile, declared in no <span className="font-mono">mcp.yaml</span>{' '}
                 entry
               </span>
@@ -76,11 +76,7 @@ export function McpAuth({
         const awaited = human.filter((entry) => !entry.session)
 
         return (
-          <li
-            key={name}
-            className="rounded border border-stone-200 p-2 dark:border-stone-800"
-            data-testid={`mcp-${name}`}
-          >
+          <li key={name} className="rounded border border-line p-2" data-testid={`mcp-${name}`}>
             <div
               className="flex flex-wrap items-center gap-1.5"
               data-testid={`mcp-${name}-identities`}
@@ -93,9 +89,7 @@ export function McpAuth({
                   <span key={provider} className="inline-flex items-center gap-1">
                     <Badge tone="neutral">{provider}</Badge>
                     {templated ? (
-                      <span className="text-[11px] text-stone-500 dark:text-stone-400">
-                        in a header template
-                      </span>
+                      <span className="text-[11px] text-faint">in a header template</span>
                     ) : null}
                   </span>
                 ))
@@ -103,7 +97,7 @@ export function McpAuth({
               {awaited.length > 0 ? <Badge tone="warn">not signed in</Badge> : null}
             </div>
 
-            <span className="mt-0.5 block truncate font-mono text-[11px] text-stone-500 dark:text-stone-400">
+            <span className="mt-0.5 block truncate font-mono text-[11px] text-faint">
               {server.url}
             </span>
 
@@ -118,42 +112,37 @@ export function McpAuth({
                   <div key={entry.name} className="mt-1 flex flex-wrap items-center gap-2">
                     <Badge tone="good">signed in</Badge>
                     <span className="text-xs">{entry.session.subject ?? 'unknown user'}</span>
-                    <button
-                      type="button"
-                      onClick={() => onLogout(entry.name)}
-                      className="ml-auto rounded border border-stone-300 px-2 py-1 text-xs dark:border-stone-700"
-                    >
+                    <Button className="ml-auto" onClick={() => onLogout(entry.name)}>
                       Sign out of {entry.name}
-                    </button>
+                    </Button>
                   </div>
                 )
               }
 
               return (
                 <div key={entry.name} className="mt-1 space-y-1">
-                  <p className="text-stone-500 text-xs dark:text-stone-400">
+                  <p className="text-muted text-xs">
                     A tool call answers <span className="font-mono">409 not_signed_in</span> and
                     sends nothing until somebody signs in to{' '}
                     <span className="font-medium">{entry.name}</span>.
                   </p>
                   <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
+                    <Button
+                      variant="primary"
                       disabled={signingIn !== null}
                       onClick={() => onLogin(entry.name)}
-                      className="rounded bg-stone-900 px-2.5 py-1 font-medium text-stone-50 text-xs disabled:opacity-50 dark:bg-stone-100 dark:text-stone-900"
                     >
                       {signingIn === entry.name
                         ? 'Waiting for the browser…'
                         : failure
                           ? `Try ${entry.name} again`
                           : `Sign in to ${entry.name}`}
-                    </button>
+                    </Button>
                   </div>
                   {failure ? (
                     <p className="text-xs">
                       <Badge tone="bad">sign-in failed</Badge>{' '}
-                      <span className="text-stone-600 dark:text-stone-400">{failure}</span>
+                      <span className="text-muted">{failure}</span>
                     </p>
                   ) : null}
                 </div>

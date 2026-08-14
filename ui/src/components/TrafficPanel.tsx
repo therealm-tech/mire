@@ -8,7 +8,7 @@ import {
   type ToolExchange,
 } from '../conversation'
 import { JsonTree } from './JsonTree'
-import { Badge, Code, CopyButton, Panel } from './primitives'
+import { Badge, Button, Code, CopyButton, Panel } from './primitives'
 
 /**
  * Everything that left this process, in the order it left.
@@ -49,34 +49,26 @@ export function TrafficPanel({
       title="Traffic"
       actions={
         <div className="flex items-center gap-2">
-          <span className="text-stone-500 text-xs dark:text-stone-400">
+          <span className="text-faint text-xs">
             {exchanges.length} {exchanges.length === 1 ? 'exchange' : 'exchanges'}
           </span>
           {exchanges.length === 0 ? null : (
             <>
-              <button
-                type="button"
+              <Button
                 onClick={() =>
                   setClosed(allClosed ? new Set() : new Set(exchanges.map((one) => one.id)))
                 }
-                className="rounded border border-stone-300 px-2 py-1 text-xs hover:bg-stone-100 dark:border-stone-700 dark:hover:bg-stone-800"
               >
                 {allClosed ? 'Expand all' : 'Collapse all'}
-              </button>
-              <button
-                type="button"
-                onClick={onClear}
-                className="rounded border border-stone-300 px-2 py-1 text-xs hover:bg-stone-100 dark:border-stone-700 dark:hover:bg-stone-800"
-              >
-                Clear
-              </button>
+              </Button>
+              <Button onClick={onClear}>Clear</Button>
             </>
           )}
         </div>
       }
     >
       {exchanges.length === 0 ? (
-        <p className="text-stone-500 text-sm dark:text-stone-400">
+        <p className="text-muted text-sm">
           Nothing on the wire yet. Every model call and every tool invocation lands here, with the
           request that went out, what the decoder made of the answer, and the answer itself.
         </p>
@@ -130,18 +122,18 @@ function Card({
   children: ReactNode
 }) {
   return (
-    <li className="rounded border border-stone-200 dark:border-stone-800">
+    <li className="rounded border border-line">
       <button
         type="button"
         onClick={onToggle}
         aria-expanded={open}
-        className="flex w-full flex-wrap items-baseline gap-2 px-2 py-1.5 text-left"
+        className="flex w-full flex-wrap items-baseline gap-2 rounded px-2 py-1.5 text-left transition-colors hover:bg-well"
       >
         <span className="font-medium text-sm">
           {open ? '▾' : '▸'} {label}
         </span>
         {badges}
-        <span className="min-w-0 flex-1 truncate text-right font-mono text-[11px] text-stone-500 dark:text-stone-400">
+        <span className="min-w-0 flex-1 truncate text-right font-mono text-[11px] text-faint">
           {summary}
         </span>
       </button>
@@ -153,9 +145,7 @@ function Card({
         // block that is actually too wide. `overflow-x-auto` alone cannot fix
         // that — it only works once the box is allowed to be narrower than what
         // it contains.
-        <div className="min-w-0 space-y-3 border-stone-200 border-t p-2 dark:border-stone-800">
-          {children}
-        </div>
+        <div className="min-w-0 space-y-3 border-line border-t p-2">{children}</div>
       ) : null}
     </li>
   )
@@ -164,9 +154,7 @@ function Card({
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="min-w-0 space-y-1">
-      <h3 className="font-semibold text-stone-500 text-xs uppercase tracking-wide dark:text-stone-400">
-        {title}
-      </h3>
+      <h3 className="font-semibold text-faint text-xs uppercase tracking-wide">{title}</h3>
       {children}
     </section>
   )
@@ -247,7 +235,7 @@ function ModelCard({
       badges={
         <>
           <Badge tone={tone}>{http.status}</Badge>
-          <span className="text-stone-500 text-xs dark:text-stone-400">{http.latencyMs} ms</span>
+          <span className="text-faint text-xs">{http.latencyMs} ms</span>
           {http.ttftMs === undefined ? null : (
             <Badge tone="neutral">first token {http.ttftMs} ms</Badge>
           )}
@@ -264,7 +252,7 @@ function ModelCard({
           </p>
           <CopyButton text={outcome.curl} label="Copy as curl" />
         </div>
-        <ul className="space-y-0.5 break-all font-mono text-[11px] text-stone-600 dark:text-stone-400">
+        <ul className="space-y-0.5 break-all font-mono text-[11px] text-muted">
           {Object.entries(outcome.request.headers).map(([name, value]) => (
             <li key={name}>
               {name}: {value}
@@ -280,7 +268,7 @@ function ModelCard({
 
       <Section title="Response">
         {protectedAsExpected ? (
-          <p className="text-emerald-700 text-sm dark:text-emerald-300">
+          <p className="text-good text-sm">
             The route is protected — that is a pass, not a failure.
           </p>
         ) : null}
@@ -288,7 +276,7 @@ function ModelCard({
         {decoded?.kind === 'completion' ? (
           <div className="space-y-2">
             {decoded.content === null ? (
-              <p className="text-stone-500 text-sm dark:text-stone-400">
+              <p className="text-muted text-sm">
                 No configured path resolved the content. The raw response is below, and the decode
                 trace says what was tried.
               </p>
@@ -323,9 +311,7 @@ function ModelCard({
         {outcome.response.jsonError ? (
           <div className="space-y-1">
             <Badge tone="warn">not JSON</Badge>
-            <p className="text-stone-500 text-xs dark:text-stone-400">
-              {outcome.response.jsonError}
-            </p>
+            <p className="text-muted text-xs">{outcome.response.jsonError}</p>
           </div>
         ) : null}
 
@@ -338,7 +324,7 @@ function ModelCard({
           reading the same JSON twice under two headings.
         */}
         <details open={http.status >= 400}>
-          <summary className="cursor-pointer text-stone-500 text-xs dark:text-stone-400">
+          <summary className="cursor-pointer text-faint text-xs hover:text-ink">
             Body received
             {outcome.response.elided ? ' (vectors elided)' : ''}
           </summary>
@@ -392,7 +378,7 @@ function ProtocolCard({
           ) : (
             <Badge tone={tone}>{mcp.status}</Badge>
           )}
-          <span className="text-stone-500 text-xs dark:text-stone-400">{mcp.latencyMs} ms</span>
+          <span className="text-faint text-xs">{mcp.latencyMs} ms</span>
           <Badge tone="neutral">{mcp.revision}</Badge>
           {mcp.notification ? <Badge tone="neutral">notification</Badge> : null}
         </>
@@ -402,7 +388,7 @@ function ProtocolCard({
         <p className="break-all font-mono text-xs">
           <span className="font-semibold">POST</span> {mcp.url}
         </p>
-        <ul className="space-y-0.5 break-all font-mono text-[11px] text-stone-600 dark:text-stone-400">
+        <ul className="space-y-0.5 break-all font-mono text-[11px] text-muted">
           {Object.entries(mcp.headers).map(([name, value]) => (
             <li key={name}>
               {name}: {value}
@@ -416,18 +402,18 @@ function ProtocolCard({
         {mcp.error ? (
           <p className="flex flex-wrap items-baseline gap-2 text-xs">
             <Badge tone="bad">no answer</Badge>
-            <span className="text-stone-600 dark:text-stone-400">{mcp.error}</span>
+            <span className="text-muted">{mcp.error}</span>
           </p>
         ) : null}
 
         {mcp.streaming ? (
-          <p className="text-stone-500 text-xs dark:text-stone-400">
+          <p className="text-muted text-xs">
             Answered as an event stream; the last event carries the response.
           </p>
         ) : null}
 
         {mcp.notification && mcp.response.length === 0 ? (
-          <p className="text-stone-500 text-sm dark:text-stone-400">
+          <p className="text-muted text-sm">
             Nothing, which is what a notification is entitled to answer.
           </p>
         ) : null}
@@ -472,7 +458,7 @@ function ToolCard({
             <Badge tone="neutral">simulated, nothing executed</Badge>
           )}
           {tool.latencyMs === undefined ? null : (
-            <span className="text-stone-500 text-xs dark:text-stone-400">{tool.latencyMs} ms</span>
+            <span className="text-faint text-xs">{tool.latencyMs} ms</span>
           )}
           {tool.error ? <Badge tone="bad">tool failed</Badge> : null}
         </>
@@ -481,9 +467,7 @@ function ToolCard({
       <Section title="Request">
         <p className="font-mono text-xs">
           {tool.call.name}
-          {tool.call.id ? (
-            <span className="text-stone-500 dark:text-stone-400"> · id {tool.call.id}</span>
-          ) : null}
+          {tool.call.id ? <span className="text-faint"> · id {tool.call.id}</span> : null}
         </p>
         <Tree value={tool.call.arguments} />
       </Section>
@@ -494,7 +478,7 @@ function ToolCard({
             {tool.schemaErrors.map((error) => (
               <li key={error} className="flex flex-wrap items-baseline gap-2 text-xs">
                 <Badge tone="warn">schema</Badge>
-                <span className="text-stone-600 dark:text-stone-400">{error}</span>
+                <span className="text-muted">{error}</span>
               </li>
             ))}
           </ul>
@@ -509,16 +493,14 @@ function ToolCard({
         {tool.error ? (
           <p className="flex flex-wrap items-baseline gap-2 text-xs">
             <Badge tone="bad">tool failed</Badge>
-            <span className="text-stone-600 dark:text-stone-400">{tool.error}</span>
+            <span className="text-muted">{tool.error}</span>
           </p>
         ) : null}
 
         {tool.reportedError ? (
           <p className="flex flex-wrap items-baseline gap-2 text-xs">
             <Badge tone="warn">the tool reported a problem</Badge>
-            <span className="text-stone-600 dark:text-stone-400">
-              which the model is meant to react to
-            </span>
+            <span className="text-muted">which the model is meant to react to</span>
           </p>
         ) : null}
 
@@ -555,7 +537,7 @@ function StreamStats({ stream }: { stream: StreamView }) {
         {stream.unparsable > 0 ? <Badge tone="bad">{stream.unparsable} unreadable</Badge> : null}
       </div>
       {stream.terminated ? null : (
-        <p className="text-stone-500 text-xs dark:text-stone-400">
+        <p className="text-muted text-xs">
           No end sentinel and no stop reason: the connection went quiet rather than finishing.
           Whatever arrived is above.
         </p>
@@ -571,7 +553,7 @@ function DecodeTraceView({ trace }: { trace: DecodeTrace }) {
 
   if (matched.length === 0 && missed.length === 0 && trace.issues.length === 0) {
     return (
-      <p className="text-stone-500 text-xs dark:text-stone-400">
+      <p className="text-muted text-xs">
         Nothing was decoded — the profile declares no <span className="font-mono">decode:</span>{' '}
         block, or the call never got far enough to try.
       </p>
@@ -585,29 +567,27 @@ function DecodeTraceView({ trace }: { trace: DecodeTrace }) {
           <li key={field} className="flex flex-wrap items-baseline gap-2">
             <Badge tone="good">matched</Badge>
             <span className="font-medium">{field}</span>
-            <span className="font-mono text-stone-600 dark:text-stone-400">{path}</span>
+            <span className="font-mono text-muted">{path}</span>
           </li>
         ))}
         {missed.map(([field, paths]) => (
           <li key={field} className="flex flex-wrap items-baseline gap-2">
             <Badge tone="warn">missed</Badge>
             <span className="font-medium">{field}</span>
-            <span className="font-mono text-stone-600 dark:text-stone-400">
-              {paths.join('  ·  ')}
-            </span>
+            <span className="font-mono text-muted">{paths.join('  ·  ')}</span>
           </li>
         ))}
         {trace.issues.map((issue) => (
           <li key={`${issue.field}${issue.path}`} className="flex flex-wrap items-baseline gap-2">
             <Badge tone="bad">wrong shape</Badge>
             <span className="font-medium">{issue.field}</span>
-            <span className="font-mono text-stone-600 dark:text-stone-400">{issue.path}</span>
-            <span className="text-stone-500 dark:text-stone-400">{issue.message}</span>
+            <span className="font-mono text-muted">{issue.path}</span>
+            <span className="text-muted">{issue.message}</span>
           </li>
         ))}
       </ul>
       {missed.length > 0 ? (
-        <p className="text-stone-500 text-xs dark:text-stone-400">
+        <p className="text-muted text-xs">
           Pick the right path in the raw response, then add it to the profile's{' '}
           <span className="font-mono">decode:</span> block — it reloads without a restart.
         </p>

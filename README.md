@@ -1,3 +1,5 @@
+<img src="mire.png" alt="" width="120" align="right">
+
 # mire
 
 A test pattern for model endpoints. You put a known signal in, and you look at
@@ -1079,6 +1081,17 @@ For UI work, `npm --prefix ui run dev` serves the front end with hot reload and
 proxies `/api` to a `mire` already running on its default port. In a debug build
 the assets are read from `ui/dist` at runtime, so `npm run build` alone is enough
 to see a change in the real binary.
+
+The palette is the logo and nothing else: near-black ink on a cream sheet,
+inverted in the dark. `ui/src/index.css` holds the whole of it — a brand scale
+sampled from the mark, and above it the roles a component actually names
+(`paper`, `panel`, `line`, `ink`, `muted`, `brand`, and the three verdict tones).
+The stock Tailwind palette is switched off there, so a stray `text-stone-400`
+compiles to no utility at all rather than to a colour that nearly fits. The roles
+follow `prefers-color-scheme` on their own, which is why no component carries a
+`dark:` variant. The mark itself is drawn in `ui/src/components/Mark.tsx` rather
+than shipped as an image: it inherits `currentColor`, so one tag serves both
+schemes.
 
 Outbound HTTP is covered by `wiremock` on every failure path that matters: an
 expected `401`, a timeout, a malformed body, an empty body, a decode path that

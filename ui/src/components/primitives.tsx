@@ -3,10 +3,10 @@ import { type ReactNode, useState } from 'react'
 export type Tone = 'good' | 'bad' | 'warn' | 'neutral'
 
 const TONE_CLASSES: Record<Tone, string> = {
-  good: 'bg-emerald-100 text-emerald-900 dark:bg-emerald-950 dark:text-emerald-200',
-  bad: 'bg-rose-100 text-rose-900 dark:bg-rose-950 dark:text-rose-200',
-  warn: 'bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-200',
-  neutral: 'bg-stone-200 text-stone-700 dark:bg-stone-800 dark:text-stone-300',
+  good: 'bg-good-soft text-good',
+  bad: 'bg-bad-soft text-bad',
+  warn: 'bg-warn-soft text-warn',
+  neutral: 'bg-flag-soft text-muted',
 }
 
 export function Badge({ tone = 'neutral', children }: { tone?: Tone; children: ReactNode }) {
@@ -16,6 +16,37 @@ export function Badge({ tone = 'neutral', children }: { tone?: Tone; children: R
     >
       {children}
     </span>
+  )
+}
+
+/**
+ * The one button shape, in the two weights the app actually uses.
+ *
+ * `primary` is the mark's centre block: solid ink on the sheet, inverted in the
+ * dark. Everything else is an outline, so that a panel never has two things
+ * competing to be the thing you press.
+ */
+export function Button({
+  variant = 'ghost',
+  size = 'sm',
+  className = '',
+  ...rest
+}: {
+  variant?: 'primary' | 'ghost'
+  size?: 'sm' | 'md'
+} & React.ButtonHTMLAttributes<HTMLButtonElement>) {
+  const shape = size === 'md' ? 'rounded-lg px-4 py-1.5 text-sm' : 'rounded px-2 py-1 text-xs'
+  const weight =
+    variant === 'primary'
+      ? 'bg-brand font-medium text-on-brand enabled:hover:opacity-90'
+      : 'border border-line-strong enabled:hover:bg-well'
+
+  return (
+    <button
+      type="button"
+      className={`${shape} ${weight} transition-colors disabled:opacity-50 ${className}`}
+      {...rest}
+    />
   )
 }
 
@@ -29,8 +60,8 @@ export function Panel({
   children: ReactNode
 }) {
   return (
-    <section className="rounded-lg border border-stone-200 bg-white dark:border-stone-800 dark:bg-stone-900">
-      <header className="flex items-center justify-between gap-2 border-stone-200 border-b px-3 py-2 dark:border-stone-800">
+    <section className="rounded-lg border border-line bg-panel">
+      <header className="flex items-center justify-between gap-2 border-line border-b px-3 py-2">
         <h2 className="font-semibold text-sm">{title}</h2>
         {actions}
       </header>
@@ -41,7 +72,7 @@ export function Panel({
 
 export function Code({ children }: { children: string }) {
   return (
-    <pre className="overflow-x-auto rounded bg-stone-100 p-2 font-mono text-xs leading-relaxed dark:bg-stone-950">
+    <pre className="overflow-x-auto rounded bg-well p-2 font-mono text-xs leading-relaxed">
       {children}
     </pre>
   )
@@ -51,9 +82,7 @@ export function CopyButton({ text, label = 'Copy' }: { text: string; label?: str
   const [copied, setCopied] = useState(false)
 
   return (
-    <button
-      type="button"
-      className="rounded border border-stone-300 px-2 py-1 text-xs hover:bg-stone-100 dark:border-stone-700 dark:hover:bg-stone-800"
+    <Button
       onClick={() => {
         void navigator.clipboard.writeText(text).then(() => {
           setCopied(true)
@@ -62,7 +91,7 @@ export function CopyButton({ text, label = 'Copy' }: { text: string; label?: str
       }}
     >
       {copied ? 'Copied' : label}
-    </button>
+    </Button>
   )
 }
 
@@ -71,15 +100,25 @@ export function Field({ label, children }: { label: string; children: ReactNode 
   return (
     // biome-ignore lint/a11y/noLabelWithoutControl: the control is the `children` prop, so the association is implicit and correct.
     <label className="block space-y-1">
-      <span className="font-medium text-stone-600 text-xs dark:text-stone-400">{label}</span>
+      <span className="font-medium text-muted text-xs">{label}</span>
       {children}
     </label>
   )
 }
 
+/**
+ * The one input shape: a sheet you write on, ruled rather than boxed.
+ *
+ * Appearance only, with no width in it — a caller adding `w-16` to a `w-full`
+ * would be two utilities in the same class list, and which of the two wins is a
+ * question about stylesheet order rather than about the box.
+ */
+export const INPUT_CLASSES =
+  'rounded border border-line-strong bg-panel px-2 py-1 text-ink text-sm placeholder:text-faint'
+
 export function Spinner({ label }: { label: string }) {
   return (
-    <span className="text-stone-500 text-xs dark:text-stone-400" role="status">
+    <span className="text-faint text-xs" role="status">
       {label}
     </span>
   )
