@@ -44,8 +44,33 @@ request:
       {% if tools %}"tools": {{ tools | tojson }},{% endif %}
       "stream": {{ stream | tojson }},
       "reasoning_effort": "none",
-      "max_tokens": {{ params.max_tokens | default(256) }}
+      "max_tokens": {{ params.max_tokens | default(256) }},
+      "messages": [
+        {% for file in uploads %}{% if file.text %}
+        {"role": "user", "content": {{ ("Contents of " ~ file.name ~ ":\n" ~ file.text) | tojson }}},
+        {% endif %}{% endfor %}
+        {% for message in messages %}{{ message | tojson }}{% if not loop.last %},{% endif %}{% endfor %}
+      ]
     }
+
+# Attachments are an ingredient, and this is the recipe — nothing arrives on the
+# wire because a file was attached, only because a template said so. `uploads`
+# holds what the call named, each entry carrying the file whole: `text` when it
+# decodes as UTF-8, `base64` and `dataUrl` always.
+#
+# Inlining a log or a CSV into the question works against this stack, since
+# qwen3:0.6b reads text. Replace `messages` above with:
+#
+#     "messages": [
+#       {% for file in uploads %}{% if file.text %}
+#       {"role": "user", "content": {{ ("Contents of " ~ file.name ~ ":\n" ~ file.text) | tojson }}},
+#       {% endif %}{% endfor %}
+#       {% for message in messages %}{{ message | tojson }}{% if not loop.last %},{% endif %}{% endfor %}
+#     ],
+#
+# Showing one a *picture* needs a model that can see, which this one cannot —
+# point `url:` at a vision endpoint and the shape is `file.dataUrl` in an
+# `image_url` content part. The README has that one in full.
 
 # Every field is a cascade, and the second path in each is where Ollama's *own*
 # API puts the same thing: content at `$.message.content`, the stop reason called

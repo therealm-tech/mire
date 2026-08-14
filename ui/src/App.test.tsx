@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from './App'
@@ -263,7 +263,9 @@ function panel(title: string): HTMLElement {
  * is served as an event stream, which is what the two streaming routes return.
  */
 function mockApi(routes: Record<string, unknown>) {
-  return vi.fn((input: RequestInfo | URL) => {
+  // `_init` is never read here, and is in the signature so that a test can look
+  // at what a route was actually sent — a `FormData` body has no other witness.
+  return vi.fn((input: RequestInfo | URL, _init?: RequestInit) => {
     const url = String(input)
     const match = Object.entries(routes).find(([suffix]) => url.endsWith(suffix))
     if (!match) {
@@ -1998,6 +2000,275 @@ describe('taking the run away with you', () => {
     expect(payload.messages[0]).toEqual({ role: 'user', content: 'ping' })
 
     clicked.mockRestore()
+  })
+})
+
+/**
+ * What `POST /api/uploads` answers: a display name and a stored name that are
+ * not the same string, which is the part the UI has to get right.
+ */
+const UPLOADED = {
+  id: 'aB3dE5gH7jK9',
+  name: 'report.pdf',
+  storedAs: 'aB3dE5gH7jK9-report.pdf',
+  path: '/home/gleroy/uploads/aB3dE5gH7jK9-report.pdf',
+  size: 14336,
+  contentType: 'application/pdf',
+}
+
+/**
+ * The file input **Attach** clicks.
+ *
+ * Found in the DOM rather than by role: it is hidden and `aria-hidden`, because
+ * assistive technology should be offered the button and not two controls doing
+ * the same thing. There is no picker in jsdom either way, so a test changes the
+ * input the way the browser would once the dialog closed.
+ */
+function picker(): HTMLInputElement {
+  const input = document.querySelector<HTMLInputElement>('input[type="file"]')
+  if (!input) {
+    throw new Error('no file input')
+  }
+  return input
+}
+
+function pick(files: File[]): void {
+  fireEvent.change(picker(), { target: { files } })
+}
+
+/**
+ * The JSON body a route was sent, parsed.
+ *
+ * Throws rather than optional-chaining its way to `undefined`: inside a
+ * `waitFor` a throw is what "not yet" looks like, and a silent `undefined` would
+ * be an assertion that passed against nothing.
+ */
+function bodySentTo(
+  fetchMock: ReturnType<typeof mockApi>,
+  suffix: string,
+): Record<string, unknown> {
+  const sent = fetchMock.mock.calls.find(([url]) => String(url).endsWith(suffix))
+  if (!sent) {
+    throw new Error(`nothing was sent to ${suffix}`)
+  }
+  return JSON.parse(String((sent[1] as RequestInit).body)) as Record<string, unknown>
+}
+
+describe('attaching a file', () => {
+  it('sends it as multipart and shows what the server stored', async () => {
+    const fetchMock = mockApi({
+      'api/profiles': PROFILES,
+      'api/auth': AUTH,
+      'api/mcp': MCP,
+      'api/uploads': UPLOADED,
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await screen.findByRole('button', { name: /^chat/ })
+
+    pick([new File(['a known signal'], 'report.pdf', { type: 'application/pdf' })])
+
+    // The name you recognise, not the prefixed one it is called on disk.
+    expect(await screen.findByText('report.pdf')).toBeInTheDocument()
+    expect(screen.getByText('14 kB')).toBeInTheDocument()
+
+    const upload = fetchMock.mock.calls.find(([url]) => String(url).endsWith('api/uploads'))
+    expect(upload).toBeDefined()
+    const init = upload?.[1] as RequestInit
+    expect(init.method).toBe('POST')
+    // `FormData` sets its own content type, boundary included. A hand-written
+    // one would be a boundary the server cannot find.
+    expect(init.headers).toBeUndefined()
+    const body = init.body as FormData
+    expect((body.get('file') as File).name).toBe('report.pdf')
+  })
+
+  /**
+   * The claim has to stop where the truth does: the file goes to the template,
+   * and what the template does with it is the profile's business.
+   */
+  it('says the file goes to the template rather than to the endpoint', async () => {
+    vi.stubGlobal(
+      'fetch',
+      mockApi({
+        'api/profiles': PROFILES,
+        'api/auth': AUTH,
+        'api/mcp': MCP,
+        'api/uploads': UPLOADED,
+      }),
+    )
+    render(<App />)
+    await screen.findByRole('button', { name: /^chat/ })
+
+    pick([new File(['a known signal'], 'report.pdf', { type: 'application/pdf' })])
+
+    await screen.findByText('report.pdf')
+    expect(panel('Conversation')).toHaveTextContent(/handed to this profile's template as uploads/)
+    expect(panel('Conversation')).toHaveTextContent(/sends what it always sent/)
+  })
+
+  /**
+   * The ids, and only the ids. The bytes are already on the server; sending them
+   * again in the call body would be uploading the file twice.
+   */
+  it('names the attached files in the next call', async () => {
+    const user = userEvent.setup()
+    const fetchMock = mockApi({
+      'api/profiles': PROFILES,
+      'api/auth': AUTH,
+      'api/mcp': MCP,
+      'api/uploads': UPLOADED,
+      'api/agent': agentStream([answerTurn(200, 'pong')]),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await loopMode(user)
+    await screen.findByRole('button', { name: 'Send' })
+
+    pick([new File(['a known signal'], 'report.pdf', { type: 'application/pdf' })])
+    await screen.findByText('report.pdf')
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+
+    await waitFor(() => {
+      const sent = bodySentTo(fetchMock, 'api/agent')
+      expect(sent.uploads).toEqual([UPLOADED.id])
+    })
+  })
+
+  /** Nothing attached is no field at all, not an empty list. */
+  it('leaves the field out entirely when nothing is attached', async () => {
+    const user = userEvent.setup()
+    const fetchMock = mockApi({
+      'api/profiles': PROFILES,
+      'api/auth': AUTH,
+      'api/mcp': MCP,
+      'api/agent': agentStream([answerTurn(200, 'pong')]),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await loopMode(user)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    await waitFor(() => {
+      expect(bodySentTo(fetchMock, 'api/agent')).not.toHaveProperty('uploads')
+    })
+  })
+
+  it('sends one request per file', async () => {
+    const fetchMock = mockApi({
+      'api/profiles': PROFILES,
+      'api/auth': AUTH,
+      'api/mcp': MCP,
+      'api/uploads': UPLOADED,
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await screen.findByRole('button', { name: /^chat/ })
+
+    pick([
+      new File(['one'], 'a.txt', { type: 'text/plain' }),
+      new File(['two'], 'b.txt', { type: 'text/plain' }),
+    ])
+
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(([url]) => String(url).endsWith('api/uploads')),
+      ).toHaveLength(2),
+    )
+  })
+
+  it('shows the reason a file was refused, and lists nothing', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input)
+        if (url.endsWith('api/profiles')) {
+          return Promise.resolve(Response.json(PROFILES))
+        }
+        if (url.endsWith('api/auth')) {
+          return Promise.resolve(Response.json(AUTH))
+        }
+        if (url.endsWith('api/mcp')) {
+          return Promise.resolve(Response.json(MCP))
+        }
+        return Promise.resolve(
+          Response.json(
+            {
+              code: 'upload_too_large',
+              message: 'the file is 26214401 bytes, the limit is 26214400',
+              detail: { limitBytes: 26214400 },
+            },
+            { status: 413 },
+          ),
+        )
+      }),
+    )
+    render(<App />)
+    await screen.findByRole('button', { name: /^chat/ })
+
+    pick([new File(['x'], 'big.bin', { type: 'application/octet-stream' })])
+
+    expect(await screen.findByText(/the limit is 26214400/)).toBeInTheDocument()
+    expect(screen.queryByText('big.bin')).not.toBeInTheDocument()
+  })
+
+  /**
+   * Forgetting is a list operation. `mire` does not delete files off somebody's
+   * disk because a browser tab said so, so nothing goes out on this click.
+   */
+  it('forgets a file without asking the server to delete it', async () => {
+    const user = userEvent.setup()
+    const fetchMock = mockApi({
+      'api/profiles': PROFILES,
+      'api/auth': AUTH,
+      'api/mcp': MCP,
+      'api/uploads': UPLOADED,
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await screen.findByRole('button', { name: /^chat/ })
+
+    pick([new File(['a known signal'], 'report.pdf', { type: 'application/pdf' })])
+    await screen.findByText('report.pdf')
+    const before = fetchMock.mock.calls.length
+
+    await user.click(screen.getByRole('button', { name: 'Forget report.pdf' }))
+
+    expect(screen.queryByText('report.pdf')).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls).toHaveLength(before)
+  })
+
+  /**
+   * A new conversation is a clean composer, list included. The turn first,
+   * because **New conversation** is inert until there is one to leave — the
+   * chips have their own way off, and a second control for an empty page would
+   * be a button that does nothing.
+   */
+  it('clears the list when the conversation is reset', async () => {
+    const user = userEvent.setup()
+    vi.stubGlobal(
+      'fetch',
+      mockApi({
+        'api/profiles': PROFILES,
+        'api/auth': AUTH,
+        'api/mcp': MCP,
+        'api/uploads': UPLOADED,
+        'api/agent': agentStream([answerTurn(200, 'pong')]),
+      }),
+    )
+    render(<App />)
+    await loopMode(user)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+    await waitFor(() =>
+      expect(within(panel('Traffic')).getByText('1 exchange')).toBeInTheDocument(),
+    )
+
+    pick([new File(['a known signal'], 'report.pdf', { type: 'application/pdf' })])
+    await screen.findByText('report.pdf')
+
+    await user.click(screen.getByRole('button', { name: 'New conversation' }))
+
+    expect(screen.queryByText('report.pdf')).not.toBeInTheDocument()
   })
 })
 

@@ -13,6 +13,14 @@ pub struct Cli {
     #[arg(long, env = "PROFILES_DIR", default_value = "./profiles")]
     pub profiles: PathBuf,
 
+    /// Directory attached files are written to.
+    ///
+    /// Created on the first upload, not at startup: `mire` otherwise writes
+    /// nothing at all, and a read-only filesystem should only be a problem for
+    /// somebody who actually attaches something.
+    #[arg(long, env = "UPLOADS_DIR", default_value = "./uploads")]
+    pub uploads: PathBuf,
+
     /// Address to listen on. Localhost by default; widening it is a deliberate act.
     #[arg(long, env = "HOST", default_value_t = IpAddr::V4(Ipv4Addr::LOCALHOST))]
     pub host: IpAddr,

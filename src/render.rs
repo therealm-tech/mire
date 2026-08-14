@@ -1,8 +1,8 @@
 //! Turning a profile plus some input into an actual HTTP request.
 //!
 //! The body comes from a `MiniJinja` template, which is the declarative level: you
-//! get `messages`, `input`, `tools`, `model` and `params`, and you emit whatever
-//! JSON your endpoint wants.
+//! get `messages`, `input`, `tools`, `model`, `params` and `uploads`, and you emit
+//! whatever JSON your endpoint wants.
 //!
 //! Rendering validates that the result is JSON. A template with a stray comma —
 //! the classic `{% if tools %}"tools": …,{% endif %}` — fails here with the
@@ -24,6 +24,7 @@ use crate::message::Message;
 use crate::profile::{HttpMethod, Profile, RequestSource, ToolSpec};
 use crate::redact::Redactor;
 use crate::script::{ScriptError, ScriptSource};
+use crate::uploads::UploadRef;
 
 /// One `MiniJinja` environment for the whole process: templates are rendered from
 /// source strings, so there is nothing per-profile to register.
@@ -44,6 +45,17 @@ pub struct RenderContext {
     pub model: Option<String>,
     /// Free-form knobs (`max_tokens`, `temperature`, …), reachable as `params.x`.
     pub params: Map<String, Value>,
+    /// Files the caller attached, in the order they were asked for.
+    ///
+    /// Whole, and already read: `uploads[0].base64` is the file, not a promise of
+    /// it. Eager because this same context is handed to a Rhai request script as
+    /// plain JSON, and a value that only materialises when a template touches it
+    /// would be a value one of the two request sources could not see.
+    ///
+    /// Only what the call asked for. A directory holding forty files does not
+    /// put forty files in a request body — the caller names the ones it wants,
+    /// which is also what keeps last week's attachment out of today's call.
+    pub uploads: Vec<UploadRef>,
     /// Whether this call was asked to stream.
     ///
     /// Exposed to the template because the endpoint has to be *told* — nothing
@@ -336,6 +348,156 @@ mod tests {
             render_body(&profile, &context).unwrap(),
             r#"{"input": ["a","b"]}"#
         );
+    }
+
+    fn upload(name: &str, media: Option<&str>, bytes: &[u8]) -> UploadRef {
+        use base64::Engine;
+        let base64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+        UploadRef {
+            id: "aB3dE5gH7jK9".to_owned(),
+            name: name.to_owned(),
+            stored_as: format!("aB3dE5gH7jK9-{name}"),
+            path: format!("/uploads/aB3dE5gH7jK9-{name}"),
+            size: bytes.len() as u64,
+            content_type: media.map(str::to_owned),
+            data_url: format!(
+                "data:{};base64,{base64}",
+                media.unwrap_or("application/octet-stream")
+            ),
+            base64,
+            text: String::from_utf8(bytes.to_vec()).ok(),
+        }
+    }
+
+    /// The shape a vision endpoint actually reads, written in a template rather
+    /// than built in Rust: what an attachment turns into is the profile's call.
+    #[test]
+    fn an_upload_reaches_the_body_as_a_data_url() {
+        let profile = profile(
+            r#"{"content": [{% for file in uploads %}{"type": "image_url", "image_url": {"url": "{{ file.dataUrl }}"}}{% endfor %}]}"#,
+        );
+        let context = RenderContext {
+            uploads: vec![upload("shot.png", Some("image/png"), &[0x89, b'P'])],
+            ..RenderContext::default()
+        };
+
+        let body = render_body(&profile, &context).unwrap();
+        let parsed: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            parsed["content"][0]["image_url"]["url"],
+            "data:image/png;base64,iVA="
+        );
+    }
+
+    /// The other half of the feature: a text file inlined into the prompt. Both
+    /// are one `uploads` entry seen two different ways, which is why the entry
+    /// carries both rather than the caller choosing at upload time.
+    #[test]
+    fn a_text_file_can_be_inlined_as_text() {
+        let profile = profile(
+            r#"{"prompt": {{ uploads[0].text | tojson }}, "name": {{ uploads[0].name | tojson }}}"#,
+        );
+        let context = RenderContext {
+            uploads: vec![upload("notes.txt", Some("text/plain"), b"ping")],
+            ..RenderContext::default()
+        };
+
+        let body = render_body(&profile, &context).unwrap();
+        let parsed: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["prompt"], "ping");
+        assert_eq!(parsed["name"], "notes.txt");
+    }
+
+    /// The pattern the README hands out for inlining a log or a CSV, run rather
+    /// than asserted: a snippet nobody executes is a snippet with a stray comma
+    /// in it, and this one is fiddly precisely where `MiniJinja` is unforgiving.
+    #[test]
+    fn the_documented_text_inlining_pattern_renders() {
+        let profile = profile(concat!(
+            r#"{"messages": ["#,
+            r#"{% for file in uploads %}{% if file.text %}"#,
+            r#"{"role": "user", "content": {{ ("Contents of " ~ file.name ~ ":\n" ~ file.text) | tojson }}},"#,
+            r#"{% endif %}{% endfor %}"#,
+            r#"{% for message in messages %}{{ message | tojson }}{% if not loop.last %},{% endif %}{% endfor %}"#,
+            r#"]}"#,
+        ));
+        let context = RenderContext {
+            messages: vec![Message::user("what is in this")],
+            uploads: vec![
+                upload("notes.txt", Some("text/plain"), b"ping"),
+                // Skipped by the `if`, which is the half that actually matters:
+                // a PNG inlined as text would be mojibake in a prompt.
+                upload("shot.png", Some("image/png"), &[0x89, 0xff]),
+            ],
+            ..RenderContext::default()
+        };
+
+        let parsed: Value =
+            serde_json::from_str(&render_body(&profile, &context).unwrap()).unwrap();
+        assert_eq!(parsed["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            parsed["messages"][0]["content"],
+            "Contents of notes.txt:\nping"
+        );
+        assert_eq!(parsed["messages"][1]["content"], "what is in this");
+    }
+
+    /// `text` is `null` for anything that is not UTF-8, so a template can ask
+    /// rather than guess from the name.
+    #[test]
+    fn a_template_can_tell_text_from_binary() {
+        let profile =
+            profile(r#"{"kind": "{% if uploads[0].text %}text{% else %}binary{% endif %}"}"#);
+
+        let text = RenderContext {
+            uploads: vec![upload("notes.txt", Some("text/plain"), b"ping")],
+            ..RenderContext::default()
+        };
+        assert_eq!(render_body(&profile, &text).unwrap(), r#"{"kind": "text"}"#);
+
+        let binary = RenderContext {
+            uploads: vec![upload("shot.png", Some("image/png"), &[0x89, 0xff])],
+            ..RenderContext::default()
+        };
+        assert_eq!(
+            render_body(&profile, &binary).unwrap(),
+            r#"{"kind": "binary"}"#
+        );
+    }
+
+    /// A profile that never mentions `uploads` sends what it always sent.
+    /// Attaching a file is not a thing that happens *to* a template.
+    #[test]
+    fn a_template_that_ignores_uploads_is_unaffected_by_one() {
+        let profile = profile(r#"{"messages": {{ messages | tojson }}}"#);
+        let context = RenderContext {
+            messages: vec![Message::user("ping")],
+            uploads: vec![upload("shot.png", Some("image/png"), &[0x89, b'P'])],
+            ..RenderContext::default()
+        };
+
+        assert_eq!(
+            render_body(&profile, &context).unwrap(),
+            r#"{"messages": [{"content":"ping","role":"user"}]}"#
+        );
+    }
+
+    /// The request script sees the same context the template does — it is the
+    /// same struct, serialised. A field only one of them could reach would be a
+    /// trap for whoever switched.
+    #[test]
+    fn a_request_script_sees_the_uploads_too() {
+        let yaml = "name: t\nkind: chat\nurl: https://models.internal/v1/chat/completions\nrequest:\n  script: |\n    #{ \"file\": uploads[0].name, \"bytes\": uploads[0].size }\n";
+        let profile: Profile = serde_yaml_ng::from_str(yaml).unwrap();
+        let context = RenderContext {
+            uploads: vec![upload("notes.txt", Some("text/plain"), b"ping")],
+            ..RenderContext::default()
+        };
+
+        let parsed: Value =
+            serde_json::from_str(&render_body(&profile, &context).unwrap()).unwrap();
+        assert_eq!(parsed["file"], "notes.txt");
+        assert_eq!(parsed["bytes"], 4);
     }
 
     #[test]

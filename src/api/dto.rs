@@ -119,6 +119,47 @@ pub struct McpToolsResponse {
     pub tools: Vec<crate::mcp::McpTool>,
 }
 
+/// One file, as stored.
+///
+/// `name` is what the browser called it and `storedAs` is what it is actually
+/// called on disk — they differ, always, because the stored name carries a
+/// random prefix and has been reduced to one safe path segment. Showing the
+/// first and writing the second is the whole point: the display name is the
+/// user's, the file name is ours.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadResponse {
+    /// The handle: the random prefix of the stored name, on its own.
+    pub id: String,
+    /// The name the browser sent, untouched.
+    pub name: String,
+    /// What it is called in the upload directory.
+    pub stored_as: String,
+    /// Where it landed, so a human can go and look at it.
+    pub path: String,
+    /// Size in bytes, as written.
+    pub size: u64,
+    /// Content type the browser claimed, when it claimed one.
+    ///
+    /// Unverified and unused: it is the client's word about its own file, kept
+    /// because it is the only hint anybody has about what the bytes are.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+}
+
+impl From<crate::uploads::StoredFile> for UploadResponse {
+    fn from(file: crate::uploads::StoredFile) -> Self {
+        Self {
+            id: file.id,
+            name: file.original_name,
+            stored_as: file.stored_name,
+            path: file.path.display().to_string(),
+            size: file.size,
+            content_type: file.content_type,
+        }
+    }
+}
+
 /// Naming an MCP server in the path.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct McpPath {
@@ -288,6 +329,18 @@ pub struct CallRequest {
     #[serde(default)]
     pub params: Map<String, Value>,
 
+    /// Ids of stored files to hand the template, from `POST /api/uploads`.
+    ///
+    /// They arrive as `uploads`, in this order, each carrying the file whole —
+    /// `base64`, `dataUrl` and `text`. Attaching a file does nothing on its own:
+    /// a template that never mentions `uploads` sends exactly what it always
+    /// sent, which is the same rule `stream` follows.
+    ///
+    /// Ids rather than names, because a name is a path and a path is a way out
+    /// of the upload directory.
+    #[serde(default)]
+    pub uploads: Vec<String>,
+
     /// Model identifier handed to the template.
     #[serde(default)]
     pub model: Option<String>,
@@ -354,8 +407,11 @@ impl From<CallRequest> for CallInput {
             include_vectors: request.include_vectors,
             repeat: request.repeat,
             tolerance: request.tolerance,
-            // Filled in by the agent loop, from the profile's MCP servers.
+            // Both filled in after this: the tools by the agent loop from the
+            // profile's MCP servers, the uploads by the handler, which is the
+            // only layer allowed to read a directory.
             extra_tools: Vec::new(),
+            uploads: Vec::new(),
         }
     }
 }

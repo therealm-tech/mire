@@ -9,6 +9,7 @@ use mire::api::{AppState, router};
 use mire::config::ConfigStore;
 use mire::exec::Runner;
 use mire::transport::{self, TransportOptions};
+use mire::uploads::UploadStore;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use wiremock::matchers::{body_string_contains, header, header_exists, method, path};
@@ -22,6 +23,8 @@ struct Harness {
     root: String,
     client: reqwest::Client,
     dir: TempDir,
+    /// Where `POST /api/uploads` writes. Held so it outlives the server.
+    uploads: TempDir,
     /// Dropping this stops the file watcher, so it has to be held.
     _watcher: notify::RecommendedWatcher,
 }
@@ -43,8 +46,14 @@ impl Harness {
         let config = ConfigStore::load(dir.path(), http.clone()).expect("load configuration");
         let watcher = mire::config::watch(std::sync::Arc::clone(&config)).expect("watch");
 
+        // Its own directory, not a corner of the watched one: an upload landing
+        // in the configuration directory would fire the file watcher and get read
+        // as a profile that failed to parse.
+        let uploads = TempDir::new().expect("uploads dir");
+
         let state = AppState {
             runner: Runner::new(config, http),
+            uploads: std::sync::Arc::new(UploadStore::new(uploads.path())),
             base_path: base_path.into(),
             // Unset on purpose: the tests exercise the path a browser actually
             // takes, where the callback comes from the request.
@@ -64,8 +73,40 @@ impl Harness {
             root: format!("http://{address}"),
             client: reqwest::Client::new(),
             dir,
+            uploads,
             _watcher: watcher,
         }
+    }
+
+    /// `POST /api/uploads`, with one file part.
+    async fn upload(&self, filename: &str, body: &[u8]) -> (u16, Value) {
+        let part = reqwest::multipart::Part::bytes(body.to_vec())
+            .file_name(filename.to_owned())
+            .mime_str("application/octet-stream")
+            .expect("mime");
+        let response = self
+            .client
+            .post(format!("{}/api/uploads", self.base))
+            .multipart(reqwest::multipart::Form::new().part("file", part))
+            .send()
+            .await
+            .expect("upload");
+
+        let status = response.status().as_u16();
+        (status, response.json().await.expect("json"))
+    }
+
+    /// Everything sitting in the upload directory, sorted.
+    fn stored(&self) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(self.uploads.path())
+            .map(|entries| {
+                entries
+                    .map(|entry| entry.expect("entry").file_name().to_string_lossy().into())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
     }
 
     /// `POST /api/agent`, collecting the whole event stream.
@@ -4992,4 +5033,274 @@ async fn arguments_that_arrived_as_an_object_are_replayed_as_one() {
         replayed["messages"][1]["tool_calls"][0]["function"]["arguments"],
         json!({"city": "Lyon"})
     );
+}
+
+// --- uploads -----------------------------------------------------------------
+
+#[tokio::test]
+async fn an_attached_file_lands_in_the_upload_directory() {
+    let mire = Harness::start(&[]).await;
+
+    let (status, body) = mire.upload("report.pdf", b"a known signal").await;
+
+    assert_eq!(status, 200);
+    assert_eq!(body["name"], "report.pdf");
+    assert_eq!(body["size"], 14);
+    assert_eq!(body["contentType"], "application/octet-stream");
+
+    // The stored name is the display name with a prefix, and the response says
+    // which is which — the two are not interchangeable anywhere.
+    let stored = body["storedAs"].as_str().expect("storedAs");
+    assert!(stored.ends_with("-report.pdf"), "stored as `{stored}`");
+    assert_eq!(mire.stored(), vec![stored.to_owned()]);
+    assert_eq!(
+        std::fs::read(body["path"].as_str().expect("path")).expect("read back"),
+        b"a known signal"
+    );
+}
+
+/// The one that matters. A name is a display name; it never gets to decide where
+/// bytes go, whatever it looks like.
+#[tokio::test]
+async fn a_file_name_cannot_write_outside_the_upload_directory() {
+    let mire = Harness::start(&[]).await;
+
+    let (status, body) = mire.upload("../../../etc/mire-owned", b"nope").await;
+
+    assert_eq!(status, 200);
+    let stored = body["storedAs"].as_str().expect("storedAs");
+    assert!(stored.ends_with("-mire-owned"), "stored as `{stored}`");
+    // Flattened to one segment, and sitting where every other upload sits.
+    assert!(!stored.contains('/'), "`{stored}` is more than one segment");
+    assert_eq!(mire.stored(), vec![stored.to_owned()]);
+}
+
+#[tokio::test]
+async fn two_uploads_of_the_same_name_are_two_files() {
+    let mire = Harness::start(&[]).await;
+
+    let (_, first) = mire.upload("payload.json", b"one").await;
+    let (_, second) = mire.upload("payload.json", b"two").await;
+
+    assert_ne!(first["storedAs"], second["storedAs"]);
+    assert_eq!(mire.stored().len(), 2);
+}
+
+#[tokio::test]
+async fn a_body_carrying_no_file_is_refused() {
+    let mire = Harness::start(&[]).await;
+
+    let response = mire
+        .client
+        .post(format!("{}/api/uploads", mire.base))
+        .multipart(reqwest::multipart::Form::new().text("note", "no file here"))
+        .send()
+        .await
+        .expect("upload");
+
+    assert_eq!(response.status().as_u16(), 400);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["code"], "no_file");
+    assert!(mire.stored().is_empty());
+}
+
+/// Over the cap the store enforces: a `413` naming the limit, and nothing on
+/// disk. The route's own body limit sits above this on purpose, so the answer
+/// comes from `mire` rather than from the router cutting the body off.
+#[tokio::test]
+async fn a_file_over_the_cap_is_refused_and_nothing_is_written() {
+    let mire = Harness::start(&[]).await;
+
+    let (status, body) = mire
+        .upload("big.bin", &vec![0_u8; mire::uploads::MAX_BYTES + 1])
+        .await;
+
+    assert_eq!(status, 413);
+    assert_eq!(body["code"], "upload_too_large");
+    assert_eq!(body["detail"]["limitBytes"], mire::uploads::MAX_BYTES);
+    assert!(mire.stored().is_empty());
+}
+
+/// Behind a notebook proxy every route moves, and a hard-coded `/api/uploads` in
+/// the front end would be the one that did not.
+#[tokio::test]
+async fn uploads_are_reachable_under_a_base_path() {
+    let mire = Harness::start_at(&[], "/notebook/team/gleroy/proxy/8787").await;
+
+    let (status, _) = mire.upload("report.pdf", b"hi").await;
+
+    assert_eq!(status, 200);
+    assert_eq!(mire.stored().len(), 1);
+}
+
+/// A profile that turns every attachment into the content-part shape a vision
+/// endpoint reads. What an upload becomes is the template's decision, so the
+/// test states it in a template rather than asserting on something built in Rust.
+fn vision_profile(url: &str) -> String {
+    format!(
+        r#"
+name: vision
+kind: chat
+url: {url}
+timeout_ms: 5000
+request:
+  template: |
+    {{"model": "m", "content": [{{% for file in uploads %}}{{"type": "image_url", "name": "{{{{ file.name }}}}", "image_url": {{"url": "{{{{ file.dataUrl }}}}"}}}}{{% endfor %}}]}}
+decode:
+  content: ["$.choices[0].message.content"]
+"#
+    )
+}
+
+#[tokio::test]
+async fn an_uploaded_file_reaches_the_endpoint_through_the_template() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_response()))
+        .mount(&server)
+        .await;
+
+    let mire = Harness::start(&[(
+        "vision.yaml",
+        vision_profile(&format!("{}/v1/chat/completions", server.uri())),
+    )])
+    .await;
+
+    // The whole round trip: store it, then name it in a call.
+    let (_, stored) = mire.upload("shot.png", &[0x89, b'P', b'N', b'G']).await;
+    let id = stored["id"].as_str().expect("id");
+
+    let (status, _, body) = mire
+        .call(json!({"profile": "vision", "prompt": "what is this", "uploads": [id]}))
+        .await;
+
+    assert_eq!(status, 200);
+    let sent: Value = serde_json::from_str(body["request"]["body"].as_str().unwrap()).unwrap();
+    assert_eq!(sent["content"][0]["name"], "shot.png");
+    assert_eq!(
+        sent["content"][0]["image_url"]["url"],
+        "data:image/png;base64,iVBORw=="
+    );
+
+    // And it is what the endpoint received, not merely what we were shown.
+    let received = &server.received_requests().await.unwrap()[0];
+    assert!(
+        std::str::from_utf8(&received.body)
+            .unwrap()
+            .contains("data:image/png;base64,iVBORw=="),
+    );
+}
+
+/// The same rule `stream` follows: it reaches the template, and a template that
+/// says nothing about it sends what it always sent.
+#[tokio::test]
+async fn a_profile_that_ignores_uploads_sends_what_it_always_sent() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_response()))
+        .mount(&server)
+        .await;
+
+    let mire = Harness::start(&[(
+        "chat.yaml",
+        openai_profile(&format!("{}/v1/chat/completions", server.uri())),
+    )])
+    .await;
+
+    let (_, stored) = mire.upload("shot.png", &[0x89, b'P', b'N', b'G']).await;
+
+    let (status, _, body) = mire
+        .call(json!({
+            "profile": "chat",
+            "prompt": "ping",
+            "uploads": [stored["id"].as_str().expect("id")],
+        }))
+        .await;
+
+    assert_eq!(status, 200);
+    assert_eq!(
+        serde_json::from_str::<Value>(body["request"]["body"].as_str().unwrap()).unwrap(),
+        json!({"model": "m", "messages": [{"role": "user", "content": "ping"}]})
+    );
+}
+
+/// Named but not there: the call is refused rather than sent short. A body
+/// quietly missing its attachment is the failure this tool exists to prevent.
+#[tokio::test]
+async fn a_call_naming_an_upload_that_is_gone_is_refused_before_anything_is_sent() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_response()))
+        .mount(&server)
+        .await;
+
+    let mire = Harness::start(&[(
+        "vision.yaml",
+        vision_profile(&format!("{}/v1/chat/completions", server.uri())),
+    )])
+    .await;
+
+    let (status, _, body) = mire
+        .call(json!({"profile": "vision", "prompt": "ping", "uploads": ["aaaaaaaaaaaa"]}))
+        .await;
+
+    assert_eq!(status, 404);
+    assert_eq!(body["code"], "unknown_upload");
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+/// An id is checked against one character class before it is joined onto the
+/// upload directory, so a path never gets that far.
+#[tokio::test]
+async fn a_call_cannot_name_a_file_outside_the_upload_directory() {
+    let mire =
+        Harness::start(&[("vision.yaml", vision_profile("https://models.internal/v1"))]).await;
+
+    let (status, _, body) = mire
+        .call(json!({"profile": "vision", "prompt": "ping", "uploads": ["../../etc/passwd"]}))
+        .await;
+
+    assert_eq!(status, 400);
+    assert_eq!(body["code"], "invalid_upload_id");
+}
+
+/// Agent mode re-renders the whole body every turn, so a file the first turn
+/// carried is a file the second one carries too.
+#[tokio::test]
+async fn an_attachment_is_carried_on_every_turn_of_a_loop() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_response()))
+        .mount(&server)
+        .await;
+
+    let mire = Harness::start(&[(
+        "vision.yaml",
+        vision_profile(&format!("{}/v1/chat/completions", server.uri())),
+    )])
+    .await;
+
+    let (_, stored) = mire.upload("shot.png", &[0x89, b'P', b'N', b'G']).await;
+
+    let (status, events) = mire
+        .agent(json!({
+            "profile": "vision",
+            "prompt": "what is this",
+            "uploads": [stored["id"].as_str().expect("id")],
+        }))
+        .await;
+
+    assert_eq!(status, 200);
+    assert!(events.iter().any(|(name, _)| name == "done"), "{events:?}");
+    for request in server.received_requests().await.unwrap() {
+        assert!(
+            std::str::from_utf8(&request.body)
+                .unwrap()
+                .contains("data:image/png;base64,iVBORw=="),
+        );
+    }
 }

@@ -672,6 +672,10 @@ fn clone_input(input: &CallInput) -> CallInput {
         repeat: 1,
         tolerance: input.tolerance,
         extra_tools: input.extra_tools.clone(),
+        // Every turn, because every turn re-renders the whole body from the
+        // template: a file the first turn carried is a file the second one has
+        // to carry again, or the model loses sight of it mid-run.
+        uploads: input.uploads.clone(),
         // The loop reads tool calls out of a decoded answer, and a streamed
         // answer does not reassemble them. Agent mode calls whole.
         stream: false,
