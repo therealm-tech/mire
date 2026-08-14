@@ -3,9 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Relative, like every other asset: the bundle never learns its prefix. -->
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <meta name="theme-color" content="#f6eddb" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0b1220" media="(prefers-color-scheme: dark)" />
     <title>mire</title>
   </head>
-  <body class="bg-stone-50 text-stone-900 dark:bg-stone-950 dark:text-stone-100">
+  <body class="bg-paper text-ink">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

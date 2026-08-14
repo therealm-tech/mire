@@ -189,6 +189,27 @@ function agentStream(turns: ReturnType<typeof answerTurn>[]): string {
   ].join('\n')
 }
 
+/**
+ * A stream that opens and then says nothing until the caller gives up.
+ *
+ * `fetch` wires its signal to the body, so a real abort surfaces as the reader
+ * rejecting; a mock that resolved and then sat there would test a hang rather
+ * than a cancellation.
+ */
+function stalled(signal: AbortSignal | null | undefined): Response {
+  const body = new ReadableStream({
+    start(controller) {
+      signal?.addEventListener('abort', () => {
+        controller.error(new DOMException('The operation was aborted.', 'AbortError'))
+      })
+    },
+  })
+  return new Response(body, {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  })
+}
+
 /** An SSE response, as `mire` serves both streaming endpoints. */
 function sse(text: string): Response {
   return new Response(text, {
@@ -274,6 +295,20 @@ function recordingApi(answers: string[]) {
   return { fetchMock, sent }
 }
 
+/**
+ * Unfolds the auth detail.
+ *
+ * It is shut unless something needs acting on, so a test that reads the panel
+ * has to open it — the same click the page asks for. Already-open is not a
+ * failure: a profile blocked on a field opens it on arrival.
+ */
+async function openAuth(user: ReturnType<typeof userEvent.setup>) {
+  const toggle = await screen.findByRole('button', { name: /^(Auth|Hide auth)$/ })
+  if (toggle.textContent === 'Auth') {
+    await user.click(toggle)
+  }
+}
+
 beforeEach(() => {
   vi.stubGlobal('fetch', mockApi({ 'api/profiles': PROFILES, 'api/auth': AUTH, 'api/mcp': MCP }))
 })
@@ -306,6 +341,8 @@ describe('App', () => {
     // Anchored: a profile of kind `chat` carries the word in its badge too.
     expect(await screen.findByRole('button', { name: /^chat/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /embed/ })).toBeInTheDocument()
+
+    await openAuth(user)
 
     // `chat` declares no `auth:`, which resolves to the anonymous provider —
     // shown, and said out loud rather than left to be inferred from a blank.
@@ -388,6 +425,7 @@ describe('App', () => {
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: /pinned/ }))
+    await openAuth(user)
 
     expect(screen.getByText('out of allowed_hosts')).toBeInTheDocument()
     expect(screen.getByText(/refused before anything goes out/)).toBeInTheDocument()
@@ -765,7 +803,9 @@ function turnFixture() {
         server: 'weather',
         latencyMs: 42,
         reportedError: false,
-        schemaErrors: [],
+        // Typed, not inferred: an empty literal infers `never[]`, and a variant
+        // of this fixture with a schema error in it would not be assignable.
+        schemaErrors: [] as string[],
         result: '{"temp": 21}',
       },
     ],
@@ -817,12 +857,14 @@ function traceFixture() {
 }
 
 /** A run that calls one MCP tool, so every kind of exchange is on the wire. */
-function toolRunApi() {
+function toolRunApi(turns: ReturnType<typeof turnFixture>[] = [turnFixture()]) {
   const stream = [
     ...setupEvent(),
-    'event: turn',
-    `data: ${JSON.stringify({ event: 'turn', ...turnFixture() })}`,
-    '',
+    ...turns.flatMap((turn) => [
+      'event: turn',
+      `data: ${JSON.stringify({ event: 'turn', ...turn })}`,
+      '',
+    ]),
     'event: done',
     `data: ${JSON.stringify({ event: 'done', ...traceFixture() })}`,
     '',
@@ -1022,6 +1064,7 @@ describe('browser login', () => {
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: /^chat/ }))
+    await openAuth(user)
     expect(screen.queryByRole('button', { name: 'Sign in' })).not.toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: /as-me/ }))
@@ -1070,6 +1113,7 @@ describe('browser login', () => {
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: /as-me/ }))
+    await openAuth(user)
     await user.click(screen.getByRole('button', { name: 'Sign in' }))
 
     const login = await waitFor(() => {
@@ -1134,6 +1178,7 @@ describe('browser login', () => {
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: /as-me/ }))
+    await openAuth(user)
 
     // The reason survives the tab that closed, which is the whole point.
     expect(screen.getByText(/refused the login/)).toBeInTheDocument()
@@ -1232,6 +1277,7 @@ describe('browser login', () => {
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: /as-me/ }))
+    await openAuth(user)
     expect(screen.getByText('gleroy')).toBeInTheDocument()
     expect(screen.getByText('expires in 4 min')).toBeInTheDocument()
     expect(screen.getByText(/granted: openid profile/)).toBeInTheDocument()
@@ -1484,5 +1530,364 @@ describe('conversation', () => {
     await user.click(await screen.findByRole('button', { name: /embed/ }))
     // There is no such thing as a second turn of an embedding.
     expect(screen.queryByRole('heading', { name: 'Conversation' })).not.toBeInTheDocument()
+  })
+})
+
+describe('preflight', () => {
+  it('says where the call is going and who it goes as, before it is made', async () => {
+    render(<App />)
+
+    await screen.findByRole('button', { name: /^chat/ })
+    const bar = screen.getByLabelText('What the next call will do')
+
+    expect(within(bar).getByText('ready')).toBeInTheDocument()
+    expect(within(bar).getByText('https://models.internal/v1/chat/completions')).toBeInTheDocument()
+    expect(bar).toHaveTextContent('as anonymous')
+  })
+
+  it('counts the servers a run would set up first', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: /guarded/ }))
+    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('3 MCP servers')
+  })
+
+  it('names what would refuse the call, and starts the login that fixes it', async () => {
+    const popup = { location: { href: '' }, closed: false, close: vi.fn() }
+    vi.stubGlobal(
+      'open',
+      vi.fn(() => popup),
+    )
+
+    const logins: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input)
+        let payload: unknown = PROFILES
+        if (url.endsWith('/login')) {
+          logins.push(url)
+          payload = {
+            authorizationUrl: 'https://idp.example/authorize',
+            redirectUri: 'x',
+            state: 's',
+          }
+        } else if (url.endsWith('api/mcp')) {
+          payload = MCP
+        } else if (url.endsWith('api/auth')) {
+          payload = AUTH
+        }
+        return Promise.resolve(Response.json(payload))
+      }),
+    )
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    // `as-me` calls as a human, and nobody is signed in.
+    await user.click(await screen.findByRole('button', { name: /as-me/ }))
+    const bar = screen.getByLabelText('What the next call will do')
+    expect(within(bar).getByText('blocked')).toBeInTheDocument()
+    expect(bar).toHaveTextContent('Nobody is signed in to me')
+
+    // The fix is on the bar rather than three panels away.
+    await user.click(within(bar).getByRole('button', { name: 'Sign in to me' }))
+    await waitFor(() => expect(logins).toHaveLength(1))
+    expect(logins[0]).toContain('/api/auth/me/login')
+  })
+
+  it('opens the auth detail by itself when the fix is a field inside it', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    // `guarded` names `pasted`, whose value only this tab can supply — so the
+    // panel holding the box is already open rather than folded away.
+    await user.click(await screen.findByRole('button', { name: /guarded/ }))
+    expect(await screen.findByPlaceholderText('paste the credential')).toBeInTheDocument()
+
+    await user.type(screen.getByPlaceholderText('paste the credential'), 'sk-test')
+    expect(screen.getByLabelText('What the next call will do')).not.toHaveTextContent(
+      'has no value',
+    )
+  })
+})
+
+describe('stopping a run', () => {
+  it('drops the request and keeps what had already arrived', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input)
+        if (url.endsWith('api/agent')) {
+          return Promise.resolve(stalled(init?.signal))
+        }
+        let payload: unknown = PROFILES
+        if (url.endsWith('api/mcp')) {
+          payload = MCP
+        } else if (url.endsWith('api/auth')) {
+          payload = AUTH
+        }
+        return Promise.resolve(Response.json(payload))
+      }),
+    )
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: /^chat/ }))
+    // The box arrives prefilled, so it is cleared rather than typed into twice.
+    await user.clear(screen.getByLabelText('Message'))
+    await user.type(screen.getByLabelText('Message'), 'are you there')
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+
+    // Nothing to stop until there is something in flight.
+    const stop = await screen.findByRole('button', { name: 'Stop' })
+    await user.click(stop)
+
+    expect(await screen.findByText(/Stopped\./)).toBeInTheDocument()
+    // The question stays: it was asked, and the endpoint was told about it.
+    expect(screen.getByText('are you there')).toBeInTheDocument()
+    // Being called off is not a failure, and must not be reported as one.
+    expect(screen.queryByText(/could not run this call/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument()
+  })
+})
+
+describe('reading a run', () => {
+  it('takes a tool in the transcript to its card in the traffic', async () => {
+    const user = userEvent.setup()
+    vi.stubGlobal('fetch', toolRunApi())
+
+    render(<App />)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    const conversation = within(panel('Conversation'))
+    await waitFor(() => expect(conversation.getByText('get_weather')).toBeInTheDocument())
+
+    // A run puts five cards below; folding them all is how somebody reads a
+    // long session, and the point of the link is that it undoes that for the
+    // one card being pointed at.
+    await user.click(screen.getByRole('button', { name: 'Collapse all' }))
+    expect(within(card(/Turn 1 · get_weather/)).queryByText(/"temp"/)).not.toBeInTheDocument()
+
+    // The scroll is the half a fold cannot show: jsdom has no layout, so the
+    // stub is watched rather than the viewport.
+    const scrolled = vi.spyOn(Element.prototype, 'scrollIntoView')
+    await user.click(conversation.getByRole('button', { name: 'get_weather' }))
+
+    const tool = within(card(/Turn 1 · get_weather/))
+    expect(tool.getByText(/arguments match the schema/)).toBeInTheDocument()
+    await waitFor(() => expect(scrolled).toHaveBeenCalled())
+    scrolled.mockRestore()
+    // And the row's turn opens the model call that asked for it.
+    await user.click(conversation.getByRole('button', { name: 'turn 1' }))
+    expect(within(card(/Turn 1 · model/)).getByText('Request')).toBeInTheDocument()
+  })
+
+  it('narrows the traffic to one kind of exchange, and back', async () => {
+    const user = userEvent.setup()
+    vi.stubGlobal('fetch', toolRunApi())
+
+    render(<App />)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    const traffic = within(panel('Traffic'))
+    await waitFor(() =>
+      expect(traffic.getByRole('button', { name: /Turn 1 · model/ })).toBeInTheDocument(),
+    )
+    expect(traffic.getByText('5 exchanges')).toBeInTheDocument()
+
+    await user.click(traffic.getByRole('button', { name: 'Tools' }))
+    expect(traffic.getByText('1 of 5')).toBeInTheDocument()
+    expect(traffic.queryByRole('button', { name: /Turn 1 · model/ })).not.toBeInTheDocument()
+    expect(traffic.getByRole('button', { name: /Turn 1 · get_weather/ })).toBeInTheDocument()
+
+    await user.click(traffic.getByRole('button', { name: 'All' }))
+    expect(traffic.getByText('5 exchanges')).toBeInTheDocument()
+  })
+
+  it('says outright when nothing failed, rather than offering an empty filter', async () => {
+    const user = userEvent.setup()
+    vi.stubGlobal('fetch', toolRunApi())
+
+    render(<App />)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    const traffic = within(panel('Traffic'))
+    await waitFor(() => expect(traffic.getByText('5 exchanges')).toBeInTheDocument())
+    expect(traffic.getByRole('button', { name: 'Nothing failed' })).toBeDisabled()
+  })
+
+  it('picks out the exchange that failed, whichever kind it was', async () => {
+    const user = userEvent.setup()
+    // The same run, with the one thing wrong that no status code reports: the
+    // call went out, the server answered, and the arguments were never valid.
+    const turn = turnFixture()
+    const broken = {
+      ...turn,
+      tools: turn.tools.map((tool) => ({
+        ...tool,
+        schemaErrors: ['city: expected string, got number'],
+      })),
+    }
+    vi.stubGlobal('fetch', toolRunApi([broken]))
+
+    render(<App />)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    const traffic = within(panel('Traffic'))
+    await waitFor(() => expect(traffic.getByText('5 exchanges')).toBeInTheDocument())
+
+    // The model call answered 200 and the handshake landed; only the arguments
+    // were wrong, and that is what the filter is for.
+    await user.click(traffic.getByRole('button', { name: /1 failed/ }))
+    expect(traffic.getByText('1 of 5')).toBeInTheDocument()
+    expect(traffic.getByRole('button', { name: /Turn 1 · get_weather/ })).toBeInTheDocument()
+    expect(traffic.queryByRole('button', { name: /Turn 1 · model/ })).not.toBeInTheDocument()
+  })
+
+  it('drops a filter that would hide the card being pointed at', async () => {
+    const user = userEvent.setup()
+    vi.stubGlobal('fetch', toolRunApi())
+
+    render(<App />)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    const traffic = within(panel('Traffic'))
+    await waitFor(() => expect(traffic.getByText('5 exchanges')).toBeInTheDocument())
+
+    // Reading the protocol, then following a tool from the transcript: the
+    // click has to land rather than appear to do nothing.
+    await user.click(traffic.getByRole('button', { name: 'Protocol' }))
+    expect(traffic.queryByRole('button', { name: /Turn 1 · get_weather/ })).not.toBeInTheDocument()
+
+    await user.click(within(panel('Conversation')).getByRole('button', { name: 'get_weather' }))
+    expect(traffic.getByRole('button', { name: /Turn 1 · get_weather/ })).toBeInTheDocument()
+    expect(traffic.getByText('5 exchanges')).toBeInTheDocument()
+  })
+})
+
+describe('coming back to it', () => {
+  it('reopens on the profile and the draft it was left on', async () => {
+    const user = userEvent.setup()
+    const first = render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: /guarded/ }))
+    await user.clear(screen.getByLabelText('Message'))
+    await user.type(screen.getByLabelText('Message'), 'half a thought')
+    first.unmount()
+
+    render(<App />)
+    expect(await screen.findByLabelText('Message')).toHaveValue('half a thought')
+    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent(
+      'http://127.0.0.1:11435/v1/messages',
+    )
+  })
+
+  it('never keeps the credential, whatever else it keeps', async () => {
+    const user = userEvent.setup()
+    const first = render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: /guarded/ }))
+    await user.type(await screen.findByPlaceholderText('paste the credential'), 'sk-secret')
+    first.unmount()
+
+    // Not under a key of ours, and not under anybody else's either.
+    const stored = Object.keys(window.localStorage).map((key) => window.localStorage.getItem(key))
+    expect(JSON.stringify(stored)).not.toContain('sk-secret')
+
+    render(<App />)
+    expect(await screen.findByPlaceholderText('paste the credential')).toHaveValue('')
+  })
+
+  it('falls back to a profile that exists when the remembered one is gone', async () => {
+    const user = userEvent.setup()
+    const first = render(<App />)
+    await user.click(await screen.findByRole('button', { name: /as-me/ }))
+    first.unmount()
+
+    // The file was deleted between the two visits.
+    const fewer = { ...PROFILES, profiles: PROFILES.profiles.filter((one) => one.name !== 'as-me') }
+    vi.stubGlobal('fetch', mockApi({ 'api/profiles': fewer, 'api/auth': AUTH, 'api/mcp': MCP }))
+
+    render(<App />)
+    await screen.findByRole('button', { name: /^chat/ })
+    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent(
+      'https://models.internal/v1/chat/completions',
+    )
+  })
+})
+
+describe('taking the run away with you', () => {
+  it('writes out every exchange, with what the run was pointed at', async () => {
+    const user = userEvent.setup()
+    vi.stubGlobal('fetch', toolRunApi())
+
+    const written: string[] = []
+    // The two statics only, defined rather than spied on: jsdom has no object
+    // URLs at all, and replacing the whole of `URL` would take the constructor
+    // every other module builds its request paths with.
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: () => 'blob:mire' })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: () => {} })
+    // The blob is the file: reading it back is reading what would be saved.
+    const OriginalBlob = globalThis.Blob
+    vi.stubGlobal(
+      'Blob',
+      class extends OriginalBlob {
+        constructor(parts: BlobPart[], options?: BlobPropertyBag) {
+          super(parts, options)
+          written.push(String(parts[0]))
+        }
+      },
+    )
+    const clicked = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+    render(<App />)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+    await waitFor(() =>
+      expect(within(panel('Traffic')).getByText('5 exchanges')).toBeInTheDocument(),
+    )
+
+    await user.click(within(panel('Traffic')).getByRole('button', { name: 'Export' }))
+
+    expect(clicked).toHaveBeenCalled()
+    const payload = JSON.parse(written[0] ?? '{}')
+    expect(payload.tool).toBe('mire')
+    expect(payload.profile).toBe('chat')
+    expect(payload.endpoint).toBe('https://models.internal/v1/chat/completions')
+    expect(payload.exchanges).toHaveLength(5)
+    // The history as the next request would have carried it, not a rendering of it.
+    expect(payload.messages[0]).toEqual({ role: 'user', content: 'ping' })
+
+    clicked.mockRestore()
+  })
+})
+
+describe('on a narrow screen', () => {
+  it('folds the profile list away, and closes it again once one is picked', async () => {
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      writable: true,
+      value: (query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }),
+    })
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    // One line saying where you are, rather than a screenful to scroll past.
+    await waitFor(() => expect(within(panel('Profiles')).getByText('chat')).toBeInTheDocument())
+    expect(screen.queryByRole('button', { name: /guarded/ })).not.toBeInTheDocument()
+
+    await user.click(within(panel('Profiles')).getByRole('button', { name: 'Change' }))
+    await user.click(screen.getByRole('button', { name: /guarded/ }))
+
+    expect(screen.queryByRole('button', { name: /guarded/ })).not.toBeInTheDocument()
+    expect(within(panel('Profiles')).getByText('guarded')).toBeInTheDocument()
   })
 })

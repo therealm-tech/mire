@@ -1,5 +1,6 @@
 import type { AuthDescriptor, LoadIssue, ProfileSummary, SessionView } from '../api'
-import { Badge, Field } from './primitives'
+import { hostOf, reaches } from '../preflight'
+import { Badge, Button, Field, INPUT_CLASSES } from './primitives'
 
 /** "expires in 4 min", or the blunt truth. */
 function expiry(session: SessionView): string {
@@ -8,30 +9,6 @@ function expiry(session: SessionView): string {
   }
   const minutes = Math.round(session.expiresInS / 60)
   return minutes < 1 ? `expires in ${session.expiresInS}s` : `expires in ${minutes} min`
-}
-
-/** The host a profile points at, or `null` from a URL that will not parse. */
-export function hostOf(url: string): string | null {
-  try {
-    return new URL(url).hostname
-  } catch {
-    return null
-  }
-}
-
-/**
- * Whether this credential is allowed to go where this profile points.
- *
- * `allowed_hosts` is enforced on the server for every call, so a profile whose
- * own `auth:` excludes its own `url:` fails every time. That is a
- * misconfiguration you want to read, not discover.
- */
-export function reaches(provider: AuthDescriptor, profile: ProfileSummary): boolean {
-  if (provider.allowedHosts.length === 0) {
-    return true
-  }
-  const host = hostOf(profile.url)
-  return host === null || provider.allowedHosts.includes(host)
 }
 
 /**
@@ -76,7 +53,7 @@ export function ModelAuth({
       {provider === undefined ? (
         <p className="text-xs">
           <Badge tone="bad">{declared ?? 'unknown'}</Badge>{' '}
-          <span className="text-stone-600 dark:text-stone-400">
+          <span className="text-muted">
             named by this profile, declared in no <span className="font-mono">auth.yaml</span> entry
           </span>
         </p>
@@ -85,10 +62,10 @@ export function ModelAuth({
           <div className="flex flex-wrap items-center gap-1.5">
             <span className="font-medium text-sm">{provider.name}</span>
             {provider.kind === provider.name ? null : (
-              <span className="text-stone-500 text-xs dark:text-stone-400">{provider.kind}</span>
+              <span className="text-faint text-xs">{provider.kind}</span>
             )}
             {declared === null ? (
-              <span className="text-stone-500 text-xs dark:text-stone-400">
+              <span className="text-faint text-xs">
                 no <span className="font-mono">auth:</span> in this profile
               </span>
             ) : null}
@@ -98,7 +75,7 @@ export function ModelAuth({
           </div>
 
           {profile && !reaches(provider, profile) ? (
-            <p className="text-stone-500 text-xs dark:text-stone-400">
+            <p className="text-muted text-xs">
               This credential may only be sent to{' '}
               <span className="font-mono">{provider.allowedHosts.join(', ')}</span>, and the profile
               points at <span className="font-mono">{hostOf(profile.url)}</span>. Every call is
@@ -124,20 +101,20 @@ export function ModelAuth({
                 autoComplete="off"
                 onChange={(event) => onToken(event.target.value)}
                 placeholder="paste the credential"
-                className="w-full rounded border border-stone-300 bg-white px-2 py-1 font-mono text-sm dark:border-stone-700 dark:bg-stone-950"
+                className={`${INPUT_CLASSES} w-full font-mono`}
               />
             </Field>
           ) : null}
 
           {provider.kind === 'anonymous' ? (
-            <p className="text-stone-500 text-xs dark:text-stone-400">
+            <p className="text-muted text-xs">
               Nothing is sent. A <span className="font-mono">401</span> here means the route is
               protected, and counts as a pass.
             </p>
           ) : null}
 
           {provider.kind === 'oidc' ? (
-            <p className="text-stone-500 text-xs dark:text-stone-400">
+            <p className="text-muted text-xs">
               A workload identity: <span className="font-mono">client_credentials</span>, fetched
               without anybody signing in. This is what a pod would send.
             </p>
@@ -150,7 +127,7 @@ export function ModelAuth({
           {issues.map((issue) => (
             <li key={`${issue.file}:${issue.message}`} className="text-xs">
               <Badge tone="bad">auth.yaml</Badge>{' '}
-              <span className="text-stone-600 dark:text-stone-400">{issue.message}</span>
+              <span className="text-muted">{issue.message}</span>
             </li>
           ))}
         </ul>
@@ -179,44 +156,38 @@ function BrowserLogin({
   const failure = error ?? provider.lastError ?? null
 
   return (
-    <div className="space-y-1.5 rounded border border-stone-200 p-2 dark:border-stone-800">
+    <div className="space-y-1.5 rounded border border-line p-2">
       <div className="flex flex-wrap items-center gap-2">
         {session ? (
           <>
             <Badge tone="good">signed in</Badge>
             <span className="text-sm">{session.subject ?? 'unknown user'}</span>
-            <span className="text-stone-500 text-xs dark:text-stone-400">{expiry(session)}</span>
-            <button
-              type="button"
-              onClick={onLogout}
-              className="ml-auto rounded border border-stone-300 px-2 py-1 text-xs dark:border-stone-700"
-            >
+            <span className="text-faint text-xs">{expiry(session)}</span>
+            <Button className="ml-auto" onClick={onLogout}>
               Sign out
-            </button>
+            </Button>
           </>
         ) : (
           <>
             <Badge tone="neutral">not signed in</Badge>
-            <button
-              type="button"
+            <Button
+              variant="primary"
+              className="ml-auto"
               disabled={signingIn}
               onClick={() => onLogin()}
-              className="ml-auto rounded bg-stone-900 px-2.5 py-1 font-medium text-stone-50 text-xs disabled:opacity-50 dark:bg-stone-100 dark:text-stone-900"
             >
               {signingIn ? 'Waiting for the browser…' : failure ? 'Try again' : 'Sign in'}
-            </button>
+            </Button>
           </>
         )}
       </div>
 
       {session?.scope ? (
-        <p className="font-mono text-[11px] text-stone-500 dark:text-stone-400">
-          granted: {session.scope}
-        </p>
+        <p className="font-mono text-[11px] text-faint">granted: {session.scope}</p>
       ) : null}
 
       {signingIn ? (
-        <p className="text-stone-500 text-xs dark:text-stone-400">
+        <p className="text-muted text-xs">
           A tab opened for the identity provider. If nothing appeared, your browser blocked the
           popup.
         </p>
@@ -225,10 +196,9 @@ function BrowserLogin({
       {failure ? (
         <div className="space-y-1">
           <p className="text-xs">
-            <Badge tone="bad">sign-in failed</Badge>{' '}
-            <span className="text-stone-600 dark:text-stone-400">{failure}</span>
+            <Badge tone="bad">sign-in failed</Badge> <span className="text-muted">{failure}</span>
           </p>
-          <p className="text-stone-500 text-xs dark:text-stone-400">
+          <p className="text-muted text-xs">
             If the window opens and shuts instantly, the identity provider is reusing its own
             session and replaying the same failure.{' '}
             <button
@@ -244,7 +214,7 @@ function BrowserLogin({
         </div>
       ) : null}
 
-      <p className="text-stone-500 text-xs dark:text-stone-400">
+      <p className="text-faint text-xs">
         The tokens stay on the server and never reach this page. Signing out here does not sign you
         out of the identity provider.
       </p>

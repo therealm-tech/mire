@@ -1,7 +1,15 @@
 import { useEffect, useRef } from 'react'
-import type { Message, ToolInvocation } from '../api'
-import { type ChatItem, describeStop, messagePositions, type VerdictItem } from '../conversation'
-import { Badge, Panel } from './primitives'
+import type { Message } from '../api'
+import {
+  type ActivityItem,
+  type ChatItem,
+  describeStop,
+  messagePositions,
+  type VerdictItem,
+} from '../conversation'
+import { Failure } from './Failure'
+import { McpProtocol } from './McpProtocol'
+import { Badge, Button, INPUT_CLASSES, Panel } from './primitives'
 
 /**
  * The conversation, as a conversation.
@@ -22,28 +30,44 @@ export function ChatPanel({
   items,
   live,
   busy,
+  stopped,
   prompt,
   maxIterations,
   error,
+  revisions,
+  mcpProtocol,
+  showProtocol,
   onPrompt,
   onMaxIterations,
+  onMcpProtocol,
   onSend,
   onStream,
+  onStop,
   onRetry,
+  onReveal,
   onReset,
 }: {
   items: ChatItem[]
   /** Text arriving chunk by chunk, shown as an answer still being written. */
   live: string | null
   busy: boolean
+  /** The last run was called off rather than finished. */
+  stopped: boolean
   prompt: string
   maxIterations: number
   error: { code: string; message: string; detail?: unknown } | null
+  revisions: string[]
+  mcpProtocol: string | null
+  /** Only a profile that names a server has a revision to speak. */
+  showProtocol: boolean
   onPrompt: (value: string) => void
   onMaxIterations: (value: number) => void
+  onMcpProtocol: (revision: string | null) => void
   onSend: () => void
   onStream: () => void
+  onStop: () => void
   onRetry: (id: string) => void
+  onReveal: (exchange: string) => void
   onReset: () => void
 }) {
   const positions = messagePositions(items)
@@ -69,14 +93,9 @@ export function ChatPanel({
           <Badge tone="neutral">
             {turns} {turns === 1 ? 'turn' : 'turns'}
           </Badge>
-          <button
-            type="button"
-            disabled={busy || (turns === 0 && items.length === 0)}
-            onClick={onReset}
-            className="rounded border border-stone-300 px-2 py-1 text-xs disabled:opacity-50 hover:bg-stone-100 dark:border-stone-700 dark:hover:bg-stone-800"
-          >
+          <Button disabled={busy || (turns === 0 && items.length === 0)} onClick={onReset}>
             New conversation
-          </button>
+          </Button>
         </div>
       }
     >
@@ -89,7 +108,7 @@ export function ChatPanel({
           aria-label="Conversation"
         >
           {items.length === 0 && live === null ? (
-            <p className="py-8 text-center text-stone-500 text-sm dark:text-stone-400">
+            <p className="py-8 text-center text-muted text-sm">
               Nothing said yet. Ask something below.
             </p>
           ) : null}
@@ -104,7 +123,7 @@ export function ChatPanel({
                 {...(item.id === last ? { onRetry: () => onRetry(item.id) } : {})}
               />
             ) : item.kind === 'activity' ? (
-              <Activity key={item.id} turn={item.turn} tools={item.tools} />
+              <Activity key={item.id} item={item} onReveal={onReveal} />
             ) : (
               <Verdict key={item.id} item={item} />
             ),
@@ -113,24 +132,18 @@ export function ChatPanel({
           {live === null ? null : <Writing text={live} done={!busy} />}
 
           {busy && live === null ? (
-            <p className="text-stone-500 text-sm dark:text-stone-400" role="status">
+            <p className="text-muted text-sm" role="status">
               Thinking…
             </p>
           ) : null}
 
-          {error ? (
-            <div className="rounded border border-rose-300 bg-rose-50 p-2 dark:border-rose-900 dark:bg-rose-950">
-              <p className="flex flex-wrap items-baseline gap-2 text-sm">
-                <Badge tone="bad">{error.code}</Badge>
-                <span>{error.message}</span>
-              </p>
-              {error.detail === undefined ? null : (
-                <pre className="mt-2 overflow-x-auto rounded bg-stone-100 p-2 font-mono text-xs dark:bg-stone-950">
-                  {JSON.stringify(error.detail, null, 2)}
-                </pre>
-              )}
-            </div>
+          {stopped && !busy ? (
+            <p className="text-muted text-sm" role="status">
+              Stopped. Whatever had arrived is above, and on the wire below.
+            </p>
           ) : null}
+
+          {error ? <Failure error={error} /> : null}
 
           <div ref={foot} />
         </div>
@@ -140,10 +153,15 @@ export function ChatPanel({
           turns={turns}
           busy={busy}
           maxIterations={maxIterations}
+          revisions={revisions}
+          mcpProtocol={mcpProtocol}
+          showProtocol={showProtocol}
           onPrompt={onPrompt}
           onMaxIterations={onMaxIterations}
+          onMcpProtocol={onMcpProtocol}
           onSend={onSend}
           onStream={onStream}
+          onStop={onStop}
         />
       </div>
     </Panel>
@@ -176,9 +194,7 @@ function Bubble({
   return (
     <div className={`flex flex-col gap-1 ${mine ? 'items-end' : 'items-start'}`}>
       <div className="flex items-center gap-2 px-1">
-        <span className="text-stone-500 text-xs dark:text-stone-400">
-          {ROLE_LABELS[message.role]}
-        </span>
+        <span className="text-faint text-xs">{ROLE_LABELS[message.role]}</span>
         {onRetry === undefined ? null : (
           <button
             type="button"
@@ -190,7 +206,7 @@ function Bubble({
                 ? 'Send the conversation again, ending on this message.'
                 : 'Drop this answer and ask the same question again.'
             }
-            className="text-stone-400 text-xs disabled:opacity-50 hover:text-stone-700 hover:underline dark:hover:text-stone-200"
+            className="text-faint text-xs disabled:opacity-50 hover:text-ink hover:underline"
           >
             Retry
           </button>
@@ -200,10 +216,10 @@ function Bubble({
       <div
         className={`max-w-[85%] rounded-2xl px-3 py-2 text-sm ${
           mine
-            ? 'bg-stone-900 text-stone-50 dark:bg-stone-100 dark:text-stone-900'
+            ? 'bg-brand text-on-brand'
             : aside
-              ? 'border border-amber-300 bg-amber-50 dark:border-amber-900 dark:bg-amber-950'
-              : 'border border-stone-200 bg-stone-50 dark:border-stone-800 dark:bg-stone-950'
+              ? 'border border-warn/30 bg-warn-soft'
+              : 'border border-line bg-paper'
         }`}
       >
         {message.content ? (
@@ -211,7 +227,7 @@ function Bubble({
           // reason for the page to grow sideways.
           <p className="whitespace-pre-wrap break-words">{message.content}</p>
         ) : (
-          <p className="text-stone-500 italic dark:text-stone-400">no text content</p>
+          <p className="text-faint italic">no text content</p>
         )}
 
         {message.toolCalls && message.toolCalls.length > 0 ? (
@@ -225,7 +241,7 @@ function Bubble({
                 {toolCall.name}({JSON.stringify(toolCall.arguments)})
               </p>
             ))}
-            <p className="text-amber-700 text-xs dark:text-amber-500">
+            <p className="text-warn text-xs">
               Nothing answered this call — the run stopped on it, or it came back from a stream,
               which does not loop. Most endpoints refuse the next turn until it has a result:
               <strong> Retry</strong> drops this turn and asks again.
@@ -241,31 +257,56 @@ function Bubble({
  * What the run did on its own, between the question and the answer.
  *
  * A summary on purpose: the arguments, the schema check and the result in full
- * are one panel down, where every other thing that went on a wire also is.
+ * are one panel down, where every other thing that went on a wire also is — and
+ * every row here is a way of getting to its own card down there, because "which
+ * of these forty is the one I just read about" was a question the reader was
+ * being left to answer by eye.
  */
-function Activity({ turn, tools }: { turn: number; tools: ToolInvocation[] }) {
+function Activity({ item, onReveal }: { item: ActivityItem; onReveal: (id: string) => void }) {
   return (
-    <ul className="space-y-1 border-stone-200 border-l-2 pl-3 dark:border-stone-800">
-      {tools.map((tool) => (
-        <li
-          key={`${tool.call.id ?? ''}${tool.call.name}`}
-          className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-xs"
-        >
-          <span className="text-stone-400 dark:text-stone-500">turn {turn}</span>
-          <span className="font-medium font-mono">{tool.call.name}</span>
-          {tool.source === 'mcp' ? (
-            <span className="text-stone-500 dark:text-stone-400">
-              called for real via <span className="font-mono">{tool.server}</span>
-              {tool.latencyMs === undefined ? null : ` · ${tool.latencyMs} ms`}
-            </span>
-          ) : (
-            <span className="text-stone-500 dark:text-stone-400">simulated, nothing executed</span>
-          )}
-          {tool.error ? <Badge tone="bad">tool failed</Badge> : null}
-          {tool.reportedError ? <Badge tone="warn">the tool reported a problem</Badge> : null}
-          {tool.schemaErrors.length > 0 ? <Badge tone="warn">schema</Badge> : null}
-        </li>
-      ))}
+    <ul className="space-y-1 border-line border-l-2 pl-3">
+      {item.tools.map((exchange) => {
+        const tool = exchange.invocation
+        return (
+          <li key={exchange.id} className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-xs">
+            {item.call === null ? (
+              <span className="text-faint">turn {item.turn}</span>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  if (item.call) {
+                    onReveal(item.call)
+                  }
+                }}
+                className="text-faint hover:text-ink hover:underline"
+                title="Show the model call that asked for this"
+              >
+                turn {item.turn}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => onReveal(exchange.id)}
+              className="font-medium font-mono hover:underline"
+              title="Show this call in the traffic below"
+            >
+              {tool.call.name}
+            </button>
+            {tool.source === 'mcp' ? (
+              <span className="text-muted">
+                called for real via <span className="font-mono">{tool.server}</span>
+                {tool.latencyMs === undefined ? null : ` · ${tool.latencyMs} ms`}
+              </span>
+            ) : (
+              <span className="text-muted">simulated, nothing executed</span>
+            )}
+            {tool.error ? <Badge tone="bad">tool failed</Badge> : null}
+            {tool.reportedError ? <Badge tone="warn">the tool reported a problem</Badge> : null}
+            {tool.schemaErrors.length > 0 ? <Badge tone="warn">schema</Badge> : null}
+          </li>
+        )
+      })}
     </ul>
   )
 }
@@ -276,8 +317,8 @@ function Verdict({ item }: { item: VerdictItem }) {
   return (
     <p className="flex flex-wrap items-baseline gap-2 text-xs">
       <Badge tone={tone}>{item.stop.outcome}</Badge>
-      <span className="text-stone-600 dark:text-stone-400">{text}</span>
-      <span className="text-stone-400 dark:text-stone-500">
+      <span className="text-muted">{text}</span>
+      <span className="text-faint">
         {item.turns} {item.turns === 1 ? 'turn' : 'turns'} · {item.durationMs} ms
       </span>
     </p>
@@ -289,14 +330,12 @@ function Writing({ text, done }: { text: string; done: boolean }) {
   return (
     <div className="flex flex-col items-start gap-1">
       <div className="flex items-center gap-2 px-1">
-        <span className="text-stone-500 text-xs dark:text-stone-400">model</span>
+        <span className="text-faint text-xs">model</span>
         <Badge tone={done ? 'good' : 'neutral'}>{done ? 'complete' : 'receiving…'}</Badge>
       </div>
-      <div className="max-w-[85%] rounded-2xl border border-stone-200 bg-stone-50 px-3 py-2 text-sm dark:border-stone-800 dark:bg-stone-950">
+      <div className="max-w-[85%] rounded-2xl border border-line bg-paper px-3 py-2 text-sm">
         {text.length === 0 ? (
-          <p className="text-stone-500 italic dark:text-stone-400">
-            Connected. Nothing has arrived yet.
-          </p>
+          <p className="text-faint italic">Connected. Nothing has arrived yet.</p>
         ) : (
           <p className="whitespace-pre-wrap break-words">
             {text}
@@ -313,26 +352,36 @@ function Composer({
   turns,
   busy,
   maxIterations,
+  revisions,
+  mcpProtocol,
+  showProtocol,
   onPrompt,
   onMaxIterations,
+  onMcpProtocol,
   onSend,
   onStream,
+  onStop,
 }: {
   prompt: string
   turns: number
   busy: boolean
   maxIterations: number
+  revisions: string[]
+  mcpProtocol: string | null
+  showProtocol: boolean
   onPrompt: (value: string) => void
   onMaxIterations: (value: number) => void
+  onMcpProtocol: (revision: string | null) => void
   onSend: () => void
   onStream: () => void
+  onStop: () => void
 }) {
   // An empty box is nothing to say, not an instruction to send the history
   // again — that is what **Retry** is for, and it says which turn it repeats.
   const empty = prompt.trim().length === 0
 
   return (
-    <div className="space-y-2 border-stone-200 border-t pt-3 dark:border-stone-800">
+    <div className="space-y-2 border-line border-t pt-3">
       <textarea
         value={prompt}
         aria-label="Message"
@@ -356,29 +405,37 @@ function Composer({
             ? 'Ask something. Enter sends, Shift+Enter starts a line.'
             : 'Ask something else, or retry the last turn above.'
         }
-        className="w-full resize-y rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm dark:border-stone-700 dark:bg-stone-950"
+        className={`${INPUT_CLASSES} w-full resize-y`}
       />
 
       <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
+        <Button
+          variant="primary"
+          size="md"
           disabled={busy || empty}
           onClick={onSend}
-          className="rounded-lg bg-stone-900 px-4 py-1.5 font-medium text-sm text-stone-50 disabled:opacity-50 dark:bg-stone-100 dark:text-stone-900"
           title="Run the profile in a loop, answering its tools. A profile with none stops on turn one."
         >
           Send
-        </button>
-        <button
-          type="button"
+        </Button>
+        <Button
+          size="md"
           disabled={busy || empty}
           onClick={onStream}
-          className="rounded-lg border border-stone-300 px-3 py-1.5 text-sm disabled:opacity-50 dark:border-stone-700"
           title="One turn, read chunk by chunk. Tool calls do not reassemble in a stream, so this one does not loop."
         >
           Stream
-        </button>
-        <label className="ml-auto flex items-center gap-1.5 text-stone-500 text-xs dark:text-stone-400">
+        </Button>
+        {/*
+          Only while there is something to stop. A permanently disabled Stop
+          would be a third button competing with the two that do something.
+        */}
+        {busy ? (
+          <Button size="md" onClick={onStop} title="Drop this request. What has arrived stays.">
+            Stop
+          </Button>
+        ) : null}
+        <label className="ml-auto flex items-center gap-1.5 text-muted text-xs">
           max turns
           <input
             type="number"
@@ -386,10 +443,29 @@ function Composer({
             max={50}
             value={maxIterations}
             onChange={(event) => onMaxIterations(Number(event.target.value))}
-            className="w-16 rounded border border-stone-300 bg-white px-2 py-1 text-sm dark:border-stone-700 dark:bg-stone-950"
+            className={`${INPUT_CLASSES} w-16`}
           />
         </label>
       </div>
+
+      <p className="text-faint text-xs">
+        <strong className="font-medium">Send</strong> runs the loop, answering the tools the model
+        asks for until it stops asking. <strong className="font-medium">Stream</strong> is one turn,
+        read as it arrives — tool calls do not reassemble in a stream, so it does not loop.
+      </p>
+
+      {/*
+        A run parameter, so it sits with the other one. It used to live in the
+        auth panel, which is the one thing on the page it is not about.
+      */}
+      {showProtocol ? (
+        <McpProtocol
+          revisions={revisions}
+          selected={mcpProtocol}
+          disabled={busy}
+          onSelect={onMcpProtocol}
+        />
+      ) : null}
     </div>
   )
 }

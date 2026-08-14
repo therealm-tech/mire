@@ -26,10 +26,7 @@ export function McpProtocol({
 }) {
   return (
     <div className="flex flex-wrap items-center gap-2">
-      <label
-        className="font-medium text-stone-600 text-xs dark:text-stone-400"
-        htmlFor="mcp-protocol"
-      >
+      <label className="font-medium text-muted text-xs" htmlFor="mcp-protocol">
         Protocol
       </label>
       <select
@@ -37,7 +34,7 @@ export function McpProtocol({
         value={selected ?? ''}
         disabled={disabled}
         onChange={(event) => onSelect(event.target.value === '' ? null : event.target.value)}
-        className="rounded border border-stone-300 bg-white px-2 py-1 font-mono text-xs disabled:opacity-50 dark:border-stone-700 dark:bg-stone-900"
+        className="rounded border border-line-strong bg-panel px-2 py-1 font-mono text-ink text-xs disabled:opacity-50"
       >
         <option value="">auto</option>
         {revisions.map((revision) => (
@@ -46,7 +43,7 @@ export function McpProtocol({
           </option>
         ))}
       </select>
-      <span className="text-[11px] text-stone-500 dark:text-stone-400">
+      <span className="text-[11px] text-faint">
         {selected === null
           ? 'Negotiated per server, unless mcp.yaml pins one.'
           : 'Stated outright: no probe, and a server that refuses it says so.'}

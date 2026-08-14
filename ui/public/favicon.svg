@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!--
+    The mark, thinned out for 16 px: no inner ring and no arrows, because at
+    that size they are three grey pixels rather than a detail. The sheet is
+    drawn in, so the icon reads on a tab of any colour, and both schemes are
+    carried here rather than in a second file.
+  -->
+  <style>
+    :root { --paper: #f6eddb; --ink: #0b1220 }
+    @media (prefers-color-scheme: dark) { :root { --paper: #0b1220; --ink: #f2e9d7 } }
+  </style>
+  <rect width="64" height="64" rx="12" fill="var(--paper)"/>
+  <g fill="none" stroke="var(--ink)" stroke-width="5">
+    <rect x="11.5" y="11.5" width="41" height="41"/>
+    <circle cx="32" cy="32" r="14"/>
+    <path d="M11 32h5M48 32h5M32 11v5M32 48v5"/>
+  </g>
+  <rect x="27" y="27" width="10" height="10" fill="var(--ink)"/>
+</svg>

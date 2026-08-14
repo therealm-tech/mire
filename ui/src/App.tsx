@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { z } from 'zod'
 import {
   type AgentRequest,
   ApiError,
@@ -19,14 +20,15 @@ import {
   startLogin,
   streamCall,
 } from './api'
+import { AuthPanel } from './components/AuthPanel'
 import { ChatPanel } from './components/ChatPanel'
 import { EmbeddingPanel } from './components/EmbeddingPanel'
 import { EmbeddingRequest } from './components/EmbeddingRequest'
-import { McpAuth } from './components/McpAuth'
-import { McpProtocol } from './components/McpProtocol'
-import { ModelAuth } from './components/ModelAuth'
+import { Failure } from './components/Failure'
+import { Mark } from './components/Mark'
+import { Preflight } from './components/Preflight'
 import { ProfileList } from './components/ProfileList'
-import { Panel, Spinner } from './components/primitives'
+import { Button, Panel, Spinner } from './components/primitives'
 import { TrafficPanel } from './components/TrafficPanel'
 import {
   activityItem,
@@ -39,7 +41,11 @@ import {
   verdictItem,
   wireMessages,
 } from './conversation'
+import { download, exportFilename, runExport } from './export'
 import { logger } from './logger'
+import { useMediaQuery } from './media'
+import { preflight } from './preflight'
+import { usePersisted } from './storage'
 
 const ANONYMOUS = 'anonymous'
 
@@ -66,6 +72,26 @@ function assistantTurn(outcome: CallOutcome): Message | null {
     ...(decoded.content ? { content: decoded.content } : {}),
     ...(toolCalls.length > 0 ? { toolCalls } : {}),
   }
+}
+
+/**
+ * Whether this is the run being called off, rather than a run that went wrong.
+ *
+ * `fetch` rejects with an `AbortError` when its signal fires, and surfacing that
+ * as a failure would be reporting the button somebody just pressed as a fault.
+ *
+ * The name is read off the object rather than the constructor: what arrives is a
+ * `DOMException`, which is only *sometimes* an `instanceof Error` — not in jsdom,
+ * and not across a realm boundary. A rejection that calls itself `AbortError` is
+ * one, whatever it was built from.
+ */
+function abandoned(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'name' in error &&
+    (error as { name: unknown }).name === 'AbortError'
+  )
 }
 
 /** How long to wait for someone to get through their identity provider. */
@@ -118,18 +144,28 @@ export function App() {
   const [mcp, setMcp] = useState<McpResponse | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
 
-  const [selectedProfile, setSelectedProfile] = useState<string | null>(null)
+  // Remembered across a reload, all of it small and none of it secret — see
+  // `storage.ts` for what is deliberately left out, starting with the token.
+  const [selectedProfile, setSelectedProfile] = usePersisted<string | null>(
+    'profile',
+    z.string().nullable(),
+    null,
+  )
   const [token, setToken] = useState('')
 
-  const [prompt, setPrompt] = useState('ping')
+  const [prompt, setPrompt] = usePersisted('prompt', z.string(), 'ping')
   const [timeline, setTimeline] = useState<ChatItem[]>([])
-  const [input, setInput] = useState('one\ntwo')
-  const [repeat, setRepeat] = useState(1)
-  const [includeVectors, setIncludeVectors] = useState(false)
+  const [input, setInput] = usePersisted('input', z.string(), 'one\ntwo')
+  const [repeat, setRepeat] = usePersisted('repeat', z.number(), 1)
+  const [includeVectors, setIncludeVectors] = usePersisted('vectors', z.boolean(), false)
 
-  const [maxIterations, setMaxIterations] = useState(6)
+  const [maxIterations, setMaxIterations] = usePersisted('maxTurns', z.number(), 6)
   // `null` is auto: every server settles its own revision the way it always did.
-  const [mcpProtocol, setMcpProtocol] = useState<string | null>(null)
+  const [mcpProtocol, setMcpProtocol] = usePersisted<string | null>(
+    'mcpProtocol',
+    z.string().nullable(),
+    null,
+  )
 
   const [signingIn, setSigningIn] = useState<string | null>(null)
   // Carries the provider, because two places can start a login now and an error
@@ -137,6 +173,20 @@ export function App() {
   const [loginError, setLoginError] = useState<{ provider: string; message: string } | null>(null)
 
   const [busy, setBusy] = useState(false)
+  // The auth detail, which is a thing you read once. Shut by default so the box
+  // you actually came to type in starts near the top of the page.
+  const [authOpen, setAuthOpen] = useState(false)
+  const [stopped, setStopped] = useState(false)
+  // Laptop or phone. The list is a column on one and a disclosure on the other,
+  // which is two different sets of controls rather than two stylesheets.
+  const wide = useMediaQuery('(min-width: 64rem)')
+  const [picking, setPicking] = useState(false)
+  // The exchange the transcript is pointing at, held only until the traffic has
+  // jumped to it: it is an instruction, not a selection.
+  const [revealed, setRevealed] = useState<string | null>(null)
+  // Stable, because the traffic reads it from an effect: a fresh arrow every
+  // render would be a fresh dependency every render.
+  const clearReveal = useCallback(() => setRevealed(null), [])
   const [live, setLive] = useState<string | null>(null)
   const [embedding, setEmbedding] = useState<Embedding | null>(null)
   const [exchanges, setExchanges] = useState<Exchange[]>([])
@@ -146,13 +196,63 @@ export function App() {
   // the transcript shows is exactly what the next request will carry.
   const messages = useMemo(() => wireMessages(timeline), [timeline])
 
+  /**
+   * The run in flight, so that it can be called off.
+   *
+   * A ref rather than state: nothing renders differently for holding it, and a
+   * re-render between starting a call and aborting it would be a re-render that
+   * loses the handle.
+   */
+  const running = useRef<AbortController | null>(null)
+
+  /** Opens a run, replacing whatever the last one left behind. */
+  const begin = useCallback((): AbortSignal => {
+    running.current?.abort()
+    const controller = new AbortController()
+    running.current = controller
+    setBusy(true)
+    setStopped(false)
+    setCallError(null)
+    return controller.signal
+  }, [])
+
+  /** Closes it, however it ended. */
+  const settle = useCallback(() => {
+    running.current = null
+    setBusy(false)
+  }, [])
+
+  /**
+   * Stop waiting.
+   *
+   * The request is dropped where it stands and whatever arrived stays on the
+   * page: a stream cut off after four tokens produced four tokens, and that is a
+   * finding rather than a mess to clear up. Nothing is sent to call off the work
+   * upstream — an endpoint that has been asked a question is going to answer it —
+   * so this is about this tab, and says only that.
+   */
+  const stop = useCallback(() => {
+    running.current?.abort()
+    running.current = null
+    setStopped(true)
+    setBusy(false)
+    logger.info('run.stopped', {})
+  }, [])
+
   useEffect(() => {
     Promise.all([fetchProfiles(), fetchAuth(), fetchMcp()])
       .then(([loadedProfiles, loadedAuth, loadedMcp]) => {
         setProfiles(loadedProfiles)
         setAuth(loadedAuth)
         setMcp(loadedMcp)
-        setSelectedProfile((current) => current ?? loadedProfiles.profiles[0]?.name ?? null)
+        // A remembered name is only good while the file behind it still is:
+        // profiles are a directory somebody edits, and coming back to a
+        // selection that no longer exists would be an empty page with no
+        // explanation for it.
+        setSelectedProfile((current) => {
+          const kept = loadedProfiles.profiles.some((entry) => entry.name === current)
+          return kept ? current : (loadedProfiles.profiles[0]?.name ?? null)
+        })
         logger.info('config.loaded', {
           profiles: loadedProfiles.profiles.length,
           providers: loadedAuth.providers.length,
@@ -164,7 +264,7 @@ export function App() {
         logger.error('config.load_failed', { message })
         setLoadError(message)
       })
-  }, [])
+  }, [setSelectedProfile])
 
   const profile = profiles?.profiles.find((candidate) => candidate.name === selectedProfile)
 
@@ -178,6 +278,25 @@ export function App() {
    * can disagree with the file.
    */
   const provider = auth?.providers.find((entry) => entry.name === (profile?.auth ?? ANONYMOUS))
+
+  /** What the next call would do, and what would stop it. */
+  const ready = useMemo(
+    () =>
+      profile && auth && mcp
+        ? preflight({ profile, provider, providers: auth.providers, servers: mcp.servers, token })
+        : null,
+    [profile, provider, auth, mcp, token],
+  )
+
+  // One kind of blocker is fixed by a field inside the panel rather than by a
+  // button on the bar, and telling somebody to paste a credential below while
+  // the box to paste it into is folded away would be a joke at their expense.
+  const blockedOnAField = ready?.blockers.some((blocker) => blocker.opensAuth) ?? false
+  useEffect(() => {
+    if (blockedOnAField) {
+      setAuthOpen(true)
+    }
+  }, [blockedOnAField])
 
   const signIn = useCallback((provider: string, prompt?: string) => {
     // Opened *before* awaiting anything: a popup opened after an await has lost
@@ -227,8 +346,7 @@ export function App() {
     if (!profile) {
       return
     }
-    setBusy(true)
-    setCallError(null)
+    const signal = begin()
     setLive(null)
     setEmbedding(null)
 
@@ -242,7 +360,7 @@ export function App() {
       body.token = token
     }
 
-    call(body)
+    call(body, signal)
       .then((result) => {
         setExchanges((current) => [...current, callExchange(result)])
         const decoded = result.response.decoded
@@ -254,14 +372,17 @@ export function App() {
         })
       })
       .catch((error: unknown) => {
+        if (abandoned(error)) {
+          return
+        }
         if (error instanceof ApiError) {
           setCallError(error)
         } else {
           logger.error('call.failed', { message: String(error) })
         }
       })
-      .finally(() => setBusy(false))
-  }, [profile, token, input, repeat, includeVectors])
+      .finally(settle)
+  }, [profile, token, input, repeat, includeVectors, begin, settle])
 
   /**
    * The turn about to be sent, appended to what came before.
@@ -281,14 +402,13 @@ export function App() {
     setTimeline((current) => [...current, messageItem(asked)])
     setPrompt('')
     return [...messages, asked]
-  }, [messages, prompt])
+  }, [messages, prompt, setPrompt])
 
   const stream = useCallback(() => {
     if (!profile) {
       return
     }
-    setBusy(true)
-    setCallError(null)
+    const signal = begin()
     setEmbedding(null)
     // Empty rather than null: the bubble appears immediately, so a stream that
     // never produces a token is visibly a stream that never produced a token.
@@ -300,46 +420,54 @@ export function App() {
       body.token = token
     }
 
-    streamCall(body, (event) => {
-      switch (event.event) {
-        case 'open':
-          logger.debug('stream.open', { status: event.status })
-          break
-        case 'delta':
-          setLive((current) => (current ?? '') + event.text)
-          break
-        case 'done': {
-          setExchanges((current) => [...current, callExchange(event)])
-          // The `done` event carries the same decoded answer the non-streaming
-          // endpoint returns, so the conversation is built from that rather than
-          // from the deltas: one source of truth, and it survives a stream whose
-          // last chunk arrived in a shape the delta reader skipped.
-          const answer = assistantTurn(event)
-          if (answer) {
-            setTimeline((current) => [...current, messageItem(answer)])
-            setLive(null)
+    streamCall(
+      body,
+      (event) => {
+        switch (event.event) {
+          case 'open':
+            logger.debug('stream.open', { status: event.status })
+            break
+          case 'delta':
+            setLive((current) => (current ?? '') + event.text)
+            break
+          case 'done': {
+            setExchanges((current) => [...current, callExchange(event)])
+            // The `done` event carries the same decoded answer the non-streaming
+            // endpoint returns, so the conversation is built from that rather
+            // than from the deltas: one source of truth, and it survives a
+            // stream whose last chunk arrived in a shape the delta reader
+            // skipped.
+            const answer = assistantTurn(event)
+            if (answer) {
+              setTimeline((current) => [...current, messageItem(answer)])
+              setLive(null)
+            }
+            logger.info('stream.done', {
+              status: event.response?.http.status ?? null,
+              ttftMs: event.response?.http.ttftMs ?? null,
+              chunks: event.response?.stream?.chunks ?? null,
+            })
+            break
           }
-          logger.info('stream.done', {
-            status: event.response?.http.status ?? null,
-            ttftMs: event.response?.http.ttftMs ?? null,
-            chunks: event.response?.stream?.chunks ?? null,
-          })
-          break
+          case 'failed':
+            setCallError(new ApiError(500, { code: event.code, message: event.message }))
+            break
         }
-        case 'failed':
-          setCallError(new ApiError(500, { code: event.code, message: event.message }))
-          break
-      }
-    })
+      },
+      signal,
+    )
       .catch((error: unknown) => {
+        if (abandoned(error)) {
+          return
+        }
         if (error instanceof ApiError) {
           setCallError(error)
         } else {
           logger.error('stream.failed', { message: String(error) })
         }
       })
-      .finally(() => setBusy(false))
-  }, [profile, token, ask])
+      .finally(settle)
+  }, [profile, token, ask, begin, settle])
 
   /**
    * A chat profile, run in a loop over the history it is handed. This is what
@@ -356,8 +484,7 @@ export function App() {
       if (!profile) {
         return
       }
-      setBusy(true)
-      setCallError(null)
+      const signal = begin()
       setLive(null)
       setEmbedding(null)
 
@@ -376,52 +503,64 @@ export function App() {
         body.mcpProtocol = mcpProtocol
       }
 
-      runAgent(body, (event) => {
-        switch (event.event) {
-          case 'setup':
-            // Before the first turn, because that is when it happened: a run
-            // that never got past `initialize` has no turn to hang the reason
-            // off.
-            setExchanges((current) => [...current, ...setupExchanges(event.mcp)])
-            break
-          case 'turn':
-            // Everything the turn put on a wire, in the order it left: the model
-            // call, then each tool that answered it.
-            setExchanges((current) => [...current, ...turnExchanges(event)])
-            if (event.tools.length > 0) {
-              setTimeline((current) => [...current, activityItem(event)])
+      runAgent(
+        body,
+        (event) => {
+          switch (event.event) {
+            case 'setup':
+              // Before the first turn, because that is when it happened: a run
+              // that never got past `initialize` has no turn to hang the reason
+              // off.
+              setExchanges((current) => [...current, ...setupExchanges(event.mcp)])
+              break
+            case 'turn': {
+              // Everything the turn put on a wire, in the order it left: the
+              // model call, then each tool that answered it.
+              const wires = turnExchanges(event)
+              setExchanges((current) => [...current, ...wires])
+              // The summary rows are built from those same exchanges rather
+              // than from the event again, which is what lets a row name the
+              // card it is a summary of.
+              if (event.tools.length > 0) {
+                setTimeline((current) => [...current, activityItem(event.index, wires)])
+              }
+              break
             }
-            break
-          case 'done': {
-            // Only the answer it finished on rejoins the history. The turns in
-            // between are tool calls and their results; they are in the traffic
-            // below, and replaying them without the results would break the next
-            // call.
-            const last = event.turns.at(-1)
-            const answer = last ? assistantTurn(last.call) : null
-            setTimeline((current) => [
-              ...current,
-              ...(answer ? [messageItem(answer)] : []),
-              verdictItem(event),
-            ])
-            logger.info('agent.done', { turns: event.turns.length, stop: event.stop.outcome })
-            break
+            case 'done': {
+              // Only the answer it finished on rejoins the history. The turns in
+              // between are tool calls and their results; they are in the traffic
+              // below, and replaying them without the results would break the next
+              // call.
+              const last = event.turns.at(-1)
+              const answer = last ? assistantTurn(last.call) : null
+              setTimeline((current) => [
+                ...current,
+                ...(answer ? [messageItem(answer)] : []),
+                verdictItem(event),
+              ])
+              logger.info('agent.done', { turns: event.turns.length, stop: event.stop.outcome })
+              break
+            }
+            case 'failed':
+              setCallError(new ApiError(500, { code: event.code, message: event.message }))
+              break
           }
-          case 'failed':
-            setCallError(new ApiError(500, { code: event.code, message: event.message }))
-            break
-        }
-      })
+        },
+        signal,
+      )
         .catch((error: unknown) => {
+          if (abandoned(error)) {
+            return
+          }
           if (error instanceof ApiError) {
             setCallError(error)
           } else {
             logger.error('agent.failed', { message: String(error) })
           }
         })
-        .finally(() => setBusy(false))
+        .finally(settle)
     },
-    [profile, token, maxIterations, mcpProtocol],
+    [profile, token, maxIterations, mcpProtocol, begin, settle],
   )
 
   const send = useCallback(() => runChat(ask()), [runChat, ask])
@@ -449,12 +588,33 @@ export function App() {
     [timeline, runChat],
   )
 
+  /**
+   * The run, as a file.
+   *
+   * Built here rather than asked of the server, because the server was never
+   * told: it answers one call at a time and keeps none of them, so this page is
+   * the only place the run exists as a whole.
+   */
+  const exportRun = useCallback(() => {
+    const at = new Date()
+    const payload = runExport({
+      profile: profile?.name ?? null,
+      endpoint: profile?.url ?? null,
+      identity: provider?.name ?? null,
+      messages,
+      exchanges,
+      at,
+    })
+    download(exportFilename(profile?.name ?? null, at), JSON.stringify(payload, null, 2))
+    logger.info('run.exported', { exchanges: exchanges.length, messages: messages.length })
+  }, [profile, provider, messages, exchanges])
+
   const reset = useCallback(() => {
     setTimeline([])
     setLive(null)
     setCallError(null)
     setPrompt('')
-  }, [])
+  }, [setPrompt])
 
   if (loadError) {
     return (
@@ -480,66 +640,13 @@ export function App() {
 
   return (
     <div className="mx-auto max-w-6xl space-y-4 p-3 sm:p-6">
-      <header className="flex flex-wrap items-baseline justify-between gap-2">
-        <h1 className="font-semibold text-xl">mire</h1>
-        <p className="text-stone-500 text-xs dark:text-stone-400">
-          A known signal in, a look at what comes out.
-        </p>
-      </header>
-
-      <Panel title="Auth">
-        <div className="space-y-3">
-          <section className="space-y-2">
-            <h3 className="font-semibold text-stone-600 text-xs dark:text-stone-400">
-              Model endpoint
-            </h3>
-            <ModelAuth
-              provider={provider}
-              profile={profile}
-              issues={auth.issues}
-              token={token}
-              signingIn={signingIn}
-              loginError={loginError}
-              onToken={setToken}
-              onLogin={signIn}
-              onLogout={signOut}
-            />
-          </section>
-
-          {/*
-            Its own section because it is its own question: the model's identity
-            comes from the profile, a server's from `mcp.yaml`, and one says
-            nothing about the other.
-          */}
-          {profile && profile.mcp.length > 0 ? (
-            <section className="space-y-2 border-stone-200 border-t pt-3 dark:border-stone-800">
-              <h3 className="font-semibold text-stone-600 text-xs dark:text-stone-400">
-                MCP servers
-              </h3>
-              {/*
-                Above the servers rather than on each one: the revision is a
-                property of the run, and one trace speaking two of them is a
-                result nobody could attribute.
-              */}
-              <McpProtocol
-                revisions={mcp.revisions}
-                selected={mcpProtocol}
-                disabled={busy}
-                onSelect={setMcpProtocol}
-              />
-              <McpAuth
-                names={profile.mcp}
-                servers={mcp.servers}
-                providers={auth.providers}
-                signingIn={signingIn}
-                loginError={loginError}
-                onLogin={signIn}
-                onLogout={signOut}
-              />
-            </section>
-          ) : null}
+      <header className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2.5">
+          <Mark />
+          <h1 className="font-semibold text-xl tracking-tight">mire</h1>
         </div>
-      </Panel>
+        <p className="text-faint text-xs">A known signal in, a look at what comes out.</p>
+      </header>
 
       {/*
         `min-w-0` on both columns: a grid child is `min-width: auto`, so a wide
@@ -548,23 +655,72 @@ export function App() {
       */}
       <div className="grid gap-4 lg:grid-cols-[18rem_1fr]">
         <div className="min-w-0 space-y-4">
-          <Panel title="Profiles">
-            <ProfileList
-              profiles={profiles.profiles}
-              issues={profiles.issues}
-              selected={selectedProfile}
-              onSelect={setSelectedProfile}
-            />
+          {/*
+            A column where there is room for one, and a fold-away where there is
+            not: on a phone this list was a screenful to scroll past before
+            reaching the thing it configures, every single time.
+          */}
+          <Panel
+            title="Profiles"
+            actions={
+              wide ? undefined : (
+                <Button aria-expanded={picking} onClick={() => setPicking((open) => !open)}>
+                  {picking ? 'Hide' : 'Change'}
+                </Button>
+              )
+            }
+          >
+            {wide || picking ? (
+              <ProfileList
+                profiles={profiles.profiles}
+                issues={profiles.issues}
+                selected={selectedProfile}
+                onSelect={(name) => {
+                  setSelectedProfile(name)
+                  setPicking(false)
+                }}
+              />
+            ) : (
+              <p className="truncate font-medium text-sm">{selectedProfile ?? 'None selected'}</p>
+            )}
           </Panel>
         </div>
 
         <div className="min-w-0 space-y-4">
           {profile === undefined ? (
             <Panel title="Request">
-              <p className="text-stone-500 text-sm dark:text-stone-400">
-                Select a profile to get started.
-              </p>
+              <p className="text-muted text-sm">Select a profile to get started.</p>
             </Panel>
+          ) : null}
+
+          {/*
+            Above the box, because it is about the call that box is going to
+            make. The auth detail hangs off it rather than off the page: it is
+            the answer to a question this bar has already summarised.
+          */}
+          {ready ? (
+            <Preflight
+              state={ready}
+              authOpen={authOpen}
+              signingIn={signingIn}
+              onSignIn={signIn}
+              onOpenAuth={() => setAuthOpen((open) => !open)}
+            />
+          ) : null}
+
+          {authOpen ? (
+            <AuthPanel
+              auth={auth}
+              mcp={mcp}
+              profile={profile}
+              provider={provider}
+              token={token}
+              signingIn={signingIn}
+              loginError={loginError}
+              onToken={setToken}
+              onLogin={signIn}
+              onLogout={signOut}
+            />
           ) : null}
 
           {chatting ? (
@@ -572,14 +728,21 @@ export function App() {
               items={timeline}
               live={live}
               busy={busy}
+              stopped={stopped}
               prompt={prompt}
               maxIterations={maxIterations}
               error={callError ? callError.body : null}
+              revisions={mcp.revisions}
+              mcpProtocol={profile.mcp.length > 0 ? mcpProtocol : null}
+              showProtocol={profile.mcp.length > 0}
               onPrompt={setPrompt}
               onMaxIterations={setMaxIterations}
+              onMcpProtocol={setMcpProtocol}
               onSend={send}
               onStream={stream}
+              onStop={stop}
               onRetry={retry}
+              onReveal={setRevealed}
               onReset={reset}
             />
           ) : null}
@@ -595,15 +758,13 @@ export function App() {
                 onRepeat={setRepeat}
                 onIncludeVectors={setIncludeVectors}
                 onSend={embed}
+                onStop={stop}
               />
 
               {busy ? <Spinner label="Calling…" /> : null}
+              {stopped && !busy ? <Spinner label="Stopped." /> : null}
 
-              {callError ? (
-                <Panel title="mire could not run this call">
-                  <p className="text-sm">{callError.body.message}</p>
-                </Panel>
-              ) : null}
+              {callError ? <Failure error={callError.body} /> : null}
 
               {embedding ? (
                 <Panel title="Embedding">
@@ -616,6 +777,9 @@ export function App() {
           <TrafficPanel
             exchanges={exchanges}
             expectUnauthorized={expectUnauthorized}
+            reveal={revealed}
+            onRevealed={clearReveal}
+            onExport={exportRun}
             onClear={() => setExchanges([])}
           />
         </div>

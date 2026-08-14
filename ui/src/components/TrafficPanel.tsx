@@ -1,14 +1,15 @@
-import { type ReactNode, useMemo, useState } from 'react'
+import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import type { DecodeTrace, StreamView, ToolInvocation } from '../api'
 import {
   type Exchange,
+  failed,
   type ModelExchange,
   type ProtocolExchange,
   statusTone,
   type ToolExchange,
 } from '../conversation'
 import { JsonTree } from './JsonTree'
-import { Badge, Code, CopyButton, Panel } from './primitives'
+import { Badge, Button, Code, CopyButton, Panel } from './primitives'
 
 /**
  * Everything that left this process, in the order it left.
@@ -23,17 +24,50 @@ import { Badge, Code, CopyButton, Panel } from './primitives'
  * "it worked on turn one and not on turn four" is a comparison, and a panel that
  * only ever shows the latest turn cannot make one.
  */
+/** Which half of the traffic you are reading. */
+type Lens = 'all' | 'model' | 'tool' | 'protocol'
+
+const LENSES: { key: Lens; label: string }[] = [
+  { key: 'all', label: 'All' },
+  { key: 'model', label: 'Model' },
+  { key: 'tool', label: 'Tools' },
+  { key: 'protocol', label: 'Protocol' },
+]
+
 export function TrafficPanel({
   exchanges,
   expectUnauthorized,
+  reveal,
+  onRevealed,
+  onExport,
   onClear,
 }: {
   exchanges: Exchange[]
   expectUnauthorized: boolean
+  /** An exchange the conversation above is pointing at, or `null`. */
+  reveal: string | null
+  onRevealed: () => void
+  onExport: () => void
   onClear: () => void
 }) {
   const [closed, setClosed] = useState<ReadonlySet<string>>(new Set())
-  const allClosed = exchanges.length > 0 && exchanges.every((exchange) => closed.has(exchange.id))
+  const [lens, setLens] = useState<Lens>('all')
+  const [onlyFailures, setOnlyFailures] = useState(false)
+  // The card just jumped to, marked for a moment so the eye can find where it
+  // landed. A scroll on its own moves the page and says nothing about why.
+  const [flash, setFlash] = useState<string | null>(null)
+
+  const failures = useMemo(
+    () => new Set(exchanges.filter((one) => failed(one, expectUnauthorized)).map((one) => one.id)),
+    [exchanges, expectUnauthorized],
+  )
+
+  const shown = exchanges.filter(
+    (exchange) =>
+      (lens === 'all' || exchange.kind === lens) && (!onlyFailures || failures.has(exchange.id)),
+  )
+
+  const allClosed = shown.length > 0 && shown.every((exchange) => closed.has(exchange.id))
 
   const toggle = (id: string) =>
     setClosed((current) => {
@@ -44,70 +78,155 @@ export function TrafficPanel({
       return next
     })
 
+  const fading = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  /**
+   * Bring the card the conversation is pointing at into view.
+   *
+   * The filters are dropped first, and deliberately: the alternative is a click
+   * that appears to do nothing because the card it meant is behind a filter the
+   * reader set four minutes ago and has stopped thinking about.
+   *
+   * Nothing is cancelled on the way out, which is not an oversight: the pointer
+   * is cleared as soon as it has been read, so a cleanup here would fire on the
+   * very next render — cancelling the scroll it had just scheduled and leaving
+   * the card marked for good. The one timer that outlives a reveal is replaced
+   * by the next one.
+   */
+  useEffect(() => {
+    if (reveal === null) {
+      return
+    }
+    setLens('all')
+    setOnlyFailures(false)
+    setClosed((current) => {
+      const next = new Set(current)
+      next.delete(reveal)
+      return next
+    })
+    setFlash(reveal)
+    onRevealed()
+
+    // Deferred: the card may have been behind a filter a moment ago, and an
+    // element React has not committed yet cannot be scrolled to.
+    setTimeout(() => {
+      document.getElementById(`exchange-${reveal}`)?.scrollIntoView({ block: 'center' })
+    }, 0)
+
+    if (fading.current) {
+      clearTimeout(fading.current)
+    }
+    fading.current = setTimeout(() => setFlash(null), 1600)
+  }, [reveal, onRevealed])
+
   return (
     <Panel
       title="Traffic"
       actions={
         <div className="flex items-center gap-2">
-          <span className="text-stone-500 text-xs dark:text-stone-400">
-            {exchanges.length} {exchanges.length === 1 ? 'exchange' : 'exchanges'}
+          <span className="text-faint text-xs">
+            {shown.length === exchanges.length
+              ? `${exchanges.length} ${exchanges.length === 1 ? 'exchange' : 'exchanges'}`
+              : `${shown.length} of ${exchanges.length}`}
           </span>
           {exchanges.length === 0 ? null : (
             <>
-              <button
-                type="button"
+              <Button
                 onClick={() =>
-                  setClosed(allClosed ? new Set() : new Set(exchanges.map((one) => one.id)))
+                  setClosed(allClosed ? new Set() : new Set(shown.map((one) => one.id)))
                 }
-                className="rounded border border-stone-300 px-2 py-1 text-xs hover:bg-stone-100 dark:border-stone-700 dark:hover:bg-stone-800"
               >
                 {allClosed ? 'Expand all' : 'Collapse all'}
-              </button>
-              <button
-                type="button"
-                onClick={onClear}
-                className="rounded border border-stone-300 px-2 py-1 text-xs hover:bg-stone-100 dark:border-stone-700 dark:hover:bg-stone-800"
-              >
-                Clear
-              </button>
+              </Button>
+              {/*
+                Next to the list it exports, and only once there is something to
+                export. What *Copy as curl* does for one request, this does for
+                the run: the order, the turns, and what the decoder made of each
+                answer — the half a single reproduced call loses.
+              */}
+              <Button onClick={onExport} title="Every exchange above, as a JSON file">
+                Export
+              </Button>
+              <Button onClick={onClear}>Clear</Button>
             </>
           )}
         </div>
       }
     >
       {exchanges.length === 0 ? (
-        <p className="text-stone-500 text-sm dark:text-stone-400">
+        <p className="text-muted text-sm">
           Nothing on the wire yet. Every model call and every tool invocation lands here, with the
           request that went out, what the decoder made of the answer, and the answer itself.
         </p>
       ) : (
-        <ol className="space-y-2">
-          {exchanges.map((exchange) =>
-            exchange.kind === 'model' ? (
-              <ModelCard
-                key={exchange.id}
-                exchange={exchange}
-                expectUnauthorized={expectUnauthorized}
-                open={!closed.has(exchange.id)}
-                onToggle={() => toggle(exchange.id)}
-              />
-            ) : exchange.kind === 'protocol' ? (
-              <ProtocolCard
-                key={exchange.id}
-                exchange={exchange}
-                open={!closed.has(exchange.id)}
-                onToggle={() => toggle(exchange.id)}
-              />
-            ) : (
-              <ToolCard
-                key={exchange.id}
-                exchange={exchange}
-                open={!closed.has(exchange.id)}
-                onToggle={() => toggle(exchange.id)}
-              />
-            ),
-          )}
-        </ol>
+        <>
+          {/*
+            A run puts five cards on the page and a session puts fifty, so the
+            list needs a way to be asked a narrower question than "what
+            happened". Failures first among them: it is the question this tool
+            exists to answer, and scrolling for a red badge is not an answer.
+          */}
+          <div className="mb-2 flex flex-wrap items-center gap-1.5 border-line border-b pb-2">
+            {LENSES.map((entry) => (
+              <Button
+                key={entry.key}
+                aria-pressed={lens === entry.key}
+                onClick={() => setLens(entry.key)}
+                className={lens === entry.key ? 'bg-well font-medium' : 'text-muted'}
+              >
+                {entry.label}
+              </Button>
+            ))}
+            <Button
+              aria-pressed={onlyFailures}
+              disabled={failures.size === 0}
+              onClick={() => setOnlyFailures((current) => !current)}
+              className={`ml-auto ${onlyFailures ? 'bg-bad-soft font-medium text-bad' : 'text-muted'}`}
+              title="A bad status, a stream that stopped without ending, a handshake that never landed, or a tool that failed its schema"
+            >
+              {failures.size === 0
+                ? 'Nothing failed'
+                : `${failures.size} failed${onlyFailures ? '' : ' — show'}`}
+            </Button>
+          </div>
+
+          {shown.length === 0 ? (
+            <p className="text-muted text-sm">
+              Nothing under this filter. {exchanges.length} exchanges are hidden by it.
+            </p>
+          ) : null}
+
+          <ol className="space-y-2">
+            {shown.map((exchange) =>
+              exchange.kind === 'model' ? (
+                <ModelCard
+                  key={exchange.id}
+                  exchange={exchange}
+                  expectUnauthorized={expectUnauthorized}
+                  open={!closed.has(exchange.id)}
+                  flash={flash === exchange.id}
+                  onToggle={() => toggle(exchange.id)}
+                />
+              ) : exchange.kind === 'protocol' ? (
+                <ProtocolCard
+                  key={exchange.id}
+                  exchange={exchange}
+                  open={!closed.has(exchange.id)}
+                  flash={flash === exchange.id}
+                  onToggle={() => toggle(exchange.id)}
+                />
+              ) : (
+                <ToolCard
+                  key={exchange.id}
+                  exchange={exchange}
+                  open={!closed.has(exchange.id)}
+                  flash={flash === exchange.id}
+                  onToggle={() => toggle(exchange.id)}
+                />
+              ),
+            )}
+          </ol>
+        </>
       )}
     </Panel>
   )
@@ -115,33 +234,44 @@ export function TrafficPanel({
 
 /** The frame every exchange shares: a summary line you can fold away. */
 function Card({
+  id,
   label,
   summary,
   badges,
   open,
+  flash,
   onToggle,
   children,
 }: {
+  /** The exchange's own id, so the conversation above can address this card. */
+  id: string
   label: string
   summary: string
   badges: ReactNode
   open: boolean
+  /** Just jumped to. */
+  flash: boolean
   onToggle: () => void
   children: ReactNode
 }) {
   return (
-    <li className="rounded border border-stone-200 dark:border-stone-800">
+    <li
+      id={`exchange-${id}`}
+      className={`rounded border transition-colors duration-500 ${
+        flash ? 'border-brand bg-well' : 'border-line'
+      }`}
+    >
       <button
         type="button"
         onClick={onToggle}
         aria-expanded={open}
-        className="flex w-full flex-wrap items-baseline gap-2 px-2 py-1.5 text-left"
+        className="flex w-full flex-wrap items-baseline gap-2 rounded px-2 py-1.5 text-left transition-colors hover:bg-well"
       >
         <span className="font-medium text-sm">
           {open ? '▾' : '▸'} {label}
         </span>
         {badges}
-        <span className="min-w-0 flex-1 truncate text-right font-mono text-[11px] text-stone-500 dark:text-stone-400">
+        <span className="min-w-0 flex-1 truncate text-right font-mono text-[11px] text-faint">
           {summary}
         </span>
       </button>
@@ -153,9 +283,7 @@ function Card({
         // block that is actually too wide. `overflow-x-auto` alone cannot fix
         // that — it only works once the box is allowed to be narrower than what
         // it contains.
-        <div className="min-w-0 space-y-3 border-stone-200 border-t p-2 dark:border-stone-800">
-          {children}
-        </div>
+        <div className="min-w-0 space-y-3 border-line border-t p-2">{children}</div>
       ) : null}
     </li>
   )
@@ -164,9 +292,7 @@ function Card({
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="min-w-0 space-y-1">
-      <h3 className="font-semibold text-stone-500 text-xs uppercase tracking-wide dark:text-stone-400">
-        {title}
-      </h3>
+      <h3 className="font-semibold text-faint text-xs uppercase tracking-wide">{title}</h3>
       {children}
     </section>
   )
@@ -226,11 +352,13 @@ function ModelCard({
   exchange,
   expectUnauthorized,
   open,
+  flash,
   onToggle,
 }: {
   exchange: ModelExchange
   expectUnauthorized: boolean
   open: boolean
+  flash: boolean
   onToggle: () => void
 }) {
   const { outcome } = exchange
@@ -240,14 +368,16 @@ function ModelCard({
 
   return (
     <Card
+      id={exchange.id}
       label={`${turnLabel(exchange.turn, 'Call')} · model`}
       summary={outcome.request.url}
       open={open}
+      flash={flash}
       onToggle={onToggle}
       badges={
         <>
           <Badge tone={tone}>{http.status}</Badge>
-          <span className="text-stone-500 text-xs dark:text-stone-400">{http.latencyMs} ms</span>
+          <span className="text-faint text-xs">{http.latencyMs} ms</span>
           {http.ttftMs === undefined ? null : (
             <Badge tone="neutral">first token {http.ttftMs} ms</Badge>
           )}
@@ -264,7 +394,7 @@ function ModelCard({
           </p>
           <CopyButton text={outcome.curl} label="Copy as curl" />
         </div>
-        <ul className="space-y-0.5 break-all font-mono text-[11px] text-stone-600 dark:text-stone-400">
+        <ul className="space-y-0.5 break-all font-mono text-[11px] text-muted">
           {Object.entries(outcome.request.headers).map(([name, value]) => (
             <li key={name}>
               {name}: {value}
@@ -280,7 +410,7 @@ function ModelCard({
 
       <Section title="Response">
         {protectedAsExpected ? (
-          <p className="text-emerald-700 text-sm dark:text-emerald-300">
+          <p className="text-good text-sm">
             The route is protected — that is a pass, not a failure.
           </p>
         ) : null}
@@ -288,7 +418,7 @@ function ModelCard({
         {decoded?.kind === 'completion' ? (
           <div className="space-y-2">
             {decoded.content === null ? (
-              <p className="text-stone-500 text-sm dark:text-stone-400">
+              <p className="text-muted text-sm">
                 No configured path resolved the content. The raw response is below, and the decode
                 trace says what was tried.
               </p>
@@ -323,9 +453,7 @@ function ModelCard({
         {outcome.response.jsonError ? (
           <div className="space-y-1">
             <Badge tone="warn">not JSON</Badge>
-            <p className="text-stone-500 text-xs dark:text-stone-400">
-              {outcome.response.jsonError}
-            </p>
+            <p className="text-muted text-xs">{outcome.response.jsonError}</p>
           </div>
         ) : null}
 
@@ -338,7 +466,7 @@ function ModelCard({
           reading the same JSON twice under two headings.
         */}
         <details open={http.status >= 400}>
-          <summary className="cursor-pointer text-stone-500 text-xs dark:text-stone-400">
+          <summary className="cursor-pointer text-faint text-xs hover:text-ink">
             Body received
             {outcome.response.elided ? ' (vectors elided)' : ''}
           </summary>
@@ -367,10 +495,12 @@ function ModelCard({
 function ProtocolCard({
   exchange,
   open,
+  flash,
   onToggle,
 }: {
   exchange: ProtocolExchange
   open: boolean
+  flash: boolean
   onToggle: () => void
 }) {
   const mcp = exchange.exchange
@@ -380,9 +510,11 @@ function ProtocolCard({
 
   return (
     <Card
+      id={exchange.id}
       label={`${turnLabel(exchange.turn, 'Setup')} · ${mcp.method}`}
       summary={`${mcp.server} · ${mcp.url}`}
       open={open}
+      flash={flash}
       onToggle={onToggle}
       badges={
         <>
@@ -392,7 +524,7 @@ function ProtocolCard({
           ) : (
             <Badge tone={tone}>{mcp.status}</Badge>
           )}
-          <span className="text-stone-500 text-xs dark:text-stone-400">{mcp.latencyMs} ms</span>
+          <span className="text-faint text-xs">{mcp.latencyMs} ms</span>
           <Badge tone="neutral">{mcp.revision}</Badge>
           {mcp.notification ? <Badge tone="neutral">notification</Badge> : null}
         </>
@@ -402,7 +534,7 @@ function ProtocolCard({
         <p className="break-all font-mono text-xs">
           <span className="font-semibold">POST</span> {mcp.url}
         </p>
-        <ul className="space-y-0.5 break-all font-mono text-[11px] text-stone-600 dark:text-stone-400">
+        <ul className="space-y-0.5 break-all font-mono text-[11px] text-muted">
           {Object.entries(mcp.headers).map(([name, value]) => (
             <li key={name}>
               {name}: {value}
@@ -416,18 +548,18 @@ function ProtocolCard({
         {mcp.error ? (
           <p className="flex flex-wrap items-baseline gap-2 text-xs">
             <Badge tone="bad">no answer</Badge>
-            <span className="text-stone-600 dark:text-stone-400">{mcp.error}</span>
+            <span className="text-muted">{mcp.error}</span>
           </p>
         ) : null}
 
         {mcp.streaming ? (
-          <p className="text-stone-500 text-xs dark:text-stone-400">
+          <p className="text-muted text-xs">
             Answered as an event stream; the last event carries the response.
           </p>
         ) : null}
 
         {mcp.notification && mcp.response.length === 0 ? (
-          <p className="text-stone-500 text-sm dark:text-stone-400">
+          <p className="text-muted text-sm">
             Nothing, which is what a notification is entitled to answer.
           </p>
         ) : null}
@@ -450,19 +582,23 @@ function ProtocolCard({
 function ToolCard({
   exchange,
   open,
+  flash,
   onToggle,
 }: {
   exchange: ToolExchange
   open: boolean
+  flash: boolean
   onToggle: () => void
 }) {
   const tool: ToolInvocation = exchange.invocation
 
   return (
     <Card
+      id={exchange.id}
       label={`${turnLabel(exchange.turn, 'Call')} · ${tool.call.name}`}
       summary={tool.source === 'mcp' ? (tool.server ?? 'mcp') : 'simulated'}
       open={open}
+      flash={flash}
       onToggle={onToggle}
       badges={
         <>
@@ -472,7 +608,7 @@ function ToolCard({
             <Badge tone="neutral">simulated, nothing executed</Badge>
           )}
           {tool.latencyMs === undefined ? null : (
-            <span className="text-stone-500 text-xs dark:text-stone-400">{tool.latencyMs} ms</span>
+            <span className="text-faint text-xs">{tool.latencyMs} ms</span>
           )}
           {tool.error ? <Badge tone="bad">tool failed</Badge> : null}
         </>
@@ -481,9 +617,7 @@ function ToolCard({
       <Section title="Request">
         <p className="font-mono text-xs">
           {tool.call.name}
-          {tool.call.id ? (
-            <span className="text-stone-500 dark:text-stone-400"> · id {tool.call.id}</span>
-          ) : null}
+          {tool.call.id ? <span className="text-faint"> · id {tool.call.id}</span> : null}
         </p>
         <Tree value={tool.call.arguments} />
       </Section>
@@ -494,7 +628,7 @@ function ToolCard({
             {tool.schemaErrors.map((error) => (
               <li key={error} className="flex flex-wrap items-baseline gap-2 text-xs">
                 <Badge tone="warn">schema</Badge>
-                <span className="text-stone-600 dark:text-stone-400">{error}</span>
+                <span className="text-muted">{error}</span>
               </li>
             ))}
           </ul>
@@ -509,16 +643,14 @@ function ToolCard({
         {tool.error ? (
           <p className="flex flex-wrap items-baseline gap-2 text-xs">
             <Badge tone="bad">tool failed</Badge>
-            <span className="text-stone-600 dark:text-stone-400">{tool.error}</span>
+            <span className="text-muted">{tool.error}</span>
           </p>
         ) : null}
 
         {tool.reportedError ? (
           <p className="flex flex-wrap items-baseline gap-2 text-xs">
             <Badge tone="warn">the tool reported a problem</Badge>
-            <span className="text-stone-600 dark:text-stone-400">
-              which the model is meant to react to
-            </span>
+            <span className="text-muted">which the model is meant to react to</span>
           </p>
         ) : null}
 
@@ -555,7 +687,7 @@ function StreamStats({ stream }: { stream: StreamView }) {
         {stream.unparsable > 0 ? <Badge tone="bad">{stream.unparsable} unreadable</Badge> : null}
       </div>
       {stream.terminated ? null : (
-        <p className="text-stone-500 text-xs dark:text-stone-400">
+        <p className="text-muted text-xs">
           No end sentinel and no stop reason: the connection went quiet rather than finishing.
           Whatever arrived is above.
         </p>
@@ -571,7 +703,7 @@ function DecodeTraceView({ trace }: { trace: DecodeTrace }) {
 
   if (matched.length === 0 && missed.length === 0 && trace.issues.length === 0) {
     return (
-      <p className="text-stone-500 text-xs dark:text-stone-400">
+      <p className="text-muted text-xs">
         Nothing was decoded — the profile declares no <span className="font-mono">decode:</span>{' '}
         block, or the call never got far enough to try.
       </p>
@@ -585,29 +717,27 @@ function DecodeTraceView({ trace }: { trace: DecodeTrace }) {
           <li key={field} className="flex flex-wrap items-baseline gap-2">
             <Badge tone="good">matched</Badge>
             <span className="font-medium">{field}</span>
-            <span className="font-mono text-stone-600 dark:text-stone-400">{path}</span>
+            <span className="font-mono text-muted">{path}</span>
           </li>
         ))}
         {missed.map(([field, paths]) => (
           <li key={field} className="flex flex-wrap items-baseline gap-2">
             <Badge tone="warn">missed</Badge>
             <span className="font-medium">{field}</span>
-            <span className="font-mono text-stone-600 dark:text-stone-400">
-              {paths.join('  ·  ')}
-            </span>
+            <span className="font-mono text-muted">{paths.join('  ·  ')}</span>
           </li>
         ))}
         {trace.issues.map((issue) => (
           <li key={`${issue.field}${issue.path}`} className="flex flex-wrap items-baseline gap-2">
             <Badge tone="bad">wrong shape</Badge>
             <span className="font-medium">{issue.field}</span>
-            <span className="font-mono text-stone-600 dark:text-stone-400">{issue.path}</span>
-            <span className="text-stone-500 dark:text-stone-400">{issue.message}</span>
+            <span className="font-mono text-muted">{issue.path}</span>
+            <span className="text-muted">{issue.message}</span>
           </li>
         ))}
       </ul>
       {missed.length > 0 ? (
-        <p className="text-stone-500 text-xs dark:text-stone-400">
+        <p className="text-muted text-xs">
           Pick the right path in the raw response, then add it to the profile's{' '}
           <span className="font-mono">decode:</span> block — it reloads without a restart.
         </p>

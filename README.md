@@ -1,3 +1,5 @@
+<img src="mire.png" alt="" width="120" align="right">
+
 # mire
 
 A test pattern for model endpoints. You put a known signal in, and you look at
@@ -130,20 +132,31 @@ listen address explicitly with `--host 0.0.0.0`. That is a choice, not a default
 Deliberately small. It does not edit anything — the profiles are yours and your
 editor's — and it holds no logic of its own: it shows what the API returns.
 
-- **Auth, above everything else, and read-only.** The identity is the profile's,
-  declared in its `auth:` next to the URL it authenticates against, so the panel
-  shows it rather than offering alternatives — what you read in the file is what
-  went out, and the UI never puts an `auth` of its own on the wire. To ask the
-  same endpoint as somebody else, copy the profile and change one line; that copy
-  is a thing you can name, keep and re-run, which a click never was. A profile
-  with no `auth:` says so and resolves to `anonymous`, where a `401` shows up
-  green with a note that the route is protected, because that is a pass. A
-  profile naming a credential whose `allowed_hosts` excludes its own URL is
-  flagged outright — every call it makes is refused before anything goes out.
+- **What the next call will do**, above the box you would make it from. Where it
+  goes, who it goes as, and which MCP servers it would set up first — the
+  "known signal in" half, said before it happens rather than reconstructed from a
+  trace afterwards. When something would refuse the call it says so there and
+  offers the way out: every blocker it lists is a refusal `mire` is already known
+  to make — an identity or a server no file declares, a credential outside its
+  `allowed_hosts` or missing from this tab, a browser session nobody has fetched.
+  It says nothing about whether the endpoint is up. That is the question you came
+  to ask, and answering it here would be answering it by guessing.
+- **Auth, folded away until it is wanted, and read-only.** The identity is the
+  profile's, declared in its `auth:` next to the URL it authenticates against,
+  so the panel shows it rather than offering alternatives — what you read in the
+  file is what went out, and the UI never puts an `auth` of its own on the wire.
+  To ask the same endpoint as somebody else, copy the profile and change one
+  line; that copy is a thing you can name, keep and re-run, which a click never
+  was. A profile with no `auth:` says so and resolves to `anonymous`, where a
+  `401` shows up green with a note that the route is protected, because that is
+  a pass. A profile naming a credential whose `allowed_hosts` excludes its own
+  URL is flagged outright — every call it makes is refused before anything goes
+  out.
 
-  What stays interactive is what no file could hold: a credential typed into this
-  tab, and a browser session somebody has to go and fetch — **Sign in**, then who
-  you are and a countdown.
+  It opens from **Auth** on the bar above, and by itself when the way out of a
+  blocker is a field inside it. What stays interactive is what no file could
+  hold: a credential typed into this tab, and a browser session somebody has to
+  go and fetch — **Sign in**, then who you are and a countdown.
 
   Under it, in its own section, the same panel lists the identities the profile's
   **MCP servers** will use. A separate question answered in a separate file: the
@@ -162,12 +175,22 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   [loop](#agent-mode) — always, because a profile with no tools stops on turn one
   and that is the same one turn a single call would have made. **Stream** is the
   exception: one turn, read chunk by chunk, the text appearing as it arrives.
+  While either is in flight, **Stop** drops the request where it stands and
+  whatever had arrived stays on the page — a stream cut off after four tokens
+  produced four tokens, and that is a finding rather than a mess to clear up.
+  Nothing is sent upstream to call the work off: an endpoint that has been asked
+  a question is going to answer it, so this is about your tab and says only that.
   More on what the transcript is [below](#having-a-conversation).
 - **Input**, for embedding profiles. One text per line, a run count, and a
   checkbox for the full vectors. There is no second turn of an embedding, so
   there is no conversation and no loop.
 - **Traffic**, under the conversation. Everything that left the process, in the
-  order it left, one card per exchange — see [below](#reading-the-traffic).
+  order it left, one card per exchange, filtered by kind or down to the failures
+  — and reachable from the transcript above, which names the card each of its
+  rows summarises. See [below](#reading-the-traffic).
+- **Profiles**, a column where there is room for one and a fold-away where there
+  is not — on a phone the list was a screenful to scroll past before reaching the
+  thing it configures.
 - **Embedding.** Count, width, encoding, the five checks, and per vector its
   norm, a sample of the first values and a distribution histogram. Never a wall
   of floats.
@@ -176,6 +199,16 @@ A credential typed into the UI lives in that tab and nowhere else: it is sent
 with the call and never stored, never logged, never echoed back. A credential
 `mire` fetched for you never reaches the tab at all — the browser sees a
 username, the granted scopes and a countdown.
+
+**The tab remembers a little, and never that.** Which profile you were on, what
+you had half typed, how many turns you allow, which revision you pinned — small
+settings whose loss is pure annoyance, kept in the browser's own storage. The
+credential is not among them, and neither is the conversation or the traffic: a
+session's bodies are unbounded, and the first oversized run would start throwing
+quota errors at a tool whose job is to be dependable while other things fail.
+Storage that is missing or full is a browser with no memory, never a page that
+fails to load. `mire` still holds nothing — this is the same side of the wire the
+conversation has always been on.
 
 ### Having a conversation
 
@@ -228,6 +261,33 @@ came back:
 | **Request** | Method, URL, masked headers, body, *Copy as curl* | The JSON-RPC that went out, with its headers and the revision it went out on | The arguments the model produced |
 | **Decode** | Which configured path matched which field, which missed, and everything that was tried | — | Whether those arguments match the schema the tool was declared with |
 | **Response** | Status, latency, decoded content and tool calls, stream counters, the body, the raw JSON as a tree | Status, latency, and the JSON-RPC that came back | What the tool handed back, and whether it reported a problem |
+
+**The transcript points at the cards.** A tool row in the conversation is a
+summary of one of these, so it takes you to it: the tool's name opens its own
+card, and the turn beside it opens the model call that asked for the tool. Any
+filter in the way is dropped on the way — a click that appeared to do nothing
+because the card was behind a filter set four minutes ago would be worse than no
+link at all.
+
+**And the list can be asked a narrower question.** A run puts five cards on the
+page and a session puts fifty, so **Model**, **Tools** and **Protocol** each show
+one kind, and the count beside them says how much is being hidden. **Failed**
+picks out the exchanges worth looking at first: a status the endpoint should not
+have answered, a stream that stopped rather than ended, a handshake that never
+landed, or a tool that failed, reported a problem, or was called with arguments
+its own schema refuses. A `401` you asked for anonymously is a pass, so it is not
+one of them. When nothing failed the button says so rather than offering an empty
+list.
+
+**And the whole run comes out as a file.** *Export* writes every exchange above
+to JSON, with the endpoint it was pointed at, the identity it went as, and the
+history as the next request would have carried it. What *Copy as curl* does for
+one request, this does for the run — the order, the turns, and what the decoder
+made of each answer, which a single reproduced call loses. Nothing is summarised
+on the way out: the person you send it to will want the part you did not think
+was interesting. It is built in the page, because the page is the only place the
+run exists as a whole — the server answers one call at a time and keeps none of
+them.
 
 **Every body is a foldable tree**, in both directions and on all three cards —
 the same view the raw response always had, because finding where an endpoint hid
@@ -716,8 +776,9 @@ bad entry, without taking the rest of the file down.
 #### Or choose it per run
 
 Editing a file, restarting and putting it back is a lot of ceremony for one
-question. The **Protocol** dropdown above the MCP servers in the UI asks it
-directly, and `POST /api/agent` takes the same thing:
+question. The **Protocol** dropdown in the composer — next to **max turns**,
+because both are parameters of the run — asks it directly, and `POST /api/agent`
+takes the same thing:
 
 ```json
 { "profile": "chat", "prompt": "weather in Paris?", "mcpProtocol": "2025-03-26" }
@@ -1082,6 +1143,17 @@ For UI work, `npm --prefix ui run dev` serves the front end with hot reload and
 proxies `/api` to a `mire` already running on its default port. In a debug build
 the assets are read from `ui/dist` at runtime, so `npm run build` alone is enough
 to see a change in the real binary.
+
+The palette is the logo and nothing else: near-black ink on a cream sheet,
+inverted in the dark. `ui/src/index.css` holds the whole of it — a brand scale
+sampled from the mark, and above it the roles a component actually names
+(`paper`, `panel`, `line`, `ink`, `muted`, `brand`, and the three verdict tones).
+The stock Tailwind palette is switched off there, so a stray `text-stone-400`
+compiles to no utility at all rather than to a colour that nearly fits. The roles
+follow `prefers-color-scheme` on their own, which is why no component carries a
+`dark:` variant. The mark itself is drawn in `ui/src/components/Mark.tsx` rather
+than shipped as an image: it inherits `currentColor`, so one tag serves both
+schemes.
 
 Outbound HTTP is covered by `wiremock` on every failure path that matters: an
 expected `401`, a timeout, a malformed body, an empty body, a decode path that
