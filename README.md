@@ -185,7 +185,9 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   checkbox for the full vectors. There is no second turn of an embedding, so
   there is no conversation and no loop.
 - **Traffic**, under the conversation. Everything that left the process, in the
-  order it left, one card per exchange — see [below](#reading-the-traffic).
+  order it left, one card per exchange, filtered by kind or down to the failures
+  — and reachable from the transcript above, which names the card each of its
+  rows summarises. See [below](#reading-the-traffic).
 - **Embedding.** Count, width, encoding, the five checks, and per vector its
   norm, a sample of the first values and a distribution histogram. Never a wall
   of floats.
@@ -246,6 +248,23 @@ came back:
 | **Request** | Method, URL, masked headers, body, *Copy as curl* | The JSON-RPC that went out, with its headers and the revision it went out on | The arguments the model produced |
 | **Decode** | Which configured path matched which field, which missed, and everything that was tried | — | Whether those arguments match the schema the tool was declared with |
 | **Response** | Status, latency, decoded content and tool calls, stream counters, the body, the raw JSON as a tree | Status, latency, and the JSON-RPC that came back | What the tool handed back, and whether it reported a problem |
+
+**The transcript points at the cards.** A tool row in the conversation is a
+summary of one of these, so it takes you to it: the tool's name opens its own
+card, and the turn beside it opens the model call that asked for the tool. Any
+filter in the way is dropped on the way — a click that appeared to do nothing
+because the card was behind a filter set four minutes ago would be worse than no
+link at all.
+
+**And the list can be asked a narrower question.** A run puts five cards on the
+page and a session puts fifty, so **Model**, **Tools** and **Protocol** each show
+one kind, and the count beside them says how much is being hidden. **Failed**
+picks out the exchanges worth looking at first: a status the endpoint should not
+have answered, a stream that stopped rather than ended, a handshake that never
+landed, or a tool that failed, reported a problem, or was called with arguments
+its own schema refuses. A `401` you asked for anonymously is a pass, so it is not
+one of them. When nothing failed the button says so rather than offering an empty
+list.
 
 **Every body is a foldable tree**, in both directions and on all three cards —
 the same view the raw response always had, because finding where an endpoint hid

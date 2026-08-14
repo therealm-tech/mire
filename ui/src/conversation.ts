@@ -49,7 +49,16 @@ export interface ActivityItem {
   kind: 'activity'
   id: string
   turn: number
-  tools: ToolInvocation[]
+  /** The model call that asked for these, so the row can point at its card. */
+  call: string | null
+  /**
+   * The exchanges themselves, not a copy of what is in them.
+   *
+   * A summary row and the card it summarises are the same event written twice,
+   * and holding the exchange is what lets the row say *which* card — the reason
+   * a run stops being two lists you read against each other by eye.
+   */
+  tools: ToolExchange[]
 }
 
 /** How a run ended, parked where it happened in the transcript. */
@@ -67,8 +76,14 @@ export function messageItem(message: Message): MessageItem {
   return { kind: 'message', id: nextId('message'), message }
 }
 
-export function activityItem(turn: Turn): ActivityItem {
-  return { kind: 'activity', id: nextId('activity'), turn: turn.index, tools: turn.tools }
+export function activityItem(turn: number, exchanges: Exchange[]): ActivityItem {
+  return {
+    kind: 'activity',
+    id: nextId('activity'),
+    turn,
+    call: exchanges.find((exchange) => exchange.kind === 'model')?.id ?? null,
+    tools: exchanges.filter((exchange) => exchange.kind === 'tool'),
+  }
 }
 
 export function verdictItem(trace: Trace): VerdictItem {
@@ -196,6 +211,36 @@ export function statusTone(status: number, expectUnauthorized: boolean): Tone {
   if (expectUnauthorized && (status === 401 || status === 403)) return 'good'
   if (status >= 400) return 'bad'
   return 'warn'
+}
+
+/**
+ * Whether this exchange is one of the ones you are looking for.
+ *
+ * The failures, in the four shapes they come in: a status the endpoint should
+ * not have answered, a stream that stopped rather than ended, a protocol round
+ * trip that never landed, and a tool that failed, reported a problem, or was
+ * called with arguments its own schema refuses. `expectUnauthorized` is carried
+ * through because a `401` asked anonymously is a pass, and a filter that hid the
+ * passes would hide it.
+ */
+export function failed(exchange: Exchange, expectUnauthorized: boolean): boolean {
+  switch (exchange.kind) {
+    case 'model': {
+      const { http, stream } = exchange.outcome.response
+      if (statusTone(http.status, expectUnauthorized) === 'bad') {
+        return true
+      }
+      return stream !== undefined && !stream.terminated
+    }
+    case 'protocol': {
+      const mcp = exchange.exchange
+      return mcp.error !== undefined || mcp.status === 0 || mcp.status >= 400
+    }
+    case 'tool': {
+      const tool = exchange.invocation
+      return tool.error !== undefined || tool.reportedError || tool.schemaErrors.length > 0
+    }
+  }
 }
 
 /** Every way the loop can end, in a sentence. */

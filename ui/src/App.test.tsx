@@ -803,7 +803,9 @@ function turnFixture() {
         server: 'weather',
         latencyMs: 42,
         reportedError: false,
-        schemaErrors: [],
+        // Typed, not inferred: an empty literal infers `never[]`, and a variant
+        // of this fixture with a schema error in it would not be assignable.
+        schemaErrors: [] as string[],
         result: '{"temp": 21}',
       },
     ],
@@ -855,12 +857,14 @@ function traceFixture() {
 }
 
 /** A run that calls one MCP tool, so every kind of exchange is on the wire. */
-function toolRunApi() {
+function toolRunApi(turns: ReturnType<typeof turnFixture>[] = [turnFixture()]) {
   const stream = [
     ...setupEvent(),
-    'event: turn',
-    `data: ${JSON.stringify({ event: 'turn', ...turnFixture() })}`,
-    '',
+    ...turns.flatMap((turn) => [
+      'event: turn',
+      `data: ${JSON.stringify({ event: 'turn', ...turn })}`,
+      '',
+    ]),
     'event: done',
     `data: ${JSON.stringify({ event: 'done', ...traceFixture() })}`,
     '',
@@ -1647,5 +1651,119 @@ describe('stopping a run', () => {
     // Being called off is not a failure, and must not be reported as one.
     expect(screen.queryByText(/could not run this call/)).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument()
+  })
+})
+
+describe('reading a run', () => {
+  it('takes a tool in the transcript to its card in the traffic', async () => {
+    const user = userEvent.setup()
+    vi.stubGlobal('fetch', toolRunApi())
+
+    render(<App />)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    const conversation = within(panel('Conversation'))
+    await waitFor(() => expect(conversation.getByText('get_weather')).toBeInTheDocument())
+
+    // A run puts five cards below; folding them all is how somebody reads a
+    // long session, and the point of the link is that it undoes that for the
+    // one card being pointed at.
+    await user.click(screen.getByRole('button', { name: 'Collapse all' }))
+    expect(within(card(/Turn 1 · get_weather/)).queryByText(/"temp"/)).not.toBeInTheDocument()
+
+    // The scroll is the half a fold cannot show: jsdom has no layout, so the
+    // stub is watched rather than the viewport.
+    const scrolled = vi.spyOn(Element.prototype, 'scrollIntoView')
+    await user.click(conversation.getByRole('button', { name: 'get_weather' }))
+
+    const tool = within(card(/Turn 1 · get_weather/))
+    expect(tool.getByText(/arguments match the schema/)).toBeInTheDocument()
+    await waitFor(() => expect(scrolled).toHaveBeenCalled())
+    scrolled.mockRestore()
+    // And the row's turn opens the model call that asked for it.
+    await user.click(conversation.getByRole('button', { name: 'turn 1' }))
+    expect(within(card(/Turn 1 · model/)).getByText('Request')).toBeInTheDocument()
+  })
+
+  it('narrows the traffic to one kind of exchange, and back', async () => {
+    const user = userEvent.setup()
+    vi.stubGlobal('fetch', toolRunApi())
+
+    render(<App />)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    const traffic = within(panel('Traffic'))
+    await waitFor(() =>
+      expect(traffic.getByRole('button', { name: /Turn 1 · model/ })).toBeInTheDocument(),
+    )
+    expect(traffic.getByText('5 exchanges')).toBeInTheDocument()
+
+    await user.click(traffic.getByRole('button', { name: 'Tools' }))
+    expect(traffic.getByText('1 of 5')).toBeInTheDocument()
+    expect(traffic.queryByRole('button', { name: /Turn 1 · model/ })).not.toBeInTheDocument()
+    expect(traffic.getByRole('button', { name: /Turn 1 · get_weather/ })).toBeInTheDocument()
+
+    await user.click(traffic.getByRole('button', { name: 'All' }))
+    expect(traffic.getByText('5 exchanges')).toBeInTheDocument()
+  })
+
+  it('says outright when nothing failed, rather than offering an empty filter', async () => {
+    const user = userEvent.setup()
+    vi.stubGlobal('fetch', toolRunApi())
+
+    render(<App />)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    const traffic = within(panel('Traffic'))
+    await waitFor(() => expect(traffic.getByText('5 exchanges')).toBeInTheDocument())
+    expect(traffic.getByRole('button', { name: 'Nothing failed' })).toBeDisabled()
+  })
+
+  it('picks out the exchange that failed, whichever kind it was', async () => {
+    const user = userEvent.setup()
+    // The same run, with the one thing wrong that no status code reports: the
+    // call went out, the server answered, and the arguments were never valid.
+    const turn = turnFixture()
+    const broken = {
+      ...turn,
+      tools: turn.tools.map((tool) => ({
+        ...tool,
+        schemaErrors: ['city: expected string, got number'],
+      })),
+    }
+    vi.stubGlobal('fetch', toolRunApi([broken]))
+
+    render(<App />)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    const traffic = within(panel('Traffic'))
+    await waitFor(() => expect(traffic.getByText('5 exchanges')).toBeInTheDocument())
+
+    // The model call answered 200 and the handshake landed; only the arguments
+    // were wrong, and that is what the filter is for.
+    await user.click(traffic.getByRole('button', { name: /1 failed/ }))
+    expect(traffic.getByText('1 of 5')).toBeInTheDocument()
+    expect(traffic.getByRole('button', { name: /Turn 1 · get_weather/ })).toBeInTheDocument()
+    expect(traffic.queryByRole('button', { name: /Turn 1 · model/ })).not.toBeInTheDocument()
+  })
+
+  it('drops a filter that would hide the card being pointed at', async () => {
+    const user = userEvent.setup()
+    vi.stubGlobal('fetch', toolRunApi())
+
+    render(<App />)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    const traffic = within(panel('Traffic'))
+    await waitFor(() => expect(traffic.getByText('5 exchanges')).toBeInTheDocument())
+
+    // Reading the protocol, then following a tool from the transcript: the
+    // click has to land rather than appear to do nothing.
+    await user.click(traffic.getByRole('button', { name: 'Protocol' }))
+    expect(traffic.queryByRole('button', { name: /Turn 1 · get_weather/ })).not.toBeInTheDocument()
+
+    await user.click(within(panel('Conversation')).getByRole('button', { name: 'get_weather' }))
+    expect(traffic.getByRole('button', { name: /Turn 1 · get_weather/ })).toBeInTheDocument()
+    expect(traffic.getByText('5 exchanges')).toBeInTheDocument()
   })
 })

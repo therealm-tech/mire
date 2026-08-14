@@ -1,7 +1,8 @@
-import { type ReactNode, useMemo, useState } from 'react'
+import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import type { DecodeTrace, StreamView, ToolInvocation } from '../api'
 import {
   type Exchange,
+  failed,
   type ModelExchange,
   type ProtocolExchange,
   statusTone,
@@ -23,17 +24,48 @@ import { Badge, Button, Code, CopyButton, Panel } from './primitives'
  * "it worked on turn one and not on turn four" is a comparison, and a panel that
  * only ever shows the latest turn cannot make one.
  */
+/** Which half of the traffic you are reading. */
+type Lens = 'all' | 'model' | 'tool' | 'protocol'
+
+const LENSES: { key: Lens; label: string }[] = [
+  { key: 'all', label: 'All' },
+  { key: 'model', label: 'Model' },
+  { key: 'tool', label: 'Tools' },
+  { key: 'protocol', label: 'Protocol' },
+]
+
 export function TrafficPanel({
   exchanges,
   expectUnauthorized,
+  reveal,
+  onRevealed,
   onClear,
 }: {
   exchanges: Exchange[]
   expectUnauthorized: boolean
+  /** An exchange the conversation above is pointing at, or `null`. */
+  reveal: string | null
+  onRevealed: () => void
   onClear: () => void
 }) {
   const [closed, setClosed] = useState<ReadonlySet<string>>(new Set())
-  const allClosed = exchanges.length > 0 && exchanges.every((exchange) => closed.has(exchange.id))
+  const [lens, setLens] = useState<Lens>('all')
+  const [onlyFailures, setOnlyFailures] = useState(false)
+  // The card just jumped to, marked for a moment so the eye can find where it
+  // landed. A scroll on its own moves the page and says nothing about why.
+  const [flash, setFlash] = useState<string | null>(null)
+
+  const failures = useMemo(
+    () => new Set(exchanges.filter((one) => failed(one, expectUnauthorized)).map((one) => one.id)),
+    [exchanges, expectUnauthorized],
+  )
+
+  const shown = exchanges.filter(
+    (exchange) =>
+      (lens === 'all' || exchange.kind === lens) && (!onlyFailures || failures.has(exchange.id)),
+  )
+
+  const allClosed = shown.length > 0 && shown.every((exchange) => closed.has(exchange.id))
 
   const toggle = (id: string) =>
     setClosed((current) => {
@@ -44,19 +76,62 @@ export function TrafficPanel({
       return next
     })
 
+  const fading = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  /**
+   * Bring the card the conversation is pointing at into view.
+   *
+   * The filters are dropped first, and deliberately: the alternative is a click
+   * that appears to do nothing because the card it meant is behind a filter the
+   * reader set four minutes ago and has stopped thinking about.
+   *
+   * Nothing is cancelled on the way out, which is not an oversight: the pointer
+   * is cleared as soon as it has been read, so a cleanup here would fire on the
+   * very next render — cancelling the scroll it had just scheduled and leaving
+   * the card marked for good. The one timer that outlives a reveal is replaced
+   * by the next one.
+   */
+  useEffect(() => {
+    if (reveal === null) {
+      return
+    }
+    setLens('all')
+    setOnlyFailures(false)
+    setClosed((current) => {
+      const next = new Set(current)
+      next.delete(reveal)
+      return next
+    })
+    setFlash(reveal)
+    onRevealed()
+
+    // Deferred: the card may have been behind a filter a moment ago, and an
+    // element React has not committed yet cannot be scrolled to.
+    setTimeout(() => {
+      document.getElementById(`exchange-${reveal}`)?.scrollIntoView({ block: 'center' })
+    }, 0)
+
+    if (fading.current) {
+      clearTimeout(fading.current)
+    }
+    fading.current = setTimeout(() => setFlash(null), 1600)
+  }, [reveal, onRevealed])
+
   return (
     <Panel
       title="Traffic"
       actions={
         <div className="flex items-center gap-2">
           <span className="text-faint text-xs">
-            {exchanges.length} {exchanges.length === 1 ? 'exchange' : 'exchanges'}
+            {shown.length === exchanges.length
+              ? `${exchanges.length} ${exchanges.length === 1 ? 'exchange' : 'exchanges'}`
+              : `${shown.length} of ${exchanges.length}`}
           </span>
           {exchanges.length === 0 ? null : (
             <>
               <Button
                 onClick={() =>
-                  setClosed(allClosed ? new Set() : new Set(exchanges.map((one) => one.id)))
+                  setClosed(allClosed ? new Set() : new Set(shown.map((one) => one.id)))
                 }
               >
                 {allClosed ? 'Expand all' : 'Collapse all'}
@@ -73,33 +148,74 @@ export function TrafficPanel({
           request that went out, what the decoder made of the answer, and the answer itself.
         </p>
       ) : (
-        <ol className="space-y-2">
-          {exchanges.map((exchange) =>
-            exchange.kind === 'model' ? (
-              <ModelCard
-                key={exchange.id}
-                exchange={exchange}
-                expectUnauthorized={expectUnauthorized}
-                open={!closed.has(exchange.id)}
-                onToggle={() => toggle(exchange.id)}
-              />
-            ) : exchange.kind === 'protocol' ? (
-              <ProtocolCard
-                key={exchange.id}
-                exchange={exchange}
-                open={!closed.has(exchange.id)}
-                onToggle={() => toggle(exchange.id)}
-              />
-            ) : (
-              <ToolCard
-                key={exchange.id}
-                exchange={exchange}
-                open={!closed.has(exchange.id)}
-                onToggle={() => toggle(exchange.id)}
-              />
-            ),
-          )}
-        </ol>
+        <>
+          {/*
+            A run puts five cards on the page and a session puts fifty, so the
+            list needs a way to be asked a narrower question than "what
+            happened". Failures first among them: it is the question this tool
+            exists to answer, and scrolling for a red badge is not an answer.
+          */}
+          <div className="mb-2 flex flex-wrap items-center gap-1.5 border-line border-b pb-2">
+            {LENSES.map((entry) => (
+              <Button
+                key={entry.key}
+                aria-pressed={lens === entry.key}
+                onClick={() => setLens(entry.key)}
+                className={lens === entry.key ? 'bg-well font-medium' : 'text-muted'}
+              >
+                {entry.label}
+              </Button>
+            ))}
+            <Button
+              aria-pressed={onlyFailures}
+              disabled={failures.size === 0}
+              onClick={() => setOnlyFailures((current) => !current)}
+              className={`ml-auto ${onlyFailures ? 'bg-bad-soft font-medium text-bad' : 'text-muted'}`}
+              title="A bad status, a stream that stopped without ending, a handshake that never landed, or a tool that failed its schema"
+            >
+              {failures.size === 0
+                ? 'Nothing failed'
+                : `${failures.size} failed${onlyFailures ? '' : ' — show'}`}
+            </Button>
+          </div>
+
+          {shown.length === 0 ? (
+            <p className="text-muted text-sm">
+              Nothing under this filter. {exchanges.length} exchanges are hidden by it.
+            </p>
+          ) : null}
+
+          <ol className="space-y-2">
+            {shown.map((exchange) =>
+              exchange.kind === 'model' ? (
+                <ModelCard
+                  key={exchange.id}
+                  exchange={exchange}
+                  expectUnauthorized={expectUnauthorized}
+                  open={!closed.has(exchange.id)}
+                  flash={flash === exchange.id}
+                  onToggle={() => toggle(exchange.id)}
+                />
+              ) : exchange.kind === 'protocol' ? (
+                <ProtocolCard
+                  key={exchange.id}
+                  exchange={exchange}
+                  open={!closed.has(exchange.id)}
+                  flash={flash === exchange.id}
+                  onToggle={() => toggle(exchange.id)}
+                />
+              ) : (
+                <ToolCard
+                  key={exchange.id}
+                  exchange={exchange}
+                  open={!closed.has(exchange.id)}
+                  flash={flash === exchange.id}
+                  onToggle={() => toggle(exchange.id)}
+                />
+              ),
+            )}
+          </ol>
+        </>
       )}
     </Panel>
   )
@@ -107,22 +223,33 @@ export function TrafficPanel({
 
 /** The frame every exchange shares: a summary line you can fold away. */
 function Card({
+  id,
   label,
   summary,
   badges,
   open,
+  flash,
   onToggle,
   children,
 }: {
+  /** The exchange's own id, so the conversation above can address this card. */
+  id: string
   label: string
   summary: string
   badges: ReactNode
   open: boolean
+  /** Just jumped to. */
+  flash: boolean
   onToggle: () => void
   children: ReactNode
 }) {
   return (
-    <li className="rounded border border-line">
+    <li
+      id={`exchange-${id}`}
+      className={`rounded border transition-colors duration-500 ${
+        flash ? 'border-brand bg-well' : 'border-line'
+      }`}
+    >
       <button
         type="button"
         onClick={onToggle}
@@ -214,11 +341,13 @@ function ModelCard({
   exchange,
   expectUnauthorized,
   open,
+  flash,
   onToggle,
 }: {
   exchange: ModelExchange
   expectUnauthorized: boolean
   open: boolean
+  flash: boolean
   onToggle: () => void
 }) {
   const { outcome } = exchange
@@ -228,9 +357,11 @@ function ModelCard({
 
   return (
     <Card
+      id={exchange.id}
       label={`${turnLabel(exchange.turn, 'Call')} · model`}
       summary={outcome.request.url}
       open={open}
+      flash={flash}
       onToggle={onToggle}
       badges={
         <>
@@ -353,10 +484,12 @@ function ModelCard({
 function ProtocolCard({
   exchange,
   open,
+  flash,
   onToggle,
 }: {
   exchange: ProtocolExchange
   open: boolean
+  flash: boolean
   onToggle: () => void
 }) {
   const mcp = exchange.exchange
@@ -366,9 +499,11 @@ function ProtocolCard({
 
   return (
     <Card
+      id={exchange.id}
       label={`${turnLabel(exchange.turn, 'Setup')} · ${mcp.method}`}
       summary={`${mcp.server} · ${mcp.url}`}
       open={open}
+      flash={flash}
       onToggle={onToggle}
       badges={
         <>
@@ -436,19 +571,23 @@ function ProtocolCard({
 function ToolCard({
   exchange,
   open,
+  flash,
   onToggle,
 }: {
   exchange: ToolExchange
   open: boolean
+  flash: boolean
   onToggle: () => void
 }) {
   const tool: ToolInvocation = exchange.invocation
 
   return (
     <Card
+      id={exchange.id}
       label={`${turnLabel(exchange.turn, 'Call')} · ${tool.call.name}`}
       summary={tool.source === 'mcp' ? (tool.server ?? 'mcp') : 'simulated'}
       open={open}
+      flash={flash}
       onToggle={onToggle}
       badges={
         <>

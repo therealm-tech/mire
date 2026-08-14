@@ -162,6 +162,12 @@ export function App() {
   // you actually came to type in starts near the top of the page.
   const [authOpen, setAuthOpen] = useState(false)
   const [stopped, setStopped] = useState(false)
+  // The exchange the transcript is pointing at, held only until the traffic has
+  // jumped to it: it is an instruction, not a selection.
+  const [revealed, setRevealed] = useState<string | null>(null)
+  // Stable, because the traffic reads it from an effect: a fresh arrow every
+  // render would be a fresh dependency every render.
+  const clearReveal = useCallback(() => setRevealed(null), [])
   const [live, setLive] = useState<string | null>(null)
   const [embedding, setEmbedding] = useState<Embedding | null>(null)
   const [exchanges, setExchanges] = useState<Exchange[]>([])
@@ -481,14 +487,19 @@ export function App() {
               // off.
               setExchanges((current) => [...current, ...setupExchanges(event.mcp)])
               break
-            case 'turn':
-              // Everything the turn put on a wire, in the order it left: the model
-              // call, then each tool that answered it.
-              setExchanges((current) => [...current, ...turnExchanges(event)])
+            case 'turn': {
+              // Everything the turn put on a wire, in the order it left: the
+              // model call, then each tool that answered it.
+              const wires = turnExchanges(event)
+              setExchanges((current) => [...current, ...wires])
+              // The summary rows are built from those same exchanges rather
+              // than from the event again, which is what lets a row name the
+              // card it is a summary of.
               if (event.tools.length > 0) {
-                setTimeline((current) => [...current, activityItem(event)])
+                setTimeline((current) => [...current, activityItem(event.index, wires)])
               }
               break
+            }
             case 'done': {
               // Only the answer it finished on rejoins the history. The turns in
               // between are tool calls and their results; they are in the traffic
@@ -663,6 +674,7 @@ export function App() {
               onStream={stream}
               onStop={stop}
               onRetry={retry}
+              onReveal={setRevealed}
               onReset={reset}
             />
           ) : null}
@@ -701,6 +713,8 @@ export function App() {
           <TrafficPanel
             exchanges={exchanges}
             expectUnauthorized={expectUnauthorized}
+            reveal={revealed}
+            onRevealed={clearReveal}
             onClear={() => setExchanges([])}
           />
         </div>

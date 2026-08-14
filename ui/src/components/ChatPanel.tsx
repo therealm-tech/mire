@@ -1,6 +1,12 @@
 import { useEffect, useRef } from 'react'
-import type { Message, ToolInvocation } from '../api'
-import { type ChatItem, describeStop, messagePositions, type VerdictItem } from '../conversation'
+import type { Message } from '../api'
+import {
+  type ActivityItem,
+  type ChatItem,
+  describeStop,
+  messagePositions,
+  type VerdictItem,
+} from '../conversation'
 import { McpProtocol } from './McpProtocol'
 import { Badge, Button, INPUT_CLASSES, Panel } from './primitives'
 
@@ -37,6 +43,7 @@ export function ChatPanel({
   onStream,
   onStop,
   onRetry,
+  onReveal,
   onReset,
 }: {
   items: ChatItem[]
@@ -59,6 +66,7 @@ export function ChatPanel({
   onStream: () => void
   onStop: () => void
   onRetry: (id: string) => void
+  onReveal: (exchange: string) => void
   onReset: () => void
 }) {
   const positions = messagePositions(items)
@@ -114,7 +122,7 @@ export function ChatPanel({
                 {...(item.id === last ? { onRetry: () => onRetry(item.id) } : {})}
               />
             ) : item.kind === 'activity' ? (
-              <Activity key={item.id} turn={item.turn} tools={item.tools} />
+              <Activity key={item.id} item={item} onReveal={onReveal} />
             ) : (
               <Verdict key={item.id} item={item} />
             ),
@@ -260,31 +268,56 @@ function Bubble({
  * What the run did on its own, between the question and the answer.
  *
  * A summary on purpose: the arguments, the schema check and the result in full
- * are one panel down, where every other thing that went on a wire also is.
+ * are one panel down, where every other thing that went on a wire also is — and
+ * every row here is a way of getting to its own card down there, because "which
+ * of these forty is the one I just read about" was a question the reader was
+ * being left to answer by eye.
  */
-function Activity({ turn, tools }: { turn: number; tools: ToolInvocation[] }) {
+function Activity({ item, onReveal }: { item: ActivityItem; onReveal: (id: string) => void }) {
   return (
     <ul className="space-y-1 border-line border-l-2 pl-3">
-      {tools.map((tool) => (
-        <li
-          key={`${tool.call.id ?? ''}${tool.call.name}`}
-          className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-xs"
-        >
-          <span className="text-faint">turn {turn}</span>
-          <span className="font-medium font-mono">{tool.call.name}</span>
-          {tool.source === 'mcp' ? (
-            <span className="text-muted">
-              called for real via <span className="font-mono">{tool.server}</span>
-              {tool.latencyMs === undefined ? null : ` · ${tool.latencyMs} ms`}
-            </span>
-          ) : (
-            <span className="text-muted">simulated, nothing executed</span>
-          )}
-          {tool.error ? <Badge tone="bad">tool failed</Badge> : null}
-          {tool.reportedError ? <Badge tone="warn">the tool reported a problem</Badge> : null}
-          {tool.schemaErrors.length > 0 ? <Badge tone="warn">schema</Badge> : null}
-        </li>
-      ))}
+      {item.tools.map((exchange) => {
+        const tool = exchange.invocation
+        return (
+          <li key={exchange.id} className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-xs">
+            {item.call === null ? (
+              <span className="text-faint">turn {item.turn}</span>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  if (item.call) {
+                    onReveal(item.call)
+                  }
+                }}
+                className="text-faint hover:text-ink hover:underline"
+                title="Show the model call that asked for this"
+              >
+                turn {item.turn}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => onReveal(exchange.id)}
+              className="font-medium font-mono hover:underline"
+              title="Show this call in the traffic below"
+            >
+              {tool.call.name}
+            </button>
+            {tool.source === 'mcp' ? (
+              <span className="text-muted">
+                called for real via <span className="font-mono">{tool.server}</span>
+                {tool.latencyMs === undefined ? null : ` · ${tool.latencyMs} ms`}
+              </span>
+            ) : (
+              <span className="text-muted">simulated, nothing executed</span>
+            )}
+            {tool.error ? <Badge tone="bad">tool failed</Badge> : null}
+            {tool.reportedError ? <Badge tone="warn">the tool reported a problem</Badge> : null}
+            {tool.schemaErrors.length > 0 ? <Badge tone="warn">schema</Badge> : null}
+          </li>
+        )
+      })}
     </ul>
   )
 }
@@ -425,6 +458,12 @@ function Composer({
           />
         </label>
       </div>
+
+      <p className="text-faint text-xs">
+        <strong className="font-medium">Send</strong> runs the loop, answering the tools the model
+        asks for until it stops asking. <strong className="font-medium">Stream</strong> is one turn,
+        read as it arrives — tool calls do not reassemble in a stream, so it does not loop.
+      </p>
 
       {/*
         A run parameter, so it sits with the other one. It used to live in the
