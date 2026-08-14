@@ -1,14 +1,15 @@
 @import 'tailwindcss';
 
 /*
- * The palette is the mark: near-black ink on a cream sheet, and nothing else.
+ * The palette is the mark: near-black ink on a white sheet, and nothing else.
  *
- * Two layers. Below, the brand scale — the two colours sampled from the logo and
- * the steps between them, fixed values that mean the same thing in any scheme.
- * Above it, the roles: `paper` is whatever the page is printed on, `ink` is
- * whatever it is printed with. In the dark the press runs inverted — cream ink
- * on a near-black sheet — and the roles swap while the utilities do not, which
- * is why not one component below carries a `dark:` variant.
+ * Two layers. Below, the brand scale — the ink sampled from the logo, the sheet
+ * it is printed on, and the steps between them, fixed values that mean the same
+ * thing in any scheme. Above it, the roles: `paper` is whatever the page is
+ * printed on, `ink` is whatever it is printed with. In the dark the press runs
+ * inverted — cream ink on a near-black sheet — and the roles swap while the
+ * utilities do not, which is why not one component below carries a `dark:`
+ * variant.
  */
 
 @theme {
@@ -23,12 +24,16 @@
   --color-*: initial;
   --color-transparent: transparent;
 
-  /* The sheet. `cream-100` is the logo's own background. */
-  --color-cream-50: #fdf9f0;
-  --color-cream-100: #f6eddb;
-  --color-cream-200: #efe6d2;
-  --color-cream-300: #e0d3b6;
-  --color-cream-400: #c3b18e;
+  /*
+   * The sheet: white, and the greys it recedes into. Tinted a few degrees
+   * towards the navy rather than left neutral, so a border and a well read as
+   * the ink thinned down instead of as a second, colder family.
+   */
+  --color-sheet-0: #ffffff;
+  --color-sheet-100: #f7f8fa;
+  --color-sheet-200: #eef1f5;
+  --color-sheet-300: #dfe3ea;
+  --color-sheet-400: #bcc4d0;
 
   /* The ink. `navy-950` is the solid block at the centre of the mark. */
   --color-navy-500: #616978;
@@ -73,27 +78,33 @@
 }
 
 :root {
-  --paper: var(--color-cream-100);
-  --panel: var(--color-cream-50);
-  --well: var(--color-cream-200);
-  --line: var(--color-cream-300);
-  --line-strong: var(--color-cream-400);
+  /*
+   * Page and panel are the same white: every panel already carries a border, so
+   * the card reads by its edge rather than by floating a shade above the page.
+   * `well` is the only tinted surface, which is what lets it double as the
+   * recess under code and the hover behind a row.
+   */
+  --paper: var(--color-sheet-0);
+  --panel: var(--color-sheet-0);
+  --well: var(--color-sheet-200);
+  --line: var(--color-sheet-300);
+  --line-strong: var(--color-sheet-400);
 
   --ink: var(--color-navy-950);
   --muted: var(--color-navy-600);
   --faint: var(--color-navy-500);
 
   --brand: var(--color-navy-950);
-  --on-brand: var(--color-cream-100);
+  --on-brand: var(--color-sheet-0);
 
   /* Verdicts, mixed towards the sheet so they read as tinted paper. */
   --good: #1f5c3d;
-  --good-soft: #dfebda;
+  --good-soft: #e3f0e4;
   --bad: #8c2b22;
-  --bad-soft: #f3ded6;
+  --bad-soft: #fbe3dd;
   --warn: #7a5210;
-  --warn-soft: #f1e3be;
-  --flag-soft: #e9ddc2;
+  --warn-soft: #fbedc9;
+  --flag-soft: #e5eaf1;
 
   --string: #1f5c3d;
   --number: #2c5578;

@@ -6,7 +6,7 @@
     carried here rather than in a second file.
   -->
   <style>
-    :root { --paper: #f6eddb; --ink: #0b1220 }
+    :root { --paper: #ffffff; --ink: #0b1220 }
     @media (prefers-color-scheme: dark) { :root { --paper: #0b1220; --ink: #f2e9d7 } }
   </style>
   <rect width="64" height="64" rx="12" fill="var(--paper)"/>
