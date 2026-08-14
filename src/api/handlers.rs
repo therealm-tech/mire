@@ -3,7 +3,7 @@
 use std::convert::Infallible;
 
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Multipart, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, Response};
@@ -16,8 +16,8 @@ use validator::Validate;
 use super::AppState;
 use super::dto::{
     AgentEvent, AgentRequest, AuthPath, AuthResponse, CallRequest, CallbackQuery, LoginRequest,
-    LoginResponse, LogoutResponse, McpPath, McpResponse, McpToolsResponse, ProfilePath,
-    ProfilesResponse, StreamEvent,
+    LoginResponse, LogoutResponse, McpPath, McpResponse, McpToolsResponse, McpUploadResponse,
+    ProfilePath, ProfilesResponse, StreamEvent,
 };
 use super::sse::EventStream;
 use super::ui;
@@ -26,7 +26,7 @@ use crate::auth::{Auth, AuthError, CALLBACK_PATH, OidcBrowserAuth};
 use crate::config::Config;
 use crate::error::ApiError;
 use crate::exec::{CallInput, CallOutcome};
-use crate::mcp::{McpCredentials, McpError, Revision};
+use crate::mcp::{McpCredentials, McpError, Revision, UploadFile};
 use crate::profile::{Profile, ProfileKind};
 
 /// Liveness probe. Deliberately outside the `OpenAPI` document.
@@ -457,6 +457,94 @@ pub async fn list_mcp_tools(
         protocol,
         tools,
     }))
+}
+
+/// Puts a file where a server's tools can read it back.
+///
+/// The one request in this API that carries bytes, and the reason it exists at
+/// all: MCP cannot move a file. Tool arguments are JSON in a model's context
+/// window, so a deck a model is meant to work on has to get there some other
+/// way — and what the model is handed afterwards is the identifier, fifteen
+/// characters it can quote into a tool call.
+///
+/// It goes out as whoever the *server* authenticates as, which is not a
+/// convenience. A backend that scopes files by principal answers `404` when the
+/// upload and the tool call arrive as two different people, and that is a silent
+/// failure with nothing to read.
+///
+/// # Errors
+///
+/// `404` for an unknown server, `422` when it declares no `upload:` or the
+/// request carries no file, `502` when the target refuses it or answers without
+/// an identifier.
+pub async fn upload_to_mcp(
+    State(state): State<AppState>,
+    Path(path): Path<McpPath>,
+    mut form: Multipart,
+) -> Result<Json<McpUploadResponse>, ApiError> {
+    let config = state.runner.config().snapshot();
+    let client = config
+        .mcp
+        .get(&path.name)
+        .ok_or_else(|| McpError::UnknownServer(path.name.clone()))?;
+
+    let files = read_upload(&mut form).await?;
+    let credentials = McpCredentials::resolve(&config.registry, client.server()).await?;
+    let uploaded = client.upload(files, &credentials).await?;
+
+    info!(
+        server = %path.name,
+        files = uploaded.files.len(),
+        requests = uploaded.exchanges.len(),
+        "files uploaded"
+    );
+    Ok(Json(McpUploadResponse {
+        server: path.name,
+        files: uploaded.files,
+        exchanges: uploaded.exchanges,
+    }))
+}
+
+/// Reads every file out of the form, in the order they arrive.
+///
+/// All of them, not the first: a composer holding three files sends three, and a
+/// handler that quietly kept one would hand back one identifier for a batch
+/// nobody could tell was truncated. How many *requests* that becomes is the
+/// target's business — a `multipart` one takes the batch whole.
+async fn read_upload(form: &mut Multipart) -> Result<Vec<UploadFile>, ApiError> {
+    let unreadable = |error: &dyn std::fmt::Display| {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unreadable_upload",
+            format!("the upload could not be read: {error}"),
+        )
+    };
+
+    let mut files = Vec::new();
+    while let Some(field) = form.next_field().await.map_err(|e| unreadable(&e))? {
+        // A field with no filename is a form value, not a file — a caller that
+        // sends both should not have its text field uploaded as a document.
+        let Some(filename) = field.file_name().map(str::to_owned) else {
+            continue;
+        };
+        let media_type = field.content_type().unwrap_or_default().to_owned();
+        let bytes = field.bytes().await.map_err(|e| unreadable(&e))?;
+
+        files.push(UploadFile {
+            filename,
+            media_type,
+            bytes: bytes.to_vec(),
+        });
+    }
+
+    if files.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "no_file",
+            "the request carried no file",
+        ));
+    }
+    Ok(files)
 }
 
 /// Runs one call.

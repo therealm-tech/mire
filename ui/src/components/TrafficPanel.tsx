@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import type { DecodeTrace, StreamView, ToolInvocation } from '../api'
+import { humanSize } from '../attachments'
 import {
   type Exchange,
   failed,
@@ -7,6 +8,7 @@ import {
   type ProtocolExchange,
   statusTone,
   type ToolExchange,
+  type UploadExchangeItem,
 } from '../conversation'
 import { JsonTree } from './JsonTree'
 import { Badge, Button, Code, CopyButton, Panel } from './primitives'
@@ -25,13 +27,14 @@ import { Badge, Button, Code, CopyButton, Panel } from './primitives'
  * only ever shows the latest turn cannot make one.
  */
 /** Which half of the traffic you are reading. */
-type Lens = 'all' | 'model' | 'tool' | 'protocol'
+type Lens = 'all' | 'model' | 'tool' | 'protocol' | 'upload'
 
 const LENSES: { key: Lens; label: string }[] = [
   { key: 'all', label: 'All' },
   { key: 'model', label: 'Model' },
   { key: 'tool', label: 'Tools' },
   { key: 'protocol', label: 'Protocol' },
+  { key: 'upload', label: 'Uploads' },
 ]
 
 export function TrafficPanel({
@@ -209,6 +212,14 @@ export function TrafficPanel({
                 />
               ) : exchange.kind === 'protocol' ? (
                 <ProtocolCard
+                  key={exchange.id}
+                  exchange={exchange}
+                  open={!closed.has(exchange.id)}
+                  flash={flash === exchange.id}
+                  onToggle={() => toggle(exchange.id)}
+                />
+              ) : exchange.kind === 'upload' ? (
+                <UploadCard
                   key={exchange.id}
                   exchange={exchange}
                   open={!closed.has(exchange.id)}
@@ -565,6 +576,119 @@ function ProtocolCard({
         ) : null}
 
         {mcp.response.length > 0 ? <Body text={mcp.response} /> : null}
+      </Section>
+    </Card>
+  )
+}
+
+/**
+ * One file put where a server's tools can read it.
+ *
+ * The request body is not shown, and that is the only place this panel does not
+ * show you what went out: the body *is* the file. Its name, type and size say
+ * everything a reader can use, and painting a megabyte of binary would bury the
+ * one line — the identifier in the answer — that the next turn depends on.
+ */
+function UploadCard({
+  exchange,
+  open,
+  flash,
+  onToggle,
+}: {
+  exchange: UploadExchangeItem
+  open: boolean
+  flash: boolean
+  onToggle: () => void
+}) {
+  const upload = exchange.exchange
+  // Not `statusTone`: an upload is never expected to be refused. Whoever the run
+  // is calling as, a file that did not land did not land.
+  const tone = upload.error || upload.status === 0 || upload.status >= 400 ? 'bad' : 'good'
+  const total = upload.files.reduce((sum, file) => sum + file.size, 0)
+  // One request is not one file: a target taking a form carries the batch.
+  const label =
+    upload.files.length === 1
+      ? (upload.files[0]?.filename ?? 'a file')
+      : `${upload.files.length} files`
+
+  return (
+    <Card
+      id={exchange.id}
+      label={`Upload · ${label}`}
+      summary={`${upload.server} · ${upload.url}`}
+      open={open}
+      flash={flash}
+      onToggle={onToggle}
+      badges={
+        <>
+          <Badge tone="neutral">upload</Badge>
+          {upload.error ? (
+            <Badge tone="bad">never answered</Badge>
+          ) : (
+            <Badge tone={tone}>{upload.status}</Badge>
+          )}
+          <span className="text-faint text-xs">{upload.latencyMs} ms</span>
+          <Badge tone="neutral">{humanSize(total)}</Badge>
+        </>
+      }
+    >
+      <Section title="Request">
+        <p className="break-all font-mono text-xs">
+          <span className="font-semibold">{upload.method}</span> {upload.url}
+        </p>
+        <ul className="space-y-0.5 break-all font-mono text-[11px] text-muted">
+          {Object.entries(upload.headers).map(([name, value]) => (
+            <li key={name}>
+              {name}: {value}
+            </li>
+          ))}
+        </ul>
+        {/*
+          The one place this panel does not paint the request body, because the
+          body *is* the files. Naming and measuring them is everything a reader
+          can use out of a few megabytes of binary.
+        */}
+        <ul className="space-y-0.5 text-muted text-xs">
+          {upload.files.map((file) => (
+            <li key={file.filename}>
+              <span className="font-mono">{file.filename}</span>
+              {file.mediaType.length > 0 ? ` · ${file.mediaType}` : null}
+              {' · '}
+              {humanSize(file.size)}
+              {file.fileId === undefined ? null : (
+                <>
+                  {' → '}
+                  <span className="font-mono">{file.fileId}</span>
+                </>
+              )}
+            </li>
+          ))}
+        </ul>
+      </Section>
+
+      <Section title="Response">
+        {upload.error ? (
+          <p className="flex flex-wrap items-baseline gap-2 text-xs">
+            <Badge tone="bad">no answer</Badge>
+            <span className="text-muted">{upload.error}</span>
+          </p>
+        ) : null}
+
+        <ul className="space-y-0.5 break-all font-mono text-[11px] text-muted">
+          {Object.entries(upload.responseHeaders).map(([name, value]) => (
+            <li key={name}>
+              {name}: {value}
+            </li>
+          ))}
+        </ul>
+
+        {upload.response.length > 0 ? (
+          <Body text={upload.response} />
+        ) : (
+          // Not a failure: a target answering `201` and a `Location` has said
+          // everything it had to say in the headers above.
+          <p className="text-muted text-sm">No body. Whatever it said is in the headers.</p>
+        )}
       </Section>
     </Card>
   )

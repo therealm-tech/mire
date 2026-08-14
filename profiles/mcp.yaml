@@ -48,6 +48,67 @@ servers:
   #   protocol_version: 2025-06-18
 
   # ---------------------------------------------------------------------------
+  # `upload:` — where a file goes so this server's tools can read it.
+  #
+  # MCP cannot carry a file. Tool arguments are JSON in a model's context
+  # window, and a few megabytes of base64 is not that, so a backend whose tools
+  # work on documents has an upload API next to its MCP endpoint. Naming it here
+  # is what puts *as an upload* in the composer's shape dropdown; without it,
+  # `mire` has nowhere to put a file for this server and does not pretend to.
+  #
+  # The bytes go out over the same HTTP client and with the same credential as
+  # the tool calls — which is the reason this hangs off the server rather than
+  # living in a block of its own. A backend that scopes files by principal
+  # answers `404` when the upload and the tool call arrive as two different
+  # people, and that is a silent failure with nothing to read. One `auth:`, one
+  # identity, no way for them to drift apart.
+  #
+  # A `url:` on its own covers the ordinary case: `POST`, a form field called
+  # `file`, and an identifier read from `id`, `fileId`, `file_id` or `data.id`.
+  #
+  # - name: files
+  #   url: https://files.internal/mcp
+  #   auth: keycloak-user
+  #   upload:
+  #     url: https://files.internal/v1/documents
+  #
+  # There is no one shape for "post a file, get an id", so every part of it is a
+  # question rather than an assumption:
+  #
+  #   method     post (default) or put
+  #   body       multipart (default) — a form, and one request carries the batch
+  #              raw — the file *is* the body, so a batch is one request each
+  #   field      multipart only: the field name each file rides under
+  #   id         JSONPaths to the identifiers, tried in order. A target
+  #              answering for several files at once needs a wildcard, because
+  #              the count has to match what went out
+  #   id_header  a response header carrying it instead, for the targets that
+  #              answer `201` and an empty body. Wins over `id`
+  #
+  # A pre-signed object store, which looks nothing like a form:
+  #
+  # - name: bucket
+  #   url: https://bucket.internal/mcp
+  #   upload:
+  #     url: https://bucket.internal/objects
+  #     method: put
+  #     body: raw
+  #     id_header: location
+  #
+  # An API that takes a batch and answers for all of it at once:
+  #
+  # - name: library
+  #   url: https://library.internal/mcp
+  #   upload:
+  #     url: https://library.internal/v1/documents
+  #     field: document
+  #     id:
+  #       - $.documents[*].ref
+  #
+  # Whatever the shape, the turn carries the identifiers — never the file — and
+  # the model quotes them into a tool call.
+
+  # ---------------------------------------------------------------------------
   # Every auth workflow, commented out. Delete what you do not need.
   #
   # Two placements, and they are orthogonal to the kind of credential:

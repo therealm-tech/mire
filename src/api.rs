@@ -18,6 +18,7 @@ use std::sync::Arc;
 use aide::axum::routing::{get_with, post_with};
 use aide::axum::{ApiRouter, IntoApiResponse};
 use aide::openapi::{Info, OpenApi};
+use axum::extract::DefaultBodyLimit;
 use axum::response::Redirect;
 use axum::routing::get;
 use axum::{Extension, Json, Router};
@@ -166,7 +167,47 @@ fn mcp_routes() -> ApiRouter<AppState> {
                     .response::<200, Json<dto::McpToolsResponse>>()
             }),
         )
+        .api_route(
+            "/api/mcp/{name}/upload",
+            post_with(handlers::upload_to_mcp, |op| {
+                op.summary("Put a file where a server's tools can read it")
+                    .description(
+                        "Sends one `multipart/form-data` file to the `upload:` target the \
+                         server declares, as whoever that server authenticates as, and \
+                         answers with the identifier its target gave back.\n\n\
+                         This exists because MCP cannot carry a file: tool arguments are \
+                         JSON in a model's context window, and a few megabytes of base64 \
+                         is not. The bytes therefore never go near the model — it is \
+                         handed the identifier, which is what its tools take.\n\n\
+                         A server with no `upload:` answers `422`: there is nowhere to \
+                         put one.",
+                    )
+                    .tag("mcp")
+                    .response::<200, Json<dto::McpUploadResponse>>()
+            }),
+        )
+        // Scoped to the upload route, which is the only one here that carries
+        // bytes. The default 2 MB is a limit on `axum`'s side of a file that the
+        // target's own limit is supposed to be the one deciding.
+        .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
 }
+
+/// How large a file may be on its way through.
+///
+/// Not a judgement about what an upload target accepts — that is its business,
+/// and refusing here would hide its own answer, which is the thing worth seeing.
+/// It is a ceiling on what this process will hold in memory for one request.
+const MAX_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
+
+/// How large a call body may be.
+///
+/// The conversation lives in the browser, so the whole history — attachments
+/// included — travels in the body of every request. `axum` defaults to 2 MB,
+/// which the first screenshot somebody attaches goes straight through, and a
+/// `413` with nothing else on it is a cryptic way to find that out. The UI caps
+/// what it will attach well below this; the ceiling is here so that cap is the
+/// one that speaks.
+const MAX_CALL_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 /// Actually driving an endpoint.
 fn call_routes() -> ApiRouter<AppState> {
@@ -233,6 +274,8 @@ fn call_routes() -> ApiRouter<AppState> {
                     .response::<200, String>()
             }),
         )
+        // Last, so it covers the three routes above and nothing else.
+        .layer(DefaultBodyLimit::max(MAX_CALL_BODY_BYTES))
 }
 
 /// Builds the whole application: API, `OpenAPI` document and Scalar reference.

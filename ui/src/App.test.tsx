@@ -34,6 +34,17 @@ const PROFILES = {
       source: '/tmp/guarded.yaml',
       hasDecode: true,
     },
+    // Names a server with somewhere to put a file, which is what makes *as an
+    // upload* a shape at all.
+    {
+      name: 'with-files',
+      kind: 'chat',
+      url: 'https://models.internal/v1/chat/completions',
+      auth: null,
+      mcp: ['library'],
+      source: '/tmp/with-files.yaml',
+      hasDecode: true,
+    },
     // Calls as a human, which is the one identity nobody can put in a file.
     {
       name: 'as-me',
@@ -105,6 +116,21 @@ const MCP = {
       tools: [],
       headers: ['x-api-key'],
       usesAuth: ['gateway'],
+    },
+    // The one with a file store behind it. MCP cannot carry a file, so this is
+    // how its tools ever get one.
+    {
+      name: 'library',
+      url: 'https://library.internal/mcp',
+      tools: [],
+      headers: [],
+      usesAuth: [],
+      upload: {
+        url: 'https://library.internal/v1/documents',
+        method: 'POST',
+        body: 'multipart',
+        id: ['$.id'],
+      },
     },
   ],
   // What this build speaks, newest first, as the server reports it. The UI keeps
@@ -2002,6 +2028,19 @@ describe('taking the run away with you', () => {
 })
 
 describe('on a narrow screen', () => {
+  // `Object.defineProperty` is not `vi.stubGlobal`, so the top-level
+  // `unstubAllGlobals` does not undo it. Left alone, every test written after
+  // this one renders on a phone and cannot find a profile list that is folded
+  // away — which is a very long way from the assertion that then fails.
+  const wide = window.matchMedia
+  afterEach(() => {
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      writable: true,
+      value: wide,
+    })
+  })
+
   it('folds the profile list away, and closes it again once one is picked', async () => {
     Object.defineProperty(window, 'matchMedia', {
       configurable: true,
@@ -2026,5 +2065,454 @@ describe('on a narrow screen', () => {
 
     expect(screen.queryByRole('button', { name: /guarded/ })).not.toBeInTheDocument()
     expect(within(panel('Profiles')).getByText('guarded')).toBeInTheDocument()
+  })
+})
+
+describe('attachments', () => {
+  /** The file picker behind the **Attach** label. */
+  async function picker(): Promise<HTMLInputElement> {
+    await screen.findByRole('button', { name: 'Send' })
+    const input = document.querySelector<HTMLInputElement>('input[type="file"]')
+    if (!input) {
+      throw new Error('the composer has no file picker')
+    }
+    return input
+  }
+
+  it('sends the question and the file as one turn', async () => {
+    const { fetchMock, sent } = recordingApi(['a config file.'])
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+    await loopMode(user)
+
+    const box = await screen.findByRole('textbox', { name: /message/i })
+    await user.clear(box)
+    await user.type(box, 'what is this?')
+    await user.upload(await picker(), new File(['a: 1'], 'values.yaml', { type: 'text/yaml' }))
+
+    await screen.findByText('values.yaml')
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(sent).toHaveLength(1))
+
+    expect(sent[0]?.messages).toEqual([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'what is this?' },
+          { type: 'text', text: '--- values.yaml ---\na: 1' },
+        ],
+      },
+    ])
+  })
+
+  /**
+   * The one thing an endpoint disagrees about, so the one thing the composer
+   * refuses to decide quietly. Same file, same turn, a different wire shape.
+   */
+  it('sends the same file differently when told to', async () => {
+    const { fetchMock, sent } = recordingApi(['pong'])
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+    await loopMode(user)
+
+    await user.upload(await picker(), new File(['a: 1'], 'values.yaml', { type: 'text/yaml' }))
+    await screen.findByText('values.yaml')
+
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: /how values\.yaml is sent/i }),
+      'file',
+    )
+    await user.clear(screen.getByRole('textbox', { name: /message/i }))
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(sent).toHaveLength(1))
+
+    expect(sent[0]?.messages).toEqual([
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'file',
+            file: { filename: 'values.yaml', file_data: 'data:text/yaml;base64,YTogMQ==' },
+          },
+        ],
+      },
+    ])
+  })
+
+  /** A file on its own is a question — "look at this" — so **Send** wakes up. */
+  it('lets a file be sent with nothing typed', async () => {
+    const { fetchMock } = recordingApi(['pong'])
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.clear(await screen.findByRole('textbox', { name: /message/i }))
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
+
+    await user.upload(await picker(), new File(['hello'], 'notes.txt', { type: 'text/plain' }))
+    await screen.findByText('notes.txt')
+
+    expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled()
+  })
+
+  it('drops the attachment once it is in the history, so it is not sent twice', async () => {
+    const { fetchMock, sent } = recordingApi(['pong', 'pong again'])
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+    await loopMode(user)
+
+    await user.clear(await screen.findByRole('textbox', { name: /message/i }))
+    await user.upload(await picker(), new File(['hello'], 'notes.txt', { type: 'text/plain' }))
+    await screen.findByText('notes.txt')
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(sent).toHaveLength(1))
+
+    // The chip is gone from the composer, and the file is where it belongs: in
+    // the turn that carried it, which travels again on its own.
+    expect(within(panel('Conversation')).queryByRole('combobox')).not.toBeInTheDocument()
+
+    const box = screen.getByRole('textbox', { name: /message/i })
+    await user.type(box, 'and now?')
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(sent).toHaveLength(2))
+
+    const messages = sent[1]?.messages as Array<{ role: string; content: unknown }>
+    expect(messages[0]?.content).toEqual([{ type: 'text', text: '--- notes.txt ---\nhello' }])
+    expect(messages[2]).toEqual({ role: 'user', content: 'and now?' })
+  })
+
+  it('takes a file off the turn again', async () => {
+    const { fetchMock } = recordingApi(['pong'])
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.upload(await picker(), new File(['hello'], 'notes.txt', { type: 'text/plain' }))
+    await screen.findByText('notes.txt')
+
+    await user.click(screen.getByRole('button', { name: /remove notes\.txt/i }))
+    expect(screen.queryByText('notes.txt')).not.toBeInTheDocument()
+  })
+
+  it('says which file it refused and why, and attaches the rest', async () => {
+    const { fetchMock } = recordingApi(['pong'])
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.upload(await picker(), [
+      new File(['x'.repeat(5 * 1024 * 1024)], 'huge.bin'),
+      new File(['hello'], 'notes.txt', { type: 'text/plain' }),
+    ])
+
+    expect(await screen.findByText(/was not attached/)).toHaveTextContent('huge.bin')
+    expect(screen.getByText('notes.txt')).toBeInTheDocument()
+  })
+})
+
+describe('uploads', () => {
+  /** The file picker behind the **Attach** label. */
+  async function picker(): Promise<HTMLInputElement> {
+    await screen.findByRole('button', { name: 'Send' })
+    const input = document.querySelector<HTMLInputElement>('input[type="file"]')
+    if (!input) {
+      throw new Error('the composer has no file picker')
+    }
+    return input
+  }
+
+  const PPTX = 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+
+  /**
+   * What `mire` answers when the upload target took the files.
+   *
+   * One exchange for however many files, because that is what a `multipart`
+   * target does with a batch — and the response shape has to be able to say so.
+   */
+  function accepted(files: { name: string; id: string; size: number }[]) {
+    const carried = files.map((file) => ({
+      filename: file.name,
+      mediaType: PPTX,
+      size: file.size,
+      fileId: file.id,
+    }))
+    return {
+      server: 'library',
+      files: carried,
+      exchanges: [
+        {
+          server: 'library',
+          url: 'https://files.internal/v1/documents',
+          method: 'POST',
+          files: carried,
+          headers: { authorization: '***' },
+          status: 200,
+          responseHeaders: { 'content-type': 'application/json' },
+          response: JSON.stringify({ documents: carried.map((file) => ({ id: file.fileId })) }),
+          latencyMs: 31,
+        },
+      ],
+    }
+  }
+
+  /** The API, plus an upload route that answers however the test wants. */
+  function uploadingApi(upload: () => Response) {
+    const sent: Array<Record<string, unknown>> = []
+    const uploaded: FormData[] = []
+
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('api/profiles')) return Promise.resolve(Response.json(PROFILES))
+      if (url.endsWith('api/auth')) return Promise.resolve(Response.json(AUTH))
+      if (url.endsWith('api/mcp')) return Promise.resolve(Response.json(MCP))
+      if (url.endsWith('api/mcp/library/upload')) {
+        uploaded.push(init?.body as FormData)
+        return Promise.resolve(upload())
+      }
+      if (url.endsWith('api/agent')) {
+        sent.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+        return Promise.resolve(sse(agentStream([answerTurn(200, 'done.')])))
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+
+    return { fetchMock, sent, uploaded }
+  }
+
+  /**
+   * A deck that is really binary.
+   *
+   * Bytes rather than a string, and the `0xff 0xfe` is doing work: a "pptx"
+   * whose content happens to decode as UTF-8 starts out as a text part, which
+   * is the composer behaving correctly and the test measuring nothing.
+   */
+  const binary = (name: string) =>
+    new File([new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0xff, 0xfe, 0x00, 0x01, 0x02])], name, {
+      type: PPTX,
+    })
+
+  const deck = () => binary('deck.pptx')
+
+  async function attachToLibrary(user: ReturnType<typeof userEvent.setup>) {
+    await loopMode(user)
+    await user.click(await screen.findByRole('button', { name: /with-files/ }))
+    await user.clear(await screen.findByRole('textbox', { name: /message/i }))
+    await user.upload(await picker(), deck())
+  }
+
+  /**
+   * The whole point, end to end: the bytes leave the browser once, out of band,
+   * and the turn carries an identifier instead. A model that cannot be handed a
+   * file can still be told which file to talk about.
+   */
+  it('uploads a binary and sends its identifier rather than its bytes', async () => {
+    const { fetchMock, sent, uploaded } = uploadingApi(() =>
+      Response.json(accepted([{ name: 'deck.pptx', id: 'doc_7f3a', size: 9 }])),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+    await attachToLibrary(user)
+
+    // The identifier appears on the chip as soon as it is known, because it is
+    // what the next turn is about to say.
+    // Scoped to the composer: the identifier is deliberately in two places
+    // now — on the chip, and on the upload card down in **Traffic**.
+    expect(await within(panel('Conversation')).findByText('doc_7f3a')).toBeInTheDocument()
+    expect(uploaded).toHaveLength(1)
+    expect(uploaded[0]?.get('file')).toBeInstanceOf(File)
+
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(sent).toHaveLength(1))
+
+    const messages = sent[0]?.messages as Array<{ role: string; content: unknown }>
+    const parts = messages[0]?.content as Array<{ type: string; text: string }>
+    expect(parts).toHaveLength(1)
+    expect(parts[0]?.type).toBe('text')
+    expect(parts[0]?.text).toContain('doc_7f3a')
+    // Not one byte of the deck reached the model's context window.
+    expect(parts[0]?.text).not.toContain('data:')
+    expect(JSON.stringify(sent[0])).not.toContain('base64')
+  })
+
+  /** A profile with no server that has a store cannot offer the shape. */
+  it('does not offer an upload where there is nowhere to put one', async () => {
+    const { fetchMock } = uploadingApi(() =>
+      Response.json(accepted([{ name: 'notes.txt', id: 'doc_a1', size: 5 }])),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.clear(await screen.findByRole('textbox', { name: /message/i }))
+    await user.upload(await picker(), new File(['hello'], 'notes.txt', { type: 'text/plain' }))
+    await screen.findByText('notes.txt')
+
+    const shapes = screen.getByRole('combobox', { name: /how notes\.txt is sent/i })
+    expect(within(shapes).queryByText('as an upload')).not.toBeInTheDocument()
+  })
+
+  /**
+   * Sending anyway would quote an identifier that resolves to nothing, and the
+   * run would fail three requests later with nothing on screen connecting the
+   * two. The composer is where that is still cheap to say.
+   */
+  it('will not send a turn whose file never arrived', async () => {
+    const { fetchMock, sent } = uploadingApi(() =>
+      Response.json(
+        {
+          code: 'mcp_upload_failed',
+          message: 'the upload target refused `deck.pptx` with 413',
+          detail: {
+            exchanges: [
+              {
+                server: 'library',
+                url: 'https://files.internal/v1/documents',
+                method: 'POST',
+                files: [{ filename: 'deck.pptx', mediaType: 'application/zip', size: 9 }],
+                headers: {},
+                status: 413,
+                responseHeaders: {},
+                response: 'too large',
+                latencyMs: 12,
+              },
+            ],
+          },
+        },
+        { status: 502 },
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+    await attachToLibrary(user)
+
+    expect(await screen.findByText('upload failed')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
+    expect(sent).toHaveLength(0)
+
+    // And the refusal is a wire like any other: the `413` is in the panel that
+    // promises every wire this process touched.
+    const traffic = panel('Traffic')
+    expect(within(traffic).getByText(/Upload · deck\.pptx/)).toBeInTheDocument()
+    expect(within(traffic).getByText('413')).toBeInTheDocument()
+  })
+
+  /** The shape is a decision, so it stays one — even for a file already read. */
+  it('uploads a file that was attached inline when it is switched over', async () => {
+    const { fetchMock, uploaded } = uploadingApi(() =>
+      Response.json(accepted([{ name: 'notes.txt', id: 'doc_9c', size: 5 }])),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: /with-files/ }))
+    await user.clear(await screen.findByRole('textbox', { name: /message/i }))
+    await user.upload(await picker(), new File(['hello'], 'notes.txt', { type: 'text/plain' }))
+    await screen.findByText('notes.txt')
+    // Text decoded cleanly, so it started inline and nothing has been sent.
+    expect(uploaded).toHaveLength(0)
+
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: /how notes\.txt is sent/i }),
+      'upload',
+    )
+    await waitFor(() => expect(uploaded).toHaveLength(1))
+    expect(await within(panel('Conversation')).findByText('doc_9c')).toBeInTheDocument()
+  })
+
+  /**
+   * Three files dropped at once, one upload, three identifiers on the turn.
+   *
+   * The composer does not decide how many requests that takes — a target reading
+   * a form takes the batch whole, and one that wants the bytes as a body takes
+   * them one at a time. Sending them one by one from here would make that choice
+   * on the target's behalf, and make it wrongly for half of them.
+   */
+  it('sends a whole batch in one upload and names each file on the turn', async () => {
+    const { fetchMock, sent, uploaded } = uploadingApi(() =>
+      Response.json(
+        accepted([
+          { name: 'one.pptx', id: 'doc_1', size: 9 },
+          { name: 'two.pptx', id: 'doc_2', size: 9 },
+          { name: 'three.pptx', id: 'doc_3', size: 9 },
+        ]),
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+    await loopMode(user)
+    await user.click(await screen.findByRole('button', { name: /with-files/ }))
+    await user.clear(await screen.findByRole('textbox', { name: /message/i }))
+    await user.upload(await picker(), [
+      binary('one.pptx'),
+      binary('two.pptx'),
+      binary('three.pptx'),
+    ])
+
+    expect(await within(panel('Conversation')).findByText('doc_3')).toBeInTheDocument()
+    // One request for the lot, carrying three parts under the same field.
+    expect(uploaded).toHaveLength(1)
+    expect(uploaded[0]?.getAll('file')).toHaveLength(3)
+
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(sent).toHaveLength(1))
+
+    const messages = sent[0]?.messages as Array<{ role: string; content: unknown }>
+    const parts = messages[0]?.content as Array<{ type: string; text: string }>
+    expect(parts).toHaveLength(3)
+    // Each file names its own identifier: a model asked about "the second deck"
+    // has no other way to tell three attachments apart.
+    expect(parts[0]?.text).toContain('one.pptx')
+    expect(parts[0]?.text).toContain('doc_1')
+    expect(parts[2]?.text).toContain('three.pptx')
+    expect(parts[2]?.text).toContain('doc_3')
+  })
+
+  /**
+   * A batch where the target answered for two of the three is not a success with
+   * a gap in it: the file that got nothing says so, and holds the turn.
+   */
+  it('holds the turn when the target names fewer files than went out', async () => {
+    const { fetchMock, sent } = uploadingApi(() =>
+      Response.json(
+        accepted([
+          { name: 'one.pptx', id: 'doc_1', size: 9 },
+          { name: 'two.pptx', id: 'doc_2', size: 9 },
+        ]),
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+    await loopMode(user)
+    await user.click(await screen.findByRole('button', { name: /with-files/ }))
+    await user.clear(await screen.findByRole('textbox', { name: /message/i }))
+    await user.upload(await picker(), [
+      binary('one.pptx'),
+      binary('two.pptx'),
+      binary('three.pptx'),
+    ])
+
+    expect(await screen.findByText('upload failed')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
+    expect(sent).toHaveLength(0)
   })
 })

@@ -1,5 +1,16 @@
-import { useEffect, useRef } from 'react'
-import type { Message } from '../api'
+import { useEffect, useId, useRef, useState } from 'react'
+import type { Content, ContentPart, Message } from '../api'
+import {
+  type Attachment,
+  blocked,
+  humanSize,
+  MAX_FILE_BYTES,
+  MAX_UPLOAD_BYTES,
+  type Rejection,
+  SHAPE_LABELS,
+  type Shape,
+  shapesFor,
+} from '../attachments'
 import {
   type ActivityItem,
   type ChatItem,
@@ -33,6 +44,9 @@ export function ChatPanel({
   busy,
   stopped,
   prompt,
+  attachments,
+  rejections,
+  uploadTo,
   maxIterations,
   streaming,
   error,
@@ -40,6 +54,9 @@ export function ChatPanel({
   mcpProtocol,
   showProtocol,
   onPrompt,
+  onAttach,
+  onShape,
+  onDetach,
   onMaxIterations,
   onStreaming,
   onMcpProtocol,
@@ -56,6 +73,15 @@ export function ChatPanel({
   /** The last run was called off rather than finished. */
   stopped: boolean
   prompt: string
+  /** Files the next turn will carry, already read. */
+  attachments: Attachment[]
+  /** Files that were offered and refused, with the reason. */
+  rejections: Rejection[]
+  /**
+   * The server a file would be uploaded to, or `null` when this profile has
+   * none — which is what decides whether *as an upload* is offered at all.
+   */
+  uploadTo: string | null
   maxIterations: number
   /** How **Send** sends: chunk by chunk on one turn, or the loop on all of them. */
   streaming: boolean
@@ -65,6 +91,9 @@ export function ChatPanel({
   /** Only a profile that names a server has a revision to speak. */
   showProtocol: boolean
   onPrompt: (value: string) => void
+  onAttach: (files: File[]) => void
+  onShape: (id: string, shape: Shape) => void
+  onDetach: (id: string) => void
   onMaxIterations: (value: number) => void
   onStreaming: (value: boolean) => void
   onMcpProtocol: (revision: string | null) => void
@@ -154,6 +183,9 @@ export function ChatPanel({
 
         <Composer
           prompt={prompt}
+          attachments={attachments}
+          rejections={rejections}
+          uploadTo={uploadTo}
           turns={turns}
           busy={busy}
           maxIterations={maxIterations}
@@ -162,6 +194,9 @@ export function ChatPanel({
           mcpProtocol={mcpProtocol}
           showProtocol={showProtocol}
           onPrompt={onPrompt}
+          onAttach={onAttach}
+          onShape={onShape}
+          onDetach={onDetach}
           onMaxIterations={onMaxIterations}
           onStreaming={onStreaming}
           onMcpProtocol={onMcpProtocol}
@@ -239,21 +274,7 @@ function Bubble({
               : 'border border-line bg-paper'
         }`}
       >
-        {message.content ? (
-          // Only the model's half is prose that was written in markdown. A
-          // question was typed by hand, a tool result is JSON, and a system
-          // prompt is an instruction — rendering any of those would be showing
-          // someone something other than what is on the wire.
-          message.role === 'assistant' ? (
-            <Markdown>{message.content}</Markdown>
-          ) : (
-            // `break-words`: a URL or a base64 blob with no space in it is not a
-            // reason for the page to grow sideways.
-            <p className="whitespace-pre-wrap break-words">{message.content}</p>
-          )
-        ) : (
-          <p className="text-faint italic">no text content</p>
-        )}
+        <Said content={message.content} role={message.role} />
 
         {message.toolCalls && message.toolCalls.length > 0 ? (
           <div className="mt-2 space-y-1">
@@ -275,6 +296,78 @@ function Bubble({
         ) : null}
       </div>
     </div>
+  )
+}
+
+/**
+ * What a turn actually says, whether or not it carries files.
+ *
+ * A turn with an image in it is drawn with the image in it. That is not a
+ * flourish: the transcript is the `messages` array laid out, and the one
+ * question you have after attaching a screenshot is whether *that* screenshot
+ * is what went out. The base64 behind it is in **Traffic**, where every other
+ * byte on the wire also is.
+ */
+function Said({ content, role }: { content: Content | undefined; role: Message['role'] }) {
+  // Only the model's half is prose that was written in markdown. A question was
+  // typed by hand, a tool result is JSON, and a system prompt is an instruction
+  // — rendering any of those would be showing someone something other than what
+  // is on the wire.
+  const prose = role === 'assistant'
+
+  if (content === undefined || content === '') {
+    return <p className="text-faint italic">no text content</p>
+  }
+  if (typeof content === 'string') {
+    return <Words prose={prose}>{content}</Words>
+  }
+  return (
+    <div className="space-y-2">
+      {content.map((part, index) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: position is the identity of a part within a turn
+        <Piece key={index} part={part} prose={prose} />
+      ))}
+    </div>
+  )
+}
+
+/**
+ * Words in a turn, read as markdown only where markdown is what they are.
+ *
+ * Carried down into the parts rather than decided once above them, because a
+ * turn that came back from an endpoint may be several parts and still be the
+ * model's own prose. The rule is about *who said it*, not about how many pieces
+ * it arrived in.
+ */
+function Words({ prose, children }: { prose: boolean; children: string }) {
+  return prose ? (
+    <Markdown>{children}</Markdown>
+  ) : (
+    // `break-words`: a URL or a base64 blob with no space in it is not a
+    // reason for the page to grow sideways.
+    <p className="whitespace-pre-wrap break-words">{children}</p>
+  )
+}
+
+/** One part of a multipart turn. */
+function Piece({ part, prose }: { part: ContentPart; prose: boolean }) {
+  if (part.type === 'text') {
+    return <Words prose={prose}>{part.text}</Words>
+  }
+  if (part.type === 'image_url') {
+    return (
+      <img
+        src={part.image_url.url}
+        alt="attached to this turn"
+        className="max-h-48 rounded border border-line-strong"
+      />
+    )
+  }
+  return (
+    <p className="flex items-baseline gap-1.5 text-xs opacity-80">
+      <span aria-hidden="true">📎</span>
+      <span className="font-mono">{part.file.filename ?? part.file.file_id ?? 'a file'}</span>
+    </p>
   )
 }
 
@@ -376,6 +469,9 @@ function Writing({ text, done }: { text: string; done: boolean }) {
 
 function Composer({
   prompt,
+  attachments,
+  rejections,
+  uploadTo,
   turns,
   busy,
   maxIterations,
@@ -384,6 +480,9 @@ function Composer({
   mcpProtocol,
   showProtocol,
   onPrompt,
+  onAttach,
+  onShape,
+  onDetach,
   onMaxIterations,
   onStreaming,
   onMcpProtocol,
@@ -391,6 +490,9 @@ function Composer({
   onStop,
 }: {
   prompt: string
+  attachments: Attachment[]
+  rejections: Rejection[]
+  uploadTo: string | null
   turns: number
   busy: boolean
   maxIterations: number
@@ -399,6 +501,9 @@ function Composer({
   mcpProtocol: string | null
   showProtocol: boolean
   onPrompt: (value: string) => void
+  onAttach: (files: File[]) => void
+  onShape: (id: string, shape: Shape) => void
+  onDetach: (id: string) => void
   onMaxIterations: (value: number) => void
   onStreaming: (value: boolean) => void
   onMcpProtocol: (revision: string | null) => void
@@ -407,19 +512,76 @@ function Composer({
 }) {
   // An empty box is nothing to say, not an instruction to send the history
   // again — that is what **Retry** is for, and it says which turn it repeats.
-  const empty = prompt.trim().length === 0
+  // A file on its own *is* something to say: "look at this" is a question.
+  const empty = prompt.trim().length === 0 && attachments.length === 0
+  // A turn holding a file that never reached its store would go out quoting an
+  // id no tool can resolve, and the run would fail three requests later with
+  // nothing on screen to connect the two. It waits here instead.
+  const waiting = blocked(attachments)
+  const cannotSend = busy || empty || waiting !== null
+
+  const picker = useId()
+  const [over, setOver] = useState(false)
 
   return (
     <div className="space-y-2 border-line border-t pt-3">
+      {attachments.length === 0 ? null : (
+        <ul className="flex flex-wrap gap-2" aria-label="Attached files">
+          {attachments.map((attachment) => (
+            <Chip
+              key={attachment.id}
+              attachment={attachment}
+              busy={busy}
+              canUpload={uploadTo !== null}
+              onShape={onShape}
+              onDetach={onDetach}
+            />
+          ))}
+        </ul>
+      )}
+
+      {rejections.map((rejection) => (
+        <p key={rejection.name} className="text-warn text-xs">
+          <span className="font-mono">{rejection.name}</span> was not attached: {rejection.reason}.
+        </p>
+      ))}
+
+      {waiting === null ? null : (
+        <p className="text-warn text-xs" role="status">
+          {waiting} Sending now would quote an identifier no tool can resolve.
+        </p>
+      )}
+
       <textarea
         value={prompt}
         aria-label="Message"
         onChange={(event) => onPrompt(event.target.value)}
+        onPaste={(event) => {
+          // A screenshot in the clipboard is the fastest way anybody attaches
+          // an image, and it never touches the disk to get here.
+          const files = [...event.clipboardData.files]
+          if (files.length > 0) {
+            event.preventDefault()
+            onAttach(files)
+          }
+        }}
+        onDragOver={(event) => {
+          // Without this the browser navigates to the file, which loses the
+          // conversation and the tab along with it.
+          event.preventDefault()
+          setOver(true)
+        }}
+        onDragLeave={() => setOver(false)}
+        onDrop={(event) => {
+          event.preventDefault()
+          setOver(false)
+          onAttach([...event.dataTransfer.files])
+        }}
         onKeyDown={(event) => {
           // Enter sends, Shift+Enter starts a line — which is what everybody's
           // fingers already do. The modifier still sends, for the pasted system
           // prompt that arrives with its own newlines.
-          if (event.key !== 'Enter' || busy || empty) {
+          if (event.key !== 'Enter' || cannotSend) {
             return
           }
           if (event.shiftKey) {
@@ -431,10 +593,10 @@ function Composer({
         rows={3}
         placeholder={
           turns === 0
-            ? 'Ask something. Enter sends, Shift+Enter starts a line.'
+            ? 'Ask something, or drop a file in. Enter sends, Shift+Enter starts a line.'
             : 'Ask something else, or retry the last turn above.'
         }
-        className={`${INPUT_CLASSES} w-full resize-y`}
+        className={`${INPUT_CLASSES} w-full resize-y ${over ? 'border-brand ring-2 ring-line-strong' : ''}`}
       />
 
       <div className="flex flex-wrap items-center gap-2">
@@ -445,7 +607,7 @@ function Composer({
         <Button
           variant="primary"
           size="md"
-          disabled={busy || empty}
+          disabled={cannotSend}
           onClick={onSend}
           title={
             streaming
@@ -455,6 +617,35 @@ function Composer({
         >
           Send
         </Button>
+        {/*
+          A label rather than a button, because the control it drives is the
+          file input next to it — which stays in the page, hidden, so a
+          keyboard reaches it and the picker opens where the browser wants.
+        */}
+        <label
+          htmlFor={picker}
+          title={
+            uploadTo === null
+              ? `Drop, paste or pick files. Up to ${humanSize(MAX_FILE_BYTES)} each — they travel in the body of this request and of every one after it.`
+              : `Drop, paste or pick files. Up to ${humanSize(MAX_FILE_BYTES)} inline, or ${humanSize(MAX_UPLOAD_BYTES)} uploaded to \`${uploadTo}\` — an upload sends the identifier, not the bytes.`
+          }
+          className="cursor-pointer rounded-lg border border-line-strong px-4 py-1.5 text-sm transition-colors hover:bg-well"
+        >
+          Attach
+        </label>
+        <input
+          id={picker}
+          type="file"
+          multiple
+          className="sr-only"
+          disabled={busy}
+          onChange={(event) => {
+            onAttach([...(event.target.files ?? [])])
+            // Cleared so picking the same file twice in a row still fires a
+            // change event, which is otherwise a silently ignored click.
+            event.target.value = ''
+          }}
+        />
         <label className="flex items-center gap-1.5 text-muted text-xs">
           <input
             type="checkbox"
@@ -519,5 +710,94 @@ function Composer({
         />
       ) : null}
     </div>
+  )
+}
+
+/**
+ * One attached file, and the shape it will go out as.
+ *
+ * The shape is a dropdown rather than a decision `mire` makes quietly, because
+ * it is the decision: the same PDF is a `file` part to one endpoint, a wall of
+ * text to another, and nothing at all to a third. A guess from the media type
+ * is what it starts on — which endpoint accepts which is the sort of thing this
+ * tool exists to find out, and it cannot be found out if the answer is fixed.
+ *
+ * *As an upload* is the one shape whose state is worth showing on the chip: it
+ * is the only one where something happens between attaching a file and sending
+ * the turn, and where the thing that happened can fail on its own.
+ */
+function Chip({
+  attachment,
+  busy,
+  canUpload,
+  onShape,
+  onDetach,
+}: {
+  attachment: Attachment
+  busy: boolean
+  /** Whether this profile has a server with somewhere to put a file. */
+  canUpload: boolean
+  onShape: (id: string, shape: Shape) => void
+  onDetach: (id: string) => void
+}) {
+  return (
+    <li className="flex items-center gap-2 rounded-lg border border-line-strong bg-well py-1 pr-1 pl-2 text-xs">
+      <span className="max-w-40 truncate font-mono" title={attachment.name}>
+        {attachment.name}
+      </span>
+      <span className="text-muted">{humanSize(attachment.size)}</span>
+      <select
+        value={attachment.shape}
+        disabled={busy}
+        aria-label={`How ${attachment.name} is sent`}
+        onChange={(event) => onShape(attachment.id, event.target.value as Shape)}
+        className={`${INPUT_CLASSES} px-1 py-0.5 text-xs`}
+      >
+        {shapesFor(attachment, canUpload).map((shape) => (
+          <option key={shape} value={shape}>
+            {SHAPE_LABELS[shape]}
+          </option>
+        ))}
+      </select>
+      {attachment.shape === 'upload' ? <UploadState state={attachment.upload} /> : null}
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => onDetach(attachment.id)}
+        aria-label={`Remove ${attachment.name}`}
+        className="rounded px-1 text-faint disabled:opacity-50 hover:text-ink"
+      >
+        ×
+      </button>
+    </li>
+  )
+}
+
+/**
+ * Where an uploaded file got to.
+ *
+ * The identifier is shown rather than hidden behind a tick, because it is what
+ * the turn is about to say and what a tool call will quote — and reading it here
+ * is how you tell a run that used the file from one that invented an id.
+ */
+function UploadState({ state }: { state: Attachment['upload'] }) {
+  if (state === undefined || state.status === 'uploading') {
+    return (
+      <span className="text-muted" role="status">
+        uploading…
+      </span>
+    )
+  }
+  if (state.status === 'failed') {
+    return (
+      <span className="text-bad" title={state.message}>
+        upload failed
+      </span>
+    )
+  }
+  return (
+    <span className="font-mono text-muted" title={`Uploaded to ${state.server}`}>
+      {state.fileId}
+    </span>
   )
 }

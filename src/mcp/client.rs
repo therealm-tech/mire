@@ -40,8 +40,13 @@ use url::Url;
 
 use super::headers::HeaderTemplates;
 use super::negotiate::{self, Session};
-use super::{McpError, McpExchange, McpJournal, McpTool, Revision, ToolResult};
+use super::{
+    McpError, McpExchange, McpJournal, McpTool, Revision, ToolResult, UploadExchange, UploadFile,
+    Uploaded, UploadedFile,
+};
 use crate::auth::AuthProvider;
+use crate::decode::paths;
+use crate::profile::JsonPathExpr;
 
 use super::McpCredentials;
 use crate::redact::Redactor;
@@ -76,6 +81,88 @@ pub struct McpServer {
     /// a legitimate thing to want to see from a tool whose job is to tell you
     /// what your endpoint does.
     pub protocol_version: Option<Revision>,
+    /// Where a file goes so this server's tools can be pointed at it.
+    ///
+    /// `None` means there is nowhere to put one, which is the ordinary case: a
+    /// tool that reads a file is a tool whose backend has somewhere to read it
+    /// from, and most do not.
+    pub upload: Option<UploadTarget>,
+}
+
+/// An upload API belonging to an MCP server.
+///
+/// Not part of MCP, and deliberately so: the protocol has no way for a client to
+/// hand a server bytes — tool arguments are JSON in a model's context window,
+/// which a few megabytes of base64 is not. So the file goes over plain HTTP,
+/// out of band, and what reaches the model is the identifier it came back with.
+///
+/// Every field below is a question rather than an assumption, because there is
+/// no one shape for "post a file, get an id": some targets take
+/// `multipart/form-data`, some want the bytes as the body under a pre-signed
+/// `PUT`; some answer JSON, some answer `201` and a `Location`. Anything this
+/// hard-coded would be one vendor's habits wearing the name of a standard.
+#[derive(Debug, Clone)]
+pub struct UploadTarget {
+    /// Where the bytes go.
+    pub url: Url,
+    /// The method to send them with.
+    pub method: UploadMethod,
+    /// How the bytes are shaped on the way out.
+    pub body: UploadBody,
+    /// Where to read each identifier out of the answer, tried in order.
+    ///
+    /// A cascade, exactly like a profile's `decode:`, and for the same reason:
+    /// `id`, `fileId` and `data.id` are the same field with three spellings, and
+    /// a list covers a fleet of targets that a single path could not.
+    ///
+    /// Compiled at load time, like every other path in this tool: a typo is then
+    /// an issue naming `mcp.yaml` rather than an upload that succeeds and comes
+    /// back without an id nobody can explain.
+    pub id: Vec<JsonPathExpr>,
+    /// A response *header* carrying the identifier, for the targets that answer
+    /// `201` and an empty body.
+    ///
+    /// Wins over [`Self::id`] when set, because a target that has one is saying
+    /// where the answer is rather than leaving it to be guessed.
+    pub id_header: Option<HeaderName>,
+}
+
+/// How a file is spelled on the way to its target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UploadBody {
+    /// `multipart/form-data`, every file under the same field name.
+    ///
+    /// One request carries the whole batch, which is what a form does and what
+    /// most upload APIs are built to read.
+    Multipart {
+        /// Field name each file rides under.
+        field: String,
+    },
+    /// The file *is* the body, sent with its own media type.
+    ///
+    /// What a pre-signed `PUT` wants. A body holds one file by definition, so a
+    /// batch becomes one request per file, in order.
+    Raw,
+}
+
+/// The method an upload goes out as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadMethod {
+    /// Create a resource and be told what it is called. The ordinary case.
+    Post,
+    /// Write to a location the caller already knows — a pre-signed URL.
+    Put,
+}
+
+impl UploadMethod {
+    /// The method as it goes on the wire and into the record.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Post => "POST",
+            Self::Put => "PUT",
+        }
+    }
 }
 
 impl McpServer {
@@ -360,6 +447,249 @@ impl McpClient {
             is_error: call.is_error,
             latency_ms,
         })
+    }
+
+    /// Puts files where this server's tools can read them back.
+    ///
+    /// Out of band, and that is the whole design: MCP has no way to hand a server
+    /// bytes, so a file never goes near the model. It goes over plain HTTP, as
+    /// whoever this server authenticates as — which is what makes the identifiers
+    /// that come back mean anything to the tools that will be given them.
+    ///
+    /// How many requests that takes is the target's business, not the caller's: a
+    /// `multipart` target gets one request holding the batch, a `raw` one gets a
+    /// request per file. Either way the answer is one identifier per file, in the
+    /// order they were given.
+    ///
+    /// # Errors
+    ///
+    /// [`McpError::NoUploadTarget`] when the entry declares no `upload:`, and
+    /// [`McpError::Upload`] when the target cannot be reached, refuses a file, or
+    /// answers with a number of identifiers that is not the number of files sent.
+    /// Every request made before the failure comes back with the error.
+    pub async fn upload(
+        &self,
+        files: Vec<UploadFile>,
+        credentials: &McpCredentials<'_>,
+    ) -> Result<Uploaded, McpError> {
+        let target = self
+            .server
+            .upload
+            .as_ref()
+            .ok_or_else(|| McpError::NoUploadTarget(self.server.name.clone()))?;
+
+        if files.is_empty() {
+            return Ok(Uploaded {
+                files: Vec::new(),
+                exchanges: Vec::new(),
+            });
+        }
+
+        match &target.body {
+            // One request, the whole batch. The target is then the one deciding
+            // how a set of files relates to a set of identifiers, which is the
+            // only place that decision can be made correctly.
+            UploadBody::Multipart { field } => {
+                let (uploaded, exchange) = self
+                    .send_upload(target, &files, Some(field), credentials)
+                    .await?;
+                Ok(Uploaded {
+                    files: uploaded,
+                    exchanges: vec![exchange],
+                })
+            }
+            // A body holds one file, so a batch is a sequence. Sequential rather
+            // than concurrent: a target that is about to refuse the second file
+            // for a reason that applies to all of them should say so once.
+            UploadBody::Raw => {
+                let mut all = Vec::with_capacity(files.len());
+                let mut exchanges = Vec::with_capacity(files.len());
+                for file in files {
+                    match self
+                        .send_upload(target, std::slice::from_ref(&file), None, credentials)
+                        .await
+                    {
+                        Ok((mut uploaded, exchange)) => {
+                            exchanges.push(exchange);
+                            all.append(&mut uploaded);
+                        }
+                        // The files that already landed keep their records: the
+                        // third one failing says nothing about the first two, and
+                        // dropping their wires would lose the only evidence of it.
+                        Err(McpError::Upload {
+                            server,
+                            message,
+                            exchanges: failed,
+                        }) => {
+                            exchanges.extend(failed);
+                            return Err(McpError::Upload {
+                                server,
+                                message,
+                                exchanges,
+                            });
+                        }
+                        Err(other) => return Err(other),
+                    }
+                }
+                Ok(Uploaded {
+                    files: all,
+                    exchanges,
+                })
+            }
+        }
+    }
+
+    /// One upload request, whatever it is carrying.
+    ///
+    /// `field` decides the shape: `Some` builds a form, `None` puts the single
+    /// file in the body under its own media type.
+    async fn send_upload(
+        &self,
+        target: &UploadTarget,
+        files: &[UploadFile],
+        field: Option<&str>,
+        credentials: &McpCredentials<'_>,
+    ) -> Result<(Vec<UploadedFile>, UploadExchange), McpError> {
+        let mut headers = HeaderMap::new();
+        let scrub = self.authenticate(&mut headers, credentials).await?;
+
+        // Built after `authenticate`, for the same reason the JSON-RPC record is:
+        // the provider has just added its header, and a record taken a line
+        // earlier would carry the credential in the clear.
+        let mut record = UploadExchange {
+            server: self.server.name.clone(),
+            url: target.url.to_string(),
+            method: target.method.as_str().to_owned(),
+            files: files.iter().map(UploadFile::describe).collect(),
+            headers: scrub.headers(&readable(&headers)),
+            status: 0,
+            response_headers: BTreeMap::new(),
+            response: String::new(),
+            latency_ms: 0,
+            error: None,
+        };
+
+        let refused = |record: UploadExchange, message: String| McpError::Upload {
+            server: self.server.name.clone(),
+            message,
+            exchanges: vec![record],
+        };
+
+        let request = match self.build_upload(target, files, field, headers) {
+            Ok(request) => request,
+            Err(message) => return Err(refused(record, message)),
+        };
+
+        let started = Instant::now();
+        let sent = request.send().await;
+        record.latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+        let response = match sent {
+            Ok(response) => response,
+            Err(error) => {
+                let message = scrub.text(&error.to_string());
+                record.error = Some(message.clone());
+                return Err(refused(record, message));
+            }
+        };
+
+        let status = response.status();
+        // Captured before the body is consumed: a target that answers `201` and
+        // nothing has said the only thing it is going to say up here.
+        let response_headers = scrub.headers(&readable(response.headers()));
+        let from_header = target.id_header.as_ref().and_then(|name| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        });
+        let text = response.text().await.unwrap_or_default();
+
+        record.status = status.as_u16();
+        record.response_headers = response_headers;
+        record.response = scrub.text(&text);
+
+        debug!(
+            server = %self.server.name,
+            url = %target.url,
+            method = target.method.as_str(),
+            files = files.len(),
+            status = status.as_u16(),
+            latency_ms = record.latency_ms,
+            "upload answered"
+        );
+
+        if !status.is_success() {
+            let names = names(files);
+            let message = format!(
+                "the upload target refused {names} with {status}: {}",
+                snippet(&record.response)
+            );
+            return Err(refused(record, message));
+        }
+
+        let ids = match read_ids(target, from_header, &record.response, files.len()) {
+            Ok(ids) => ids,
+            Err(message) => return Err(refused(record, message)),
+        };
+
+        let uploaded: Vec<UploadedFile> = files
+            .iter()
+            .zip(ids)
+            .map(|(file, id)| UploadedFile {
+                file_id: Some(id),
+                ..file.describe()
+            })
+            .collect();
+        record.files.clone_from(&uploaded);
+        Ok((uploaded, record))
+    }
+
+    /// The request itself, shaped the way the target asked for.
+    fn build_upload(
+        &self,
+        target: &UploadTarget,
+        files: &[UploadFile],
+        field: Option<&str>,
+        headers: HeaderMap,
+    ) -> Result<reqwest::RequestBuilder, String> {
+        let builder = match target.method {
+            UploadMethod::Post => self.http.post(target.url.clone()),
+            UploadMethod::Put => self.http.put(target.url.clone()),
+        }
+        .headers(headers)
+        .timeout(self.server.timeout);
+
+        let Some(field) = field else {
+            // `Raw` never gets here with anything but one file: `upload` walks
+            // the batch itself, because a body cannot hold two.
+            let file = files.first().ok_or("no file to send")?;
+            let builder = if file.media_type.is_empty() {
+                builder
+            } else {
+                builder.header(CONTENT_TYPE, &file.media_type)
+            };
+            return Ok(builder.body(file.bytes.clone()));
+        };
+
+        let mut form = reqwest::multipart::Form::new();
+        for file in files {
+            let mut part = reqwest::multipart::Part::bytes(file.bytes.clone())
+                .file_name(file.filename.clone());
+            // A browser that could not name the type sends an empty one, and an
+            // empty one is not a media type: left off, `reqwest` says
+            // `application/octet-stream`, which is at least true.
+            if !file.media_type.is_empty() {
+                part = part.mime_str(&file.media_type).map_err(|error| {
+                    format!("`{}` is not a media type: {error}", file.media_type)
+                })?;
+            }
+            // The same field name for every file, which is what a repeated form
+            // control produces and what a target reading a list expects.
+            form = form.part(field.to_owned(), part);
+        }
+        Ok(builder.multipart(form))
     }
 
     /// One JSON-RPC call, with the revision settled and the session re-established
@@ -974,6 +1304,115 @@ fn snippet(body: &str) -> String {
     format!("`{text}`")
 }
 
+/// The files of one request, named, for an error message a person can act on.
+fn names(files: &[UploadFile]) -> String {
+    match files {
+        [] => "nothing".to_owned(),
+        [one] => format!("`{}`", one.filename),
+        many => format!(
+            "{} files (`{}`, …)",
+            many.len(),
+            many.first().map_or("", |file| file.filename.as_str())
+        ),
+    }
+}
+
+/// Reads the identifiers an upload target answered with, one per file sent.
+///
+/// Three sources, in the order a target's own intent puts them: a response header
+/// when the entry named one, then the `id` cascade against the body. A cascade
+/// rather than a path because `id`, `fileId` and `data.id` are one field with
+/// three spellings — the same reason a profile's `decode:` is a list.
+///
+/// Strings and numbers both count: an id is whatever the target calls a file
+/// afterwards, and plenty of them number their rows. Anything else — an object,
+/// an array, a `null` — is a path pointing at the wrong field, which is worth
+/// saying in those words rather than stringifying into a plausible-looking id.
+///
+/// # Errors
+///
+/// Returns a sentence naming what was wrong, for the caller to put on the wire
+/// record it is already holding. A count that does not match is one of them, and
+/// deliberately not something to paper over: handing back two identifiers for
+/// three files would mean guessing which file lost one.
+fn read_ids(
+    target: &UploadTarget,
+    from_header: Option<String>,
+    body: &str,
+    expected: usize,
+) -> Result<Vec<String>, String> {
+    if let Some(name) = &target.id_header {
+        let Some(id) = from_header.filter(|id| !id.is_empty()) else {
+            return Err(format!(
+                "the upload succeeded but answered no `{name}` header, which is where \
+                 `id_header` says the identifier is"
+            ));
+        };
+        // A header carries one value, so it can only speak for one file. Sending
+        // several to a target identified this way is a configuration mistake
+        // rather than something to split a string over.
+        if expected != 1 {
+            return Err(format!(
+                "`id_header` reads one identifier out of `{name}`, but {expected} files went out \
+                 in this request — a header cannot name them all"
+            ));
+        }
+        return Ok(vec![id]);
+    }
+
+    let parsed: Value = serde_json::from_str(body).map_err(|error| {
+        format!("the upload target answered something that is not JSON: {error}")
+    })?;
+
+    let Some((path, nodes)) = paths::resolve(&parsed, &target.id) else {
+        return Err(format!(
+            "the upload succeeded but none of {} selects an identifier in the answer: {}",
+            sources(&target.id),
+            snippet(body)
+        ));
+    };
+
+    let ids: Vec<String> = nodes
+        .iter()
+        .filter_map(|node| match node {
+            Value::String(id) if !id.is_empty() => Some(id.clone()),
+            Value::Number(id) => Some(id.to_string()),
+            _ => None,
+        })
+        .collect();
+
+    if ids.len() != nodes.len() {
+        return Err(format!(
+            "`{}` selects {} nodes in the answer and {} of them are not identifiers: {}",
+            path.source(),
+            nodes.len(),
+            nodes.len() - ids.len(),
+            snippet(body)
+        ));
+    }
+
+    if ids.len() != expected {
+        return Err(format!(
+            "{expected} files went out and `{}` selects {} identifier{} in the answer — \
+             a wildcard such as `$.files[*].id` is what reads a batch back",
+            path.source(),
+            ids.len(),
+            if ids.len() == 1 { "" } else { "s" }
+        ));
+    }
+
+    Ok(ids)
+}
+
+/// The cascade as written, for an error that names what was tried.
+fn sources(paths: &[JsonPathExpr]) -> String {
+    paths
+        .iter()
+        .map(|path| format!("`{}`", path.source()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Pulls the last `data:` payload out of an SSE body.
 ///
 /// The final JSON-RPC response terminates the stream, so the last event is the
@@ -1329,6 +1768,7 @@ mod tests {
             headers: HeaderTemplates::default(),
             timeout: Duration::from_secs(30),
             protocol_version: None,
+            upload: None,
         };
         assert!(server.offers("anything"));
 
@@ -1348,6 +1788,7 @@ mod tests {
                 headers: HeaderTemplates::default(),
                 timeout: Duration::from_secs(30),
                 protocol_version: None,
+                upload: None,
             },
             Client::new(),
         );

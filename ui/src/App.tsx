@@ -20,6 +20,15 @@ import {
   startLogin,
   streamCall,
 } from './api'
+import {
+  type Attachment,
+  composeContent,
+  type Rejection,
+  readFiles,
+  type Shape,
+  upload,
+  uploadServer,
+} from './attachments'
 import { AuthPanel } from './components/AuthPanel'
 import { ChatPanel } from './components/ChatPanel'
 import { EmbeddingPanel } from './components/EmbeddingPanel'
@@ -38,6 +47,7 @@ import {
   messageItem,
   setupExchanges,
   turnExchanges,
+  uploadExchange,
   verdictItem,
   wireMessages,
 } from './conversation'
@@ -154,6 +164,14 @@ export function App() {
   const [token, setToken] = useState('')
 
   const [prompt, setPrompt] = usePersisted('prompt', z.string(), 'ping')
+  // Files the *next* turn will carry. Emptied when it goes, because they are
+  // then in the history, which is what travels from that point on.
+  //
+  // Not remembered across a reload, unlike the draft above: a few megabytes of
+  // base64 is exactly the unbounded thing `storage.ts` keeps out, and a
+  // half-typed question is cheap to keep where an attachment is not.
+  const [attachments, setAttachments] = useState<Attachment[]>([])
+  const [rejections, setRejections] = useState<Rejection[]>([])
   const [timeline, setTimeline] = useState<ChatItem[]>([])
   const [input, setInput] = usePersisted('input', z.string(), 'one\ntwo')
   const [repeat, setRepeat] = usePersisted('repeat', z.number(), 1)
@@ -283,6 +301,18 @@ export function App() {
    */
   const provider = auth?.providers.find((entry) => entry.name === (profile?.auth ?? ANONYMOUS))
 
+  /**
+   * Where a file would go, or `null` when this profile has nowhere to put one.
+   *
+   * Read from the servers the *profile* names, not from every server declared:
+   * a target belonging to an MCP server this run will never talk to is a store
+   * whose identifiers no tool in this run can resolve.
+   */
+  const uploadTo = useMemo(
+    () => (profile && mcp ? uploadServer(profile.mcp, mcp.servers) : null),
+    [profile, mcp],
+  )
+
   /** What the next call would do, and what would stop it. */
   const ready = useMemo(
     () =>
@@ -398,15 +428,122 @@ export function App() {
    */
   const ask = useCallback((): Message[] => {
     const text = prompt.trim()
-    if (text.length === 0) {
+    if (text.length === 0 && attachments.length === 0) {
       return messages
     }
 
-    const asked: Message = { role: 'user', content: text }
+    const asked: Message = { role: 'user', content: composeContent(text, attachments) }
     setTimeline((current) => [...current, messageItem(asked)])
     setPrompt('')
+    setAttachments([])
+    setRejections([])
     return [...messages, asked]
-  }, [messages, prompt, setPrompt])
+  }, [messages, prompt, attachments, setPrompt])
+
+  /**
+   * Sends a batch of attachments to the profile's upload target.
+   *
+   * A batch rather than a file, because whether that becomes one request or
+   * several is the *target's* answer, not this component's: a form takes three
+   * files at once, a pre-signed `PUT` takes one body. Sending them one at a time
+   * from here would make that decision on the target's behalf, and make it
+   * wrongly for half of them.
+   *
+   * Done when the shape becomes `upload` rather than when the turn is sent, so
+   * the identifiers are on the chips — and a refusal is on screen — *before* a
+   * question is asked about files that never arrived. The wires join **Traffic**
+   * either way: a `413` from the target is the whole explanation, and it belongs
+   * next to everything else this process said.
+   */
+  const sendUpload = useCallback((batch: Attachment[], server: string) => {
+    if (batch.length === 0) {
+      return
+    }
+    const pending = new Set(batch.map((attachment) => attachment.id))
+    setAttachments((current) =>
+      current.map((held) =>
+        pending.has(held.id) ? { ...held, upload: { status: 'uploading' } } : held,
+      ),
+    )
+    upload(batch, server)
+      .then((done) => {
+        // Only the upload state is written back. A file may have been reshaped
+        // — or detached — while its bytes were in flight, and putting a snapshot
+        // taken before the request over the top of that would undo whatever was
+        // done in between.
+        setAttachments((current) =>
+          current.map((held) => {
+            const state = done.states.get(held.id)
+            return state === undefined ? held : { ...held, upload: state }
+          }),
+        )
+        setExchanges((current) => [...current, ...done.exchanges.map(uploadExchange)])
+      })
+      .catch((error: unknown) => {
+        logger.error('attachments.upload_crashed', { message: String(error) })
+      })
+  }, [])
+
+  /**
+   * Files dropped, pasted or picked, read here and now.
+   *
+   * An inline attachment is not uploaded anywhere: the bytes sit in this tab
+   * until a turn carries them, which is the same promise the conversation itself
+   * makes. A file whose shape is `upload` is the exception, and the only one —
+   * it goes to the server's own store immediately, because MCP has no way to
+   * carry it later.
+   */
+  const attach = useCallback(
+    (files: File[]) => {
+      if (files.length === 0) {
+        return
+      }
+      readFiles(files, attachments, uploadTo !== null)
+        .then((read) => {
+          setAttachments((current) => [...current, ...read.attachments])
+          setRejections(read.rejections)
+          if (uploadTo !== null) {
+            // Everything just dropped that is going to a store goes in one call,
+            // so a drop of three files is one upload rather than three.
+            sendUpload(
+              read.attachments.filter((attachment) => attachment.shape === 'upload'),
+              uploadTo,
+            )
+          }
+        })
+        .catch((error: unknown) => {
+          logger.error('attachments.failed', { message: String(error) })
+        })
+    },
+    [attachments, uploadTo, sendUpload],
+  )
+
+  /**
+   * Changing what a file goes out as.
+   *
+   * Switching *to* an upload is the one shape change that does work: the bytes
+   * have to reach the store before a turn can name them. Switching away leaves
+   * the result where it is, so flipping between the two does not upload twice.
+   */
+  const reshape = useCallback(
+    (id: string, shape: Shape) => {
+      setAttachments((current) =>
+        current.map((attachment) => (attachment.id === id ? { ...attachment, shape } : attachment)),
+      )
+      if (shape !== 'upload' || uploadTo === null) {
+        return
+      }
+      const attachment = attachments.find((held) => held.id === id)
+      if (attachment !== undefined && attachment.upload === undefined) {
+        sendUpload([attachment], uploadTo)
+      }
+    },
+    [attachments, uploadTo, sendUpload],
+  )
+
+  const detach = useCallback((id: string) => {
+    setAttachments((current) => current.filter((attachment) => attachment.id !== id))
+  }, [])
 
   /**
    * The same history, read chunk by chunk instead of whole.
@@ -640,6 +777,8 @@ export function App() {
     setLive(null)
     setCallError(null)
     setPrompt('')
+    setAttachments([])
+    setRejections([])
   }, [setPrompt])
 
   if (loadError) {
@@ -756,6 +895,9 @@ export function App() {
               busy={busy}
               stopped={stopped}
               prompt={prompt}
+              attachments={attachments}
+              rejections={rejections}
+              uploadTo={uploadTo}
               maxIterations={maxIterations}
               streaming={streaming}
               error={callError ? callError.body : null}
@@ -763,6 +905,9 @@ export function App() {
               mcpProtocol={profile.mcp.length > 0 ? mcpProtocol : null}
               showProtocol={profile.mcp.length > 0}
               onPrompt={setPrompt}
+              onAttach={attach}
+              onShape={reshape}
+              onDetach={detach}
               onMaxIterations={setMaxIterations}
               onStreaming={setStreaming}
               onMcpProtocol={setMcpProtocol}

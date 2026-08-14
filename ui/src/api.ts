@@ -94,6 +94,25 @@ export const mcpDescriptorSchema = z.object({
   /** Names only. The values are rendered per request and are usually secrets. */
   headers: z.array(z.string()),
   usesAuth: z.array(z.string()),
+  /**
+   * Where a file goes before a tool can be pointed at it, if anywhere.
+   *
+   * Present is the whole signal the composer needs: MCP itself cannot carry a
+   * file, so a server can only be handed one when its entry names an upload API
+   * next to it. Absent, and *as an upload* is not a shape this profile offers.
+   */
+  upload: z
+    .object({
+      url: z.string(),
+      method: z.string(),
+      /** `multipart` or `raw`, which is also how many requests a batch takes. */
+      body: z.string(),
+      /** Where the identifiers are read back from, in the order they are tried. */
+      id: z.array(z.string()),
+      /** The response header they are read from instead, when one is named. */
+      idHeader: z.string().optional(),
+    })
+    .optional(),
 })
 
 export const mcpResponseSchema = z.object({
@@ -124,17 +143,53 @@ const toolCallSchema = z.object({
 
 export type ToolCall = z.infer<typeof toolCallSchema>
 
+/** Words, sitting alongside whatever else a turn carries. */
+export interface TextPart {
+  type: 'text'
+  text: string
+}
+
+/** An image, inline as a `data:` URL or by a URL the endpoint fetches itself. */
+export interface ImagePart {
+  type: 'image_url'
+  image_url: { url: string; detail?: string }
+}
+
+/** A file, by name and by content. */
+export interface FilePart {
+  type: 'file'
+  file: { filename?: string; file_data?: string; file_id?: string }
+}
+
+/**
+ * One piece of a turn that carries more than text.
+ *
+ * These are the only snake_case names in this file, and deliberately so: they
+ * are not `mire`'s API, they are the endpoint's wire shape passing through it.
+ * `mire` renames nothing here, so what you write is what the model reads.
+ */
+export type ContentPart = TextPart | ImagePart | FilePart
+
+/**
+ * What a turn carries: a string, or the text and the files sent with it.
+ *
+ * A turn with nothing attached stays a bare string on the wire — attaching a
+ * file to one turn is not a reason to change the shape of every other one.
+ */
+export type Content = string | ContentPart[]
+
 /**
  * One conversation turn, as `Message` on the server.
  *
  * Sent back verbatim on the next call: `mire` holds no conversation of its own,
  * so the whole history travels in the body every time. That is what keeps the
  * `curl` export of turn five a reproduction of turn five rather than of a
- * session that no longer exists.
+ * session that no longer exists — and what makes an attached file travel again
+ * with every turn that follows it.
  */
 export interface Message {
   role: 'system' | 'user' | 'assistant' | 'tool'
-  content?: string
+  content?: Content
   /**
    * Handed back in the normalised shape the response decoded to. The server
    * reads either that or the nested wire shape, so this is understood — but the
@@ -316,6 +371,49 @@ export const mcpExchangeSchema = z.object({
   error: z.string().optional(),
 })
 
+/**
+ * One upload, as it went over the wire.
+ *
+ * A sibling of `mcpExchangeSchema` rather than a variant of it: an upload is not
+ * JSON-RPC, has no revision and no session. It is reported for the same reason
+ * that one is — **Traffic** shows every wire this process touched, and the
+ * request that put a file somewhere is the first thing to read when a tool then
+ * cannot find it.
+ */
+export const uploadedFileSchema = z.object({
+  filename: z.string(),
+  mediaType: z.string(),
+  size: z.number(),
+  /** Absent on the record of a request that failed. */
+  fileId: z.string().optional(),
+})
+
+export const uploadExchangeSchema = z.object({
+  server: z.string(),
+  url: z.string(),
+  method: z.string(),
+  /** What this request carried. Several files when the target takes a form. */
+  files: z.array(uploadedFileSchema),
+  headers: z.record(z.string(), z.string()),
+  status: z.number(),
+  /** Where a target answering `201` and nothing put the only thing it said. */
+  responseHeaders: z.record(z.string(), z.string()),
+  response: z.string(),
+  latencyMs: z.number(),
+  error: z.string().optional(),
+})
+
+export const mcpUploadResponseSchema = z.object({
+  server: z.string(),
+  /** Every file, in the order it was sent. */
+  files: z.array(uploadedFileSchema),
+  /**
+   * The requests it took: one for a `multipart` target, one per file for a
+   * `raw` one. The target's shape showing through, and worth seeing.
+   */
+  exchanges: z.array(uploadExchangeSchema),
+})
+
 const decisionSchema = z.discriminatedUnion('decision', [
   z.object({ decision: z.literal('continue'), tools: z.number() }),
   z.object({ decision: z.literal('stop'), stop: stopOutcomeSchema }),
@@ -391,6 +489,9 @@ export type CallOutcome = z.infer<typeof callOutcomeSchema>
 export type StopOutcome = z.infer<typeof stopOutcomeSchema>
 export type ToolInvocation = z.infer<typeof toolInvocationSchema>
 export type McpExchange = z.infer<typeof mcpExchangeSchema>
+export type UploadedFile = z.infer<typeof uploadedFileSchema>
+export type UploadExchange = z.infer<typeof uploadExchangeSchema>
+export type McpUploadResponse = z.infer<typeof mcpUploadResponseSchema>
 export type Turn = z.infer<typeof turnSchema>
 export type Trace = z.infer<typeof traceSchema>
 export type AgentEvent = z.infer<typeof agentEventSchema>
@@ -479,6 +580,28 @@ export function fetchAuth(): Promise<AuthResponse> {
 
 export function fetchMcp(): Promise<McpResponse> {
   return request('api/mcp', mcpResponseSchema)
+}
+
+/**
+ * Puts a file where a server's tools can read it back.
+ *
+ * The one request this UI makes that carries bytes, and the only one that does
+ * not go through the model. `mire` forwards it, rather than the tab doing it
+ * directly: the credential lives on the server side, there is no CORS to lose an
+ * argument with, and **Traffic** can only show a wire this process touched.
+ */
+export function uploadFiles(server: string, files: File[]): Promise<McpUploadResponse> {
+  const form = new FormData()
+  // Always `file` on this hop, whatever the target calls its field: this is
+  // `mire`'s own API, and the renaming happens on the way out of `mire`.
+  for (const file of files) {
+    form.append('file', file, file.name)
+  }
+  return request(`api/mcp/${encodeURIComponent(server)}/upload`, mcpUploadResponseSchema, {
+    method: 'POST',
+    // No `Content-Type`: the browser has to set it, boundary and all.
+    body: form,
+  })
 }
 
 /**

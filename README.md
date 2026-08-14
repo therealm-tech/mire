@@ -184,7 +184,9 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   produced four tokens, and that is a finding rather than a mess to clear up.
   Nothing is sent upstream to call the work off: an endpoint that has been asked
   a question is going to answer it, so this is about your tab and says only that.
-  More on what the transcript is [below](#having-a-conversation).
+  **Attach** — or a drop, or a paste — puts files on the turn, which is
+  [its own question](#sending-a-file). More on what the transcript is
+  [below](#having-a-conversation).
 - **Input**, for embedding profiles. One text per line, a run count, and a
   checkbox for the full vectors. There is no second turn of an embedding, so
   there is no conversation and no loop.
@@ -264,17 +266,181 @@ Four things follow, each of which is a decision:
   a link. And the raw string is never more than a glance away — the response body
   the endpoint actually sent is a card down in **Traffic**, byte for byte.
 
+### Sending a file
+
+**Attach** picks files; a drop on the box or a paste does the same thing, which
+is how a screenshot gets in without touching the disk. They ride on the next
+turn, and the composer shows them as chips before it goes.
+
+The turn then carries an array instead of a string:
+
+```json
+{
+  "role": "user",
+  "content": [
+    {"type": "text", "text": "what is in these?"},
+    {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBOR…"}},
+    {"type": "file", "file": {"filename": "report.pdf", "file_data": "data:application/pdf;base64,JVBER…"}}
+  ]
+}
+```
+
+That is `OpenAI`'s shape, for the same reason the rest of `messages` is: it goes
+through `{{ messages | tojson }}` without a template having to know anything new.
+An endpoint that spells it differently is a profile question — remap it in the
+template like any other field, or reach for a
+[request script](#when-a-cascade-is-not-enough). A part shape `mire` has never
+heard of goes out untouched, so an endpoint doing its own thing is never a body
+`mire` refuses to send.
+
+Four things follow, and each is a decision:
+
+- **A turn with nothing attached is still a bare string.** The array only appears
+  when there is something in it. Every profile written before this existed sends
+  exactly what it always sent, byte for byte.
+- **Which shape a file goes out as is yours to choose.** Each chip carries a
+  dropdown: *as an image*, *as a file*, *as text*, and — where a server has
+  somewhere to put one — *[as an upload](#sending-a-file-a-tool-will-read)*.
+  `mire` starts it on a guess from the media type — an image as an image,
+  anything that decodes cleanly as text, everything else as a file — and a guess
+  is all it is. The same PDF is a `file` part to one endpoint, a wall of text to
+  another and a `400` from a third; which one is the thing you came here to find
+  out, and you cannot find it out if the answer is fixed. *As text* is offered
+  only when the bytes really decoded, because handing a model a mangled PDF
+  proves nothing.
+- **Nothing is uploaded**, for the three inline shapes. The browser reads the
+  file and the bytes travel in the body, exactly like the text does — there is no
+  endpoint to upload *to*, no session to hold it in and nothing to expire between
+  attaching a file and sending it. *Copy as curl* therefore still reproduces the
+  call, screenshot and all, on a machine that never had the tab open.
+- **An attachment goes out again on every turn after it**, because the whole
+  history does — that is the [same promise](#having-a-conversation) that makes the
+  rest of this work. Which is why the caps are small: 4 MB a file, 8 MB a turn,
+  refused in the composer with the reason on the chip rather than as a `413` from
+  somewhere.
+
+In **Traffic**, a base64 blob is folded rather than painted — one click opens it.
+It is the only thing in that panel that is not shown whole, for the same reason
+[vectors are not](#vectors-are-never-rendered-whole): a megabyte of it says
+nothing, and it hides the field next to it that says everything. *Copy as curl*
+and *Copy body* still hand it over in full.
+
+### Sending a file a tool will read
+
+Everything above puts a file in front of the **model**. Putting one in front of a
+**tool** is a different problem, and MCP does not solve it: the protocol has no
+way for a client to hand a server bytes. Tool arguments are JSON in a context
+window, and a 1.4 MB deck is roughly 700k tokens of base64 — so a tool that reads
+documents cannot be handed one through the thing that calls it.
+
+What such a backend has instead is an upload API sitting next to its MCP
+endpoint. Name it in [`mcp.yaml`](#really-calling-tools) and the composer gains a
+fourth shape:
+
+```yaml
+servers:
+  - name: files
+    url: https://files.internal/mcp
+    auth: keycloak-user
+    upload:
+      url: https://files.internal/v1/documents
+```
+
+Attach a document to a profile pointing at that server and it goes there straight
+away. The turn then carries the identifier it came back with, and nothing else:
+
+```json
+{
+  "role": "user",
+  "content": [
+    {"type": "text", "text": "add a slide with last quarter's figures"},
+    {"type": "text", "text": "--- deck.pptx --- uploaded to `files`, file id `doc_7f3a` (1.4 MB). Pass that id to the tool that takes a file."}
+  ]
+}
+```
+
+**There is no one shape for "post a file, get an id"**, so none of it is
+hard-coded. A `url:` on its own means `POST`, a form field called `file`, and an
+identifier read from `id`, `fileId`, `file_id` or `data.id` — the ordinary case,
+and a cascade for the same reason a profile's `decode:` is one. Everything else
+is a question you can answer:
+
+| Key | Default | What it decides |
+| --- | --- | --- |
+| `method` | `post` | `post` or `put` — a pre-signed URL wants the latter |
+| `body` | `multipart` | `multipart` sends a form; `raw` makes the file the body |
+| `field` | `file` | `multipart` only: the field name each file rides under |
+| `id` | four common spellings | `JSONPath`s to the identifiers, tried in order |
+| `id_header` | *(none)* | a response header carrying it instead, for a `201` with an empty body |
+
+Which means a pre-signed object store — which looks nothing like a form — is
+three more lines rather than a feature request:
+
+```yaml
+    upload:
+      url: https://bucket.internal/objects
+      method: put
+      body: raw
+      id_header: location
+```
+
+**A batch is the target's business, not the composer's.** Drop three files and
+`mire` sends three: to a `multipart` target as one request carrying three parts,
+to a `raw` one as three requests, because a body holds one file. Either way you
+get one identifier per file, in the order they went out, and every request shows
+up in **Traffic**. A target answering for a batch needs a wildcard —
+`id: [$.documents[*].ref]` — because the count has to match what was sent: two
+identifiers for three files would mean guessing which file lost one, and that is
+refused with both numbers in the message rather than guessed.
+
+Five more things follow, and the first two are the load-bearing ones:
+
+- **`upload:` hangs off the server, not off a block of its own.** The bytes go
+  out over the same HTTP client with the same credential as the tool calls,
+  because they have to: a backend that scopes files by principal answers `404`
+  when the upload and the tool call arrive as two different people, and that is a
+  silent failure with nothing to read. One `auth:`, one identity, no way for them
+  to drift apart.
+- **The turn carries text, not `file_id`.** `file_id` in the `OpenAI` shape means
+  an identifier in *the endpoint's own* file store, and this one lives in a store
+  the model endpoint has never heard of — a strict gateway is entitled to answer
+  `400` to it. A sentence naming the file and quoting its id is understood by
+  every endpoint, and it is what the model has to repeat into a tool call anyway.
+- **Nothing about the file reaches the model.** Not the bytes, not a base64 of
+  them, not a text extraction. It gets fifteen characters to carry across, which
+  is a job a 523 MB model does reliably — and the file costs no tokens on this
+  turn or on any turn after it.
+- **This is the one thing `mire` uploads**, and it therefore bends the two
+  promises above. The cap is 64 MB rather than 4 MB, because an upload does not
+  ride in the body and does not come back on the next turn; and reproducing such
+  a turn elsewhere means sending the files first, which is a second command
+  rather than the one *Copy as curl* hands you.
+- **A file that did not land holds the turn.** The chip says so and **Send** is
+  refused, rather than a question going out quoting an identifier that resolves
+  to nothing — which is a run that fails three requests later, inside a tool
+  result, with nothing on screen connecting the two. Whatever the target answered
+  is a card in **Traffic** like any other wire, including the requests that
+  succeeded before one did not.
+
 ### Reading the traffic
 
 Under the conversation, **Traffic** is every wire this process touched, in the
-order it touched them. Three kinds of card, each showing what went out and what
+order it touched them. Four kinds of card, each showing what went out and what
 came back:
 
-| | Model call | MCP round trip | Tool call |
-| --- | --- | --- | --- |
-| **Request** | Method, URL, masked headers, body, *Copy as curl* | The JSON-RPC that went out, with its headers and the revision it went out on | The arguments the model produced |
-| **Decode** | Which configured path matched which field, which missed, and everything that was tried | — | Whether those arguments match the schema the tool was declared with |
-| **Response** | Status, latency, decoded content and tool calls, stream counters, the body, the raw JSON as a tree | Status, latency, and the JSON-RPC that came back | What the tool handed back, and whether it reported a problem |
+| | Model call | MCP round trip | Tool call | Upload |
+| --- | --- | --- | --- | --- |
+| **Request** | Method, URL, masked headers, body, *Copy as curl* | The JSON-RPC that went out, with its headers and the revision it went out on | The arguments the model produced | Method, URL, masked headers, and every file it carried by name, type and size |
+| **Decode** | Which configured path matched which field, which missed, and everything that was tried | — | Whether those arguments match the schema the tool was declared with | — |
+| **Response** | Status, latency, decoded content and tool calls, stream counters, the body, the raw JSON as a tree | Status, latency, and the JSON-RPC that came back | What the tool handed back, and whether it reported a problem | Status, latency, the response headers, and the body the identifiers were read out of |
+
+An upload card is the one place this panel does not show you the request body —
+because the body *is* the files, so they are named and measured instead. Its
+response headers are shown, which no other card bothers with: a target answering
+`201` and an empty body has said the only thing it is going to say up there. One
+card per *request*, which is not one per file — a target taking a form carries
+the batch whole, and splitting that into three cards would be inventing requests
+nobody made.
 
 **The transcript points at the cards.** A tool row in the conversation is a
 summary of one of these, so it takes you to it: the tool's name opens its own
@@ -284,14 +450,15 @@ because the card was behind a filter set four minutes ago would be worse than no
 link at all.
 
 **And the list can be asked a narrower question.** A run puts five cards on the
-page and a session puts fifty, so **Model**, **Tools** and **Protocol** each show
-one kind, and the count beside them says how much is being hidden. **Failed**
-picks out the exchanges worth looking at first: a status the endpoint should not
-have answered, a stream that stopped rather than ended, a handshake that never
-landed, or a tool that failed, reported a problem, or was called with arguments
-its own schema refuses. A `401` you asked for anonymously is a pass, so it is not
-one of them. When nothing failed the button says so rather than offering an empty
-list.
+page and a session puts fifty, so **Model**, **Tools**, **Protocol** and
+**Uploads** each show one kind, and the count beside them says how much is being
+hidden. **Failed** picks out the exchanges worth looking at first: a status the
+endpoint should not have answered, a stream that stopped rather than ended, a
+handshake that never landed, a tool that failed, reported a problem, or was
+called with arguments its own schema refuses, or a file that never reached the
+store a tool was going to read it from. A `401` you asked for anonymously is a
+pass, so it is not one of them. When nothing failed the button says so rather
+than offering an empty list.
 
 **And the whole run comes out as a file.** *Export* writes every exchange above
 to JSON, with the endpoint it was pointed at, the identity it went as, and the
@@ -733,6 +900,10 @@ accident:
 - **A server that asks for interactive input stops the tool.** `resultType:
   "input_required"` means it wants an elicitation, and a harness has nobody to
   ask; you get a message naming what it wanted rather than an empty result.
+
+A fourth one is worth its own section: **MCP cannot carry a file**, so a server
+whose tools read documents needs an `upload:` next to its `url:` before it can be
+given one. See [Sending a file a tool will read](#sending-a-file-a-tool-will-read).
 
 ### Which revision you are actually speaking
 

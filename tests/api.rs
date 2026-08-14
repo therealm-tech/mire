@@ -169,6 +169,32 @@ impl Harness {
         (status, serde_json::from_str(&text).unwrap_or(Value::Null))
     }
 
+    /// `POST /api/mcp/{server}/upload`, with however many files in one form.
+    ///
+    /// Really multipart rather than a JSON body carrying base64: the encoding is
+    /// half of what this endpoint does, and a test that skipped it would pass
+    /// while the browser's own request failed.
+    async fn upload(&self, server: &str, files: &[(&str, &str, &[u8])]) -> (u16, Value) {
+        let mut form = reqwest::multipart::Form::new();
+        for (filename, media_type, bytes) in files {
+            let part = reqwest::multipart::Part::bytes(bytes.to_vec())
+                .file_name((*filename).to_owned())
+                .mime_str(media_type)
+                .expect("media type");
+            form = form.part("file", part);
+        }
+        let response = self
+            .client
+            .post(format!("{}/api/mcp/{server}/upload", self.base))
+            .multipart(form)
+            .send()
+            .await
+            .expect("upload");
+        let status = response.status().as_u16();
+        let text = response.text().await.expect("read body");
+        (status, serde_json::from_str(&text).unwrap_or(Value::Null))
+    }
+
     /// `GET` any route under the base path, as text. For the pages a browser
     /// lands on, which are HTML rather than JSON.
     async fn get_text(&self, route: &str) -> (u16, String) {
@@ -311,6 +337,87 @@ async fn a_call_hands_back_the_request_it_sent_and_its_curl() {
     // What the endpoint actually received is what was handed back.
     let received = &server.received_requests().await.unwrap()[0];
     assert_eq!(std::str::from_utf8(&received.body).unwrap(), rendered);
+}
+
+/// A question with a file attached to it, from the browser to the endpoint.
+///
+/// The whole feature, end to end: `mire` renames nothing, reorders nothing and
+/// refuses nothing here. What the composer built is what `{{ messages | tojson }}`
+/// puts on the wire, which is what makes the `curl` next to it reproduce a call
+/// that had a screenshot in it.
+#[tokio::test]
+async fn a_turn_carrying_files_reaches_the_endpoint_unchanged() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_response()))
+        .mount(&server)
+        .await;
+
+    let harness = Harness::start(&[(
+        "chat.yaml",
+        openai_profile(&format!("{}/v1/chat/completions", server.uri())),
+    )])
+    .await;
+
+    let content = json!([
+        {"type": "text", "text": "what is in these?"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBOR"}},
+        {"type": "file", "file": {"filename": "report.pdf", "file_data": "data:application/pdf;base64,JVBER"}},
+        {"type": "input_audio", "input_audio": {"data": "UklGR", "format": "wav"}},
+    ]);
+
+    let (status, _, body) = harness
+        .call(json!({
+            "profile": "chat",
+            "messages": [{"role": "user", "content": content}],
+        }))
+        .await;
+
+    assert_eq!(status, 200);
+    let received = &server.received_requests().await.unwrap()[0];
+    let sent: Value = serde_json::from_slice(&received.body).unwrap();
+    assert_eq!(sent["messages"][0]["content"], content);
+
+    // And the reproduction carries it too, or it is not a reproduction.
+    assert!(
+        body["curl"]
+            .as_str()
+            .unwrap()
+            .contains("data:image/png;base64,iVBOR"),
+        "{}",
+        body["curl"]
+    );
+}
+
+/// The other half of the same promise: a conversation with no file in it must
+/// not grow an array around itself because the feature now exists.
+#[tokio::test]
+async fn a_turn_with_no_file_still_goes_out_as_a_bare_string() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_response()))
+        .mount(&server)
+        .await;
+
+    let harness = Harness::start(&[(
+        "chat.yaml",
+        openai_profile(&format!("{}/v1/chat/completions", server.uri())),
+    )])
+    .await;
+
+    let (status, _, _) = harness
+        .call(json!({
+            "profile": "chat",
+            "messages": [{"role": "user", "content": "ping"}],
+        }))
+        .await;
+
+    assert_eq!(status, 200);
+    let received = &server.received_requests().await.unwrap()[0];
+    let sent: Value = serde_json::from_slice(&received.body).unwrap();
+    assert_eq!(sent["messages"][0]["content"], json!("ping"));
 }
 
 #[tokio::test]
@@ -4992,4 +5099,444 @@ async fn arguments_that_arrived_as_an_object_are_replayed_as_one() {
         replayed["messages"][1]["tool_calls"][0]["function"]["arguments"],
         json!({"city": "Lyon"})
     );
+}
+
+// ---------------------------------------------------------------------------
+// Uploads: the one thing MCP cannot carry.
+//
+// There is no one shape for "post a file, get an id", so the tests below are
+// mostly about *not* assuming one: a form and a raw body, an id in a JSON field
+// and an id in a header, one file and three.
+// ---------------------------------------------------------------------------
+
+/// A target that accepts anything and answers `body`.
+async fn upload_target(body: Value) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/files"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(&server)
+        .await;
+    server
+}
+
+/// One server entry with an `upload:` block, given the block's own lines.
+fn with_upload(mcp: &str, target: &str, extra: &str) -> String {
+    format!(
+        "servers:\n  - name: files\n    url: {mcp}/mcp\n    upload:\n      url: {target}\n{extra}"
+    )
+}
+
+#[tokio::test]
+async fn a_file_reaches_the_upload_target_and_comes_back_as_an_identifier() {
+    let target = upload_target(json!({"id": "doc_7f3a"})).await;
+
+    let harness = Harness::start(&[(
+        "mcp.yaml",
+        with_upload(&target.uri(), &format!("{}/files", target.uri()), ""),
+    )])
+    .await;
+
+    let (status, body) = harness
+        .upload(
+            "files",
+            &[("deck.pptx", "application/zip", b"PK\x03\x04 deck")],
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["files"][0]["fileId"], "doc_7f3a");
+    assert_eq!(body["files"][0]["filename"], "deck.pptx");
+    assert_eq!(body["files"][0]["size"], 9);
+
+    // One request, and it is reported: **Traffic** promises every wire this
+    // process touched, and an upload is one of them.
+    assert_eq!(body["exchanges"].as_array().unwrap().len(), 1);
+    assert_eq!(body["exchanges"][0]["status"], 200);
+    assert_eq!(body["exchanges"][0]["method"], "POST");
+
+    // The bytes really went out as a multipart file, under the default field.
+    let requests = target.received_requests().await.expect("requests");
+    let sent = String::from_utf8_lossy(&requests[0].body);
+    assert!(sent.contains("name=\"file\""), "{sent}");
+    assert!(sent.contains("filename=\"deck.pptx\""), "{sent}");
+}
+
+/// The default `id:` is a cascade, so four spellings of the same field are read
+/// without anybody having to say which one their target uses.
+#[tokio::test]
+async fn the_identifier_is_found_wherever_the_target_happens_to_put_it() {
+    for (answer, expected) in [
+        (json!({"id": "a"}), "a"),
+        (json!({"fileId": "b"}), "b"),
+        (json!({"file_id": "c"}), "c"),
+        (json!({"data": {"id": "d"}}), "d"),
+        // Numbers count: plenty of targets number their rows.
+        (json!({"id": 41}), "41"),
+    ] {
+        let target = upload_target(answer.clone()).await;
+        let harness = Harness::start(&[(
+            "mcp.yaml",
+            with_upload(&target.uri(), &format!("{}/files", target.uri()), ""),
+        )])
+        .await;
+
+        let (status, body) = harness
+            .upload("files", &[("a.txt", "text/plain", b"x")])
+            .await;
+        assert_eq!(status, 200, "{answer}: {body}");
+        assert_eq!(body["files"][0]["fileId"], expected, "{answer}");
+    }
+}
+
+/// Three files, one request, three identifiers — which is what a form is for.
+#[tokio::test]
+async fn a_batch_goes_out_as_one_request_when_the_target_takes_a_form() {
+    let target = upload_target(json!({
+        "documents": [{"ref": "d1"}, {"ref": "d2"}, {"ref": "d3"}],
+    }))
+    .await;
+
+    let harness = Harness::start(&[(
+        "mcp.yaml",
+        with_upload(
+            &target.uri(),
+            &format!("{}/files", target.uri()),
+            "      id:\n        - $.documents[*].ref\n",
+        ),
+    )])
+    .await;
+
+    let (status, body) = harness
+        .upload(
+            "files",
+            &[
+                ("one.txt", "text/plain", b"1"),
+                ("two.txt", "text/plain", b"2"),
+                ("three.txt", "text/plain", b"3"),
+            ],
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+
+    let files = body["files"].as_array().unwrap();
+    assert_eq!(files.len(), 3);
+    // Positional, and that is the contract: the nth identifier belongs to the
+    // nth file, in the order they went out.
+    assert_eq!(files[0]["fileId"], "d1");
+    assert_eq!(files[1]["fileId"], "d2");
+    assert_eq!(files[2]["fileId"], "d3");
+    assert_eq!(files[2]["filename"], "three.txt");
+
+    // One request for the lot, not three.
+    assert_eq!(body["exchanges"].as_array().unwrap().len(), 1);
+    let requests = target.received_requests().await.expect("requests");
+    assert_eq!(requests.len(), 1);
+    let sent = String::from_utf8_lossy(&requests[0].body);
+    assert_eq!(sent.matches("name=\"file\"").count(), 3, "{sent}");
+}
+
+/// A body holds one file, so a batch is a sequence — and every request shows up.
+#[tokio::test]
+async fn a_raw_target_gets_one_request_per_file() {
+    let target = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/objects"))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .insert_header("location", "/objects/stored")
+                .set_body_string(""),
+        )
+        .mount(&target)
+        .await;
+
+    let harness = Harness::start(&[(
+        "mcp.yaml",
+        with_upload(
+            &target.uri(),
+            &format!("{}/objects", target.uri()),
+            "      method: put\n      body: raw\n      id_header: location\n",
+        ),
+    )])
+    .await;
+
+    let (status, body) = harness
+        .upload(
+            "files",
+            &[
+                ("one.bin", "application/octet-stream", b"1"),
+                ("two.bin", "application/octet-stream", b"2"),
+            ],
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+
+    assert_eq!(body["files"].as_array().unwrap().len(), 2);
+    // An empty body said nothing; the header said everything.
+    assert_eq!(body["files"][0]["fileId"], "/objects/stored");
+    assert_eq!(body["exchanges"].as_array().unwrap().len(), 2);
+    assert_eq!(body["exchanges"][0]["method"], "PUT");
+
+    // The file *is* the body — no form boundary, no field name, and the media
+    // type is the file's own.
+    let requests = target.received_requests().await.expect("requests");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].body, b"1");
+    assert_eq!(
+        requests[0].headers.get("content-type").unwrap(),
+        "application/octet-stream"
+    );
+}
+
+#[tokio::test]
+async fn an_upload_goes_out_as_whoever_the_server_authenticates_as() {
+    let secret = token_file("mcp-upload-token", "s3cr3t-upload");
+    let target = MockServer::start().await;
+    // The target only answers a request carrying the credential, so a passing
+    // test means the token travelled — not that the request merely succeeded.
+    Mock::given(method("POST"))
+        .and(path("/files"))
+        .and(header("authorization", "Bearer s3cr3t-upload"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "doc_1"})))
+        .mount(&target)
+        .await;
+
+    let harness = Harness::start(&[
+        (
+            "auth.yaml",
+            format!(
+                "providers:\n  - name: workload\n    kind: token\n    value:\n      file: {}\n",
+                secret.display()
+            ),
+        ),
+        (
+            "mcp.yaml",
+            format!(
+                "servers:\n  - name: files\n    url: {0}/mcp\n    auth: workload\n    \
+                 upload:\n      url: {0}/files\n",
+                target.uri()
+            ),
+        ),
+    ])
+    .await;
+
+    let (status, body) = harness
+        .upload("files", &[("notes.txt", "text/plain", b"hello")])
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["files"][0]["fileId"], "doc_1");
+
+    // The identity is the point of hanging `upload:` off the server rather than
+    // off its own block — and the credential still never comes back out.
+    let text = serde_json::to_string(&body).expect("serialise");
+    assert!(
+        !text.contains("s3cr3t-upload"),
+        "the credential leaked: {text}"
+    );
+
+    std::fs::remove_file(&secret).ok();
+}
+
+#[tokio::test]
+async fn a_server_with_nowhere_to_put_a_file_says_so_in_those_words() {
+    let harness = Harness::start(&[(
+        "mcp.yaml",
+        "servers:\n  - name: weather\n    url: https://mcp.internal/mcp\n".to_owned(),
+    )])
+    .await;
+
+    let (status, body) = harness
+        .upload("weather", &[("deck.pptx", "application/zip", b"PK")])
+        .await;
+    // `422`, not `404`: the server exists, the request does not apply to it —
+    // and the message names the three lines of `mcp.yaml` that would fix it.
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["code"], "mcp_no_upload_target");
+    assert!(body["message"].as_str().unwrap().contains("upload"));
+}
+
+#[tokio::test]
+async fn a_refused_upload_is_still_a_wire_you_can_read() {
+    let target = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/files"))
+        .respond_with(ResponseTemplate::new(413).set_body_string("that file is too large"))
+        .mount(&target)
+        .await;
+
+    let harness = Harness::start(&[(
+        "mcp.yaml",
+        with_upload(&target.uri(), &format!("{}/files", target.uri()), ""),
+    )])
+    .await;
+
+    let (status, body) = harness
+        .upload(
+            "files",
+            &[("huge.bin", "application/octet-stream", b"xxxx")],
+        )
+        .await;
+    assert_eq!(status, 502, "{body}");
+    assert_eq!(body["code"], "mcp_upload_failed");
+    // The target's own answer, carried through rather than summarised away: a
+    // `413` is the endpoint saying its limit out loud, which is the finding.
+    assert_eq!(body["detail"]["exchanges"][0]["status"], 413);
+    assert!(
+        body["detail"]["exchanges"][0]["response"]
+            .as_str()
+            .unwrap()
+            .contains("too large")
+    );
+}
+
+/// With a `raw` target the third file failing says nothing about the two that
+/// landed, and dropping their records would lose the only evidence that they did.
+#[tokio::test]
+async fn a_batch_that_fails_halfway_keeps_the_requests_that_worked() {
+    let target = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/files"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "doc_1"})))
+        .up_to_n_times(1)
+        .mount(&target)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/files"))
+        .respond_with(ResponseTemplate::new(507).set_body_string("out of space"))
+        .mount(&target)
+        .await;
+
+    let harness = Harness::start(&[(
+        "mcp.yaml",
+        with_upload(
+            &target.uri(),
+            &format!("{}/files", target.uri()),
+            "      body: raw\n",
+        ),
+    )])
+    .await;
+
+    let (status, body) = harness
+        .upload(
+            "files",
+            &[
+                ("one.txt", "text/plain", b"1"),
+                ("two.txt", "text/plain", b"2"),
+            ],
+        )
+        .await;
+    assert_eq!(status, 502, "{body}");
+
+    let exchanges = body["detail"]["exchanges"].as_array().unwrap();
+    assert_eq!(exchanges.len(), 2, "{body}");
+    assert_eq!(exchanges[0]["status"], 200);
+    assert_eq!(exchanges[0]["files"][0]["fileId"], "doc_1");
+    assert_eq!(exchanges[1]["status"], 507);
+}
+
+#[tokio::test]
+async fn an_answer_with_no_identifier_where_the_paths_say_is_not_a_success() {
+    let target = upload_target(json!({"stored": true})).await;
+
+    let harness = Harness::start(&[(
+        "mcp.yaml",
+        with_upload(&target.uri(), &format!("{}/files", target.uri()), ""),
+    )])
+    .await;
+
+    let (status, body) = harness
+        .upload("files", &[("deck.pptx", "application/zip", b"PK")])
+        .await;
+    // The bytes arrived; there is simply nothing to quote into a tool call, and
+    // reporting success would hand the model an `undefined` to pass along.
+    assert_eq!(status, 502, "{body}");
+    let message = body["message"].as_str().unwrap();
+    assert!(message.contains("$.id"), "{message}");
+    assert_eq!(body["detail"]["exchanges"][0]["status"], 200);
+}
+
+/// Two identifiers for three files means guessing which file lost one, and this
+/// is not a place to guess.
+#[tokio::test]
+async fn a_count_that_does_not_match_what_went_out_is_a_failure_that_says_both() {
+    let target = upload_target(json!({"documents": [{"ref": "d1"}]})).await;
+
+    let harness = Harness::start(&[(
+        "mcp.yaml",
+        with_upload(
+            &target.uri(),
+            &format!("{}/files", target.uri()),
+            "      id:\n        - $.documents[*].ref\n",
+        ),
+    )])
+    .await;
+
+    let (status, body) = harness
+        .upload(
+            "files",
+            &[
+                ("one.txt", "text/plain", b"1"),
+                ("two.txt", "text/plain", b"2"),
+            ],
+        )
+        .await;
+    assert_eq!(status, 502, "{body}");
+    let message = body["message"].as_str().unwrap();
+    assert!(message.contains('2'), "{message}");
+    assert!(message.contains("wildcard"), "{message}");
+}
+
+/// A form field with no filename is a form value, not a file: a caller sending
+/// both should not have its text field uploaded as a document — and a form of
+/// nothing but text fields has sent no file at all.
+#[tokio::test]
+async fn a_form_carrying_no_file_is_refused_before_anything_goes_out() {
+    let target = upload_target(json!({"id": "doc_1"})).await;
+    let harness = Harness::start(&[(
+        "mcp.yaml",
+        with_upload(&target.uri(), &format!("{}/files", target.uri()), ""),
+    )])
+    .await;
+
+    let response = harness
+        .client
+        .post(format!("{}/api/mcp/files/upload", harness.base))
+        .multipart(reqwest::multipart::Form::new().text("note", "no file here"))
+        .send()
+        .await
+        .expect("upload");
+    let status = response.status().as_u16();
+    let body: Value = response.json().await.expect("json");
+
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["code"], "no_file");
+    assert!(
+        target
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn an_upload_target_shows_up_on_the_server_listing() {
+    let harness = Harness::start(&[(
+        "mcp.yaml",
+        "servers:\n  - name: files\n    url: https://files.internal/mcp\n    upload:\n      \
+         url: https://files.internal/v1/documents\n  \
+         - name: weather\n    url: https://weather.internal/mcp\n"
+            .to_owned(),
+    )])
+    .await;
+
+    let servers = harness.get("/api/mcp").await;
+    // Presence decides whether the composer can offer a file to this server at
+    // all. The rest is there to be read: what this server is about to do.
+    assert_eq!(
+        servers["servers"][0]["upload"]["url"],
+        "https://files.internal/v1/documents"
+    );
+    assert_eq!(servers["servers"][0]["upload"]["body"], "multipart");
+    assert_eq!(servers["servers"][0]["upload"]["method"], "POST");
+    assert!(servers["servers"][1]["upload"].is_null());
 }

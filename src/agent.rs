@@ -425,14 +425,14 @@ fn feed_back(
 ) {
     messages.push(Message {
         role: Role::Assistant,
-        content: completion.content.clone(),
+        content: completion.content.clone().map(Into::into),
         tool_calls: completion.tool_calls.clone(),
         tool_call_id: None,
     });
     for invocation in tools {
         messages.push(Message {
             role: Role::Tool,
-            content: Some(invocation.result.clone()),
+            content: Some(invocation.result.clone().into()),
             tool_calls: Vec::new(),
             tool_call_id: invocation.call.id.clone(),
         });

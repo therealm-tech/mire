@@ -126,6 +126,23 @@ pub struct McpPath {
     pub name: String,
 }
 
+/// What the files are called on the other side, once they are there.
+///
+/// The identifiers are the whole product: they are what a turn quotes and what a
+/// tool is then handed. The bytes are not echoed back — they were just sent, and
+/// this is not the place to hand them out again.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct McpUploadResponse {
+    /// Registry name of the server the files were uploaded for.
+    pub server: String,
+    /// Every file, in the order it was sent, each with its identifier.
+    pub files: Vec<crate::mcp::UploadedFile>,
+    /// The requests it took. One for a `multipart` target, one per file for a
+    /// `raw` one — which is the target's shape showing through, and worth seeing.
+    pub exchanges: Vec<crate::mcp::UploadExchange>,
+}
+
 /// Text to embed: one string, or several.
 ///
 /// Both spellings exist in the wild for `input`, and typing `["ping"]` to embed
@@ -363,6 +380,7 @@ impl From<CallRequest> for CallInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::message::Content;
 
     #[test]
     fn prompt_is_shorthand_for_one_user_message() {
@@ -371,7 +389,14 @@ mod tests {
         let input: CallInput = request.into();
 
         assert_eq!(input.messages.len(), 1);
-        assert_eq!(input.messages[0].content.as_deref(), Some("ping"));
+        assert_eq!(
+            input.messages[0]
+                .content
+                .as_ref()
+                .and_then(Content::text)
+                .as_deref(),
+            Some("ping")
+        );
     }
 
     #[test]
@@ -385,7 +410,14 @@ mod tests {
         let input: CallInput = request.into();
 
         assert_eq!(input.messages.len(), 1);
-        assert_eq!(input.messages[0].content.as_deref(), Some("kept"));
+        assert_eq!(
+            input.messages[0]
+                .content
+                .as_ref()
+                .and_then(Content::text)
+                .as_deref(),
+            Some("kept")
+        );
     }
 
     #[test]

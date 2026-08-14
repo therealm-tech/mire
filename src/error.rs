@@ -129,6 +129,23 @@ impl From<crate::mcp::McpError> for ApiError {
             McpError::Header { .. } => {
                 Self::new(StatusCode::BAD_REQUEST, "mcp_header_error", message)
             }
+            // Nothing is wrong with the server: it was simply never told where a
+            // file goes. `422` rather than `404` — the server exists, the request
+            // does not apply to it.
+            McpError::NoUploadTarget(_) => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "mcp_no_upload_target",
+                message,
+            ),
+            // The round trips ride along in `detail`, so a refused upload reaches
+            // **Traffic** like every other wire — including the requests that
+            // *did* land before one did not, which are the evidence that the
+            // failure is about one file rather than about the target.
+            McpError::Upload { exchanges, .. } => {
+                let recorded = serde_json::to_value(&exchanges).unwrap_or(Value::Null);
+                Self::new(StatusCode::BAD_GATEWAY, "mcp_upload_failed", message)
+                    .with_detail(serde_json::json!({ "exchanges": recorded }))
+            }
         }
     }
 }

@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use auth::McpCredentials;
-pub use client::{McpClient, McpServer};
+pub use client::{McpClient, McpServer, UploadBody, UploadMethod, UploadTarget};
 pub use headers::HeaderTemplates;
 pub use negotiate::Session;
 pub use registry::McpRegistry;
@@ -92,6 +92,106 @@ pub struct McpExchange {
     /// Why there is no response, when there is none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// A file on its way to a server's upload API.
+///
+/// Held whole rather than streamed, and that is a deliberate ceiling: the bytes
+/// arrived in one request from a browser that had already read them, and a
+/// streaming hop would buy nothing that the size cap on the route does not
+/// already decide.
+#[derive(Debug, Clone)]
+pub struct UploadFile {
+    /// Name as it was on disk. Several backends decide how to parse a file from
+    /// its extension and nothing else.
+    pub filename: String,
+    /// What the browser called it, or empty when it had no idea.
+    pub media_type: String,
+    /// The file itself.
+    pub bytes: Vec<u8>,
+}
+
+impl UploadFile {
+    /// The same file with the bytes left out, which is what a record holds.
+    #[must_use]
+    pub fn describe(&self) -> UploadedFile {
+        UploadedFile {
+            filename: self.filename.clone(),
+            media_type: self.media_type.clone(),
+            size: self.bytes.len(),
+            file_id: None,
+        }
+    }
+}
+
+/// One upload request, as it went over the wire.
+///
+/// A sibling of [`McpExchange`] rather than a variant of it: an upload is not
+/// JSON-RPC, has no revision and no session, and squeezing it into a record
+/// shaped for a protocol it does not speak would mean inventing values for three
+/// fields to make the types line up.
+///
+/// It is here for the same reason that one is: **Traffic** shows every wire this
+/// process touched, and an upload that happened out of sight would be the one
+/// request nobody could read back when a tool then cannot find the file.
+///
+/// One record per *request*, which is not one per file: a target taking
+/// `multipart/form-data` carries the whole batch in a single request, and
+/// splitting that into one record per file would be inventing requests nobody
+/// made.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadExchange {
+    /// Registry name of the server whose target this is.
+    pub server: String,
+    /// Where the bytes went.
+    pub url: String,
+    /// The method it went out as.
+    pub method: String,
+    /// What this request carried, named and measured.
+    pub files: Vec<UploadedFile>,
+    /// Request headers, masked. The body is not here: it is the files.
+    pub headers: BTreeMap<String, String>,
+    /// HTTP status, or `0` when the request never reached the target.
+    pub status: u16,
+    /// Response headers, masked. Where a target that answers `201` and nothing
+    /// puts the only thing it said.
+    pub response_headers: BTreeMap<String, String>,
+    /// The response body, masked.
+    pub response: String,
+    /// Round trip, in milliseconds.
+    pub latency_ms: u64,
+    /// Why there is no usable answer, when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// One file, as it went out and as the target now knows it.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadedFile {
+    /// Name it went out under.
+    pub filename: String,
+    /// Media type it was sent as. Empty when the browser could not name one.
+    pub media_type: String,
+    /// Size in bytes.
+    pub size: usize,
+    /// The identifier the target answered with.
+    ///
+    /// Absent on the record of a request that failed, which is exactly when the
+    /// record is worth reading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_id: Option<String>,
+}
+
+/// A batch of files that reached their target.
+#[derive(Debug, Clone)]
+pub struct Uploaded {
+    /// Every file, in the order it was given, each with its identifier.
+    pub files: Vec<UploadedFile>,
+    /// The requests it took, for the traffic panel. One for a `multipart`
+    /// target, one per file for a `raw` one.
+    pub exchanges: Vec<UploadExchange>,
 }
 
 /// Where one run collects the MCP exchanges it produced.
@@ -402,6 +502,33 @@ pub enum McpError {
         header: String,
         /// Why, with the template's own words rather than any value.
         message: String,
+    },
+
+    /// A file was offered to a server that declares nowhere to put one.
+    ///
+    /// Its own variant rather than a generic refusal: the fix is three lines of
+    /// `mcp.yaml`, and an error that does not say so leaves you looking at the
+    /// server instead of at the file next to it.
+    #[error("MCP server `{0}` declares no `upload:`, so there is nowhere to put a file for it")]
+    NoUploadTarget(String),
+
+    /// The upload target could not be reached, refused the files, or answered
+    /// without the identifiers one was expected.
+    ///
+    /// Carries the wire records, because this is the one failure whose whole
+    /// explanation is the round trip: a `401` from the target, a `413`, an id at
+    /// a path that no longer exists. Every request made before it went wrong is
+    /// in there too — with a `raw` target the third file failing says nothing
+    /// about the two that landed, and dropping their records would lose the only
+    /// evidence that they did.
+    #[error("MCP server `{server}`: {message}")]
+    Upload {
+        /// Registry name of the server whose target refused it.
+        server: String,
+        /// What went wrong, scrubbed of credentials.
+        message: String,
+        /// Every request made, in order, for the traffic panel.
+        exchanges: Vec<UploadExchange>,
     },
 
     /// Credentials could not be produced for the server.

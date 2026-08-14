@@ -19,6 +19,7 @@ import type {
   ToolInvocation,
   Trace,
   Turn,
+  UploadExchange,
 } from './api'
 import type { Tone } from './components/primitives'
 
@@ -150,10 +151,31 @@ export interface ProtocolExchange {
   exchange: McpExchange
 }
 
-export type Exchange = ModelExchange | ToolExchange | ProtocolExchange
+/**
+ * One file put where a server's tools can read it back.
+ *
+ * The only exchange that does not belong to a run: it happens in the composer,
+ * before there is a turn to attach it to, and often before the profile has been
+ * called once. It is here anyway, because **Traffic** is every wire this process
+ * touched — and when a tool then answers "no such file", this request is the
+ * first and only thing worth reading.
+ */
+export interface UploadExchangeItem {
+  kind: 'upload'
+  id: string
+  /** Always `null`: an upload happens between turns, not inside one. */
+  turn: null
+  exchange: UploadExchange
+}
+
+export type Exchange = ModelExchange | ToolExchange | ProtocolExchange | UploadExchangeItem
 
 export function callExchange(outcome: CallOutcome): ModelExchange {
   return { kind: 'model', id: nextId('model'), turn: null, outcome }
+}
+
+export function uploadExchange(exchange: UploadExchange): UploadExchangeItem {
+  return { kind: 'upload', id: nextId('upload'), turn: null, exchange }
 }
 
 /**
@@ -216,12 +238,13 @@ export function statusTone(status: number, expectUnauthorized: boolean): Tone {
 /**
  * Whether this exchange is one of the ones you are looking for.
  *
- * The failures, in the four shapes they come in: a status the endpoint should
+ * The failures, in the five shapes they come in: a status the endpoint should
  * not have answered, a stream that stopped rather than ended, a protocol round
- * trip that never landed, and a tool that failed, reported a problem, or was
- * called with arguments its own schema refuses. `expectUnauthorized` is carried
- * through because a `401` asked anonymously is a pass, and a filter that hid the
- * passes would hide it.
+ * trip that never landed, a tool that failed, reported a problem, or was called
+ * with arguments its own schema refuses, and a file that never reached the store
+ * a tool was going to read it from. `expectUnauthorized` is carried through
+ * because a `401` asked anonymously is a pass, and a filter that hid the passes
+ * would hide it.
  */
 export function failed(exchange: Exchange, expectUnauthorized: boolean): boolean {
   switch (exchange.kind) {
@@ -239,6 +262,10 @@ export function failed(exchange: Exchange, expectUnauthorized: boolean): boolean
     case 'tool': {
       const tool = exchange.invocation
       return tool.error !== undefined || tool.reportedError || tool.schemaErrors.length > 0
+    }
+    case 'upload': {
+      const upload = exchange.exchange
+      return upload.error !== undefined || upload.status === 0 || upload.status >= 400
     }
   }
 }

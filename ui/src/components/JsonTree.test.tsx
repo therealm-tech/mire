@@ -35,6 +35,29 @@ describe('JsonTree', () => {
     expect(screen.getByText('"second"')).toBeInTheDocument()
   })
 
+  /**
+   * An attached file becomes a megabyte of base64 in the request body. Painting
+   * it costs the tab, and reading it tells nobody anything — but it is still on
+   * the wire, so hiding it outright would be the wrong lie.
+   */
+  it('folds a string long enough to be a file, and unfolds it on request', async () => {
+    const blob = `data:image/png;base64,${'A'.repeat(5000)}`
+    const user = userEvent.setup()
+    render(<JsonTree value={{ url: blob }} />)
+
+    expect(screen.queryByText(`"${blob}"`)).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /more characters/ }))
+    expect(screen.getByText(`"${blob}"`)).toBeInTheDocument()
+  })
+
+  it('leaves anything an endpoint would actually return alone', () => {
+    render(<JsonTree value={{ content: 'x'.repeat(300) }} />)
+
+    expect(screen.getByText(`"${'x'.repeat(300)}"`)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /more characters/ })).not.toBeInTheDocument()
+  })
+
   it('opens the top of the tree and leaves what is deeper folded', () => {
     render(<JsonTree value={{ a: { b: { c: 1 } } }} />)
 

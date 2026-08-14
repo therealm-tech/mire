@@ -17,9 +17,9 @@ all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 
 [dependencies]
-aide = { version = "0.15.1", features = ["axum", "axum-json", "axum-query", "scalar", "macros"] }
+aide = { version = "0.15.1", features = ["axum", "axum-json", "axum-multipart", "axum-query", "scalar", "macros"] }
 async-stream = "0.3.6"
-axum = { version = "0.8.9", features = ["macros"] }
+axum = { version = "0.8.9", features = ["macros", "multipart"] }
 base64 = "0.23.1"
 clap = { version = "4.6.6", features = ["derive", "env"] }
 futures-core = "0.3.34"
@@ -27,7 +27,7 @@ jsonschema = { version = "0.49.9", default-features = false }
 minijinja = { version = "2.23.0", features = ["json"] }
 notify = "8.2.0"
 rand = "0.10.2"
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json", "charset", "http2", "stream", "gzip", "system-proxy", "form"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json", "charset", "http2", "multipart", "stream", "gzip", "system-proxy", "form"] }
 rhai = { version = "1.25.1", features = ["sync", "serde"] }
 rust-embed = "8.12.0"
 schemars = { version = "0.9", features = ["url2"] }
