@@ -198,7 +198,19 @@ function Bubble({
 
   return (
     <div className={`flex flex-col gap-1 ${mine ? 'items-end' : 'items-start'}`}>
-      <div className="flex items-center gap-2 px-1">
+      {/*
+        `select-none`, because this row is chrome and the bubble under it is the
+        thing that was said. A drag that starts a few pixels high — which is most
+        of them, the bubble being sided rather than full width — used to put
+        "you Retry" at the top of whatever you pasted. Copying a question to ask
+        it somewhere else is the most ordinary thing to do with one, and it was
+        handing back the label and a button.
+
+        The whole run, attribution and all, has its own way out: the export
+        button hands over the `messages` array as JSON, which is a better answer
+        to "send me your conversation" than a screen-scrape ever was.
+      */}
+      <div className="flex select-none items-center gap-2 px-1">
         <span className="text-faint text-xs">{ROLE_LABELS[message.role]}</span>
         {onRetry === undefined ? null : (
           <button
@@ -342,7 +354,8 @@ function Verdict({ item }: { item: VerdictItem }) {
 function Writing({ text, done }: { text: string; done: boolean }) {
   return (
     <div className="flex flex-col items-start gap-1">
-      <div className="flex items-center gap-2 px-1">
+      {/* Chrome, and unselectable for the same reason a bubble's label is. */}
+      <div className="flex select-none items-center gap-2 px-1">
         <span className="text-faint text-xs">model</span>
         <Badge tone={done ? 'good' : 'neutral'}>{done ? 'complete' : 'receiving…'}</Badge>
       </div>

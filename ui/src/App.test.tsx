@@ -1624,6 +1624,32 @@ describe('conversation', () => {
     expect(sent[1]?.messages).toEqual([{ role: 'user', content: 'two' }])
   })
 
+  it('keeps the label and the Retry out of a copied message', async () => {
+    const { fetchMock, sent } = recordingApi(['pong'])
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await type(user, 'a question')
+    await loopMode(user)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(sent).toHaveLength(1))
+
+    const conversation = within(panel('Conversation'))
+
+    // jsdom has neither layout nor a clipboard, so what is asserted is the rule
+    // that decides the paste rather than the paste itself: `user-select: none`
+    // is what keeps a browser from putting a run of chrome in the selection.
+    expect(conversation.getByText('you').parentElement?.className).toContain('select-none')
+    expect(
+      conversation.getByRole('button', { name: /^Retry turn/ }).closest('div')?.className,
+    ).toContain('select-none')
+
+    // And the thing being copied stays copyable, which is the other half of it.
+    expect(conversation.getByText('a question').className).not.toContain('select-none')
+  })
+
   it('never offers a conversation for an embedding profile', async () => {
     const { fetchMock } = recordingApi(['pong'])
     vi.stubGlobal('fetch', fetchMock)
