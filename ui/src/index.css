@@ -1,7 +1,8 @@
 @import 'tailwindcss';
 
 /*
- * The palette is the mark: near-black ink on a white sheet, and nothing else.
+ * The palette is the mark: near-black ink on an all-but-white sheet, and
+ * nothing else.
  *
  * Two layers. Below, the brand scale — the ink sampled from the logo, the sheet
  * it is printed on, and the steps between them, fixed values that mean the same
@@ -25,11 +26,12 @@
   --color-transparent: transparent;
 
   /*
-   * The sheet: white, and the greys it recedes into. Tinted a few degrees
-   * towards the navy rather than left neutral, so a border and a well read as
-   * the ink thinned down instead of as a second, colder family.
+   * The sheet: not quite white. Warmed a couple of degrees towards the cream
+   * the dark scheme prints in, so the light mode still nods at the mark. The
+   * greys it recedes into lean the other way, towards the navy, so a border and
+   * a well read as the ink thinned down rather than as a second family.
    */
-  --color-sheet-0: #ffffff;
+  --color-sheet-0: #fffdf8;
   --color-sheet-100: #f7f8fa;
   --color-sheet-200: #eef1f5;
   --color-sheet-300: #dfe3ea;
@@ -79,7 +81,7 @@
 
 :root {
   /*
-   * Page and panel are the same white: every panel already carries a border, so
+   * Page and panel are the same sheet: every panel already carries a border, so
    * the card reads by its edge rather than by floating a shade above the page.
    * `well` is the only tinted surface, which is what lets it double as the
    * recess under code and the hover behind a row.
