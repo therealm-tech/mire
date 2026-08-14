@@ -1,4 +1,5 @@
 import type { AuthDescriptor, LoadIssue, ProfileSummary, SessionView } from '../api'
+import { hostOf, reaches } from '../preflight'
 import { Badge, Button, Field, INPUT_CLASSES } from './primitives'
 
 /** "expires in 4 min", or the blunt truth. */
@@ -8,30 +9,6 @@ function expiry(session: SessionView): string {
   }
   const minutes = Math.round(session.expiresInS / 60)
   return minutes < 1 ? `expires in ${session.expiresInS}s` : `expires in ${minutes} min`
-}
-
-/** The host a profile points at, or `null` from a URL that will not parse. */
-export function hostOf(url: string): string | null {
-  try {
-    return new URL(url).hostname
-  } catch {
-    return null
-  }
-}
-
-/**
- * Whether this credential is allowed to go where this profile points.
- *
- * `allowed_hosts` is enforced on the server for every call, so a profile whose
- * own `auth:` excludes its own `url:` fails every time. That is a
- * misconfiguration you want to read, not discover.
- */
-export function reaches(provider: AuthDescriptor, profile: ProfileSummary): boolean {
-  if (provider.allowedHosts.length === 0) {
-    return true
-  }
-  const host = hostOf(profile.url)
-  return host === null || provider.allowedHosts.includes(host)
 }
 
 /**

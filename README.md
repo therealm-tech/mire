@@ -132,20 +132,31 @@ listen address explicitly with `--host 0.0.0.0`. That is a choice, not a default
 Deliberately small. It does not edit anything — the profiles are yours and your
 editor's — and it holds no logic of its own: it shows what the API returns.
 
-- **Auth, above everything else, and read-only.** The identity is the profile's,
-  declared in its `auth:` next to the URL it authenticates against, so the panel
-  shows it rather than offering alternatives — what you read in the file is what
-  went out, and the UI never puts an `auth` of its own on the wire. To ask the
-  same endpoint as somebody else, copy the profile and change one line; that copy
-  is a thing you can name, keep and re-run, which a click never was. A profile
-  with no `auth:` says so and resolves to `anonymous`, where a `401` shows up
-  green with a note that the route is protected, because that is a pass. A
-  profile naming a credential whose `allowed_hosts` excludes its own URL is
-  flagged outright — every call it makes is refused before anything goes out.
+- **What the next call will do**, above the box you would make it from. Where it
+  goes, who it goes as, and which MCP servers it would set up first — the
+  "known signal in" half, said before it happens rather than reconstructed from a
+  trace afterwards. When something would refuse the call it says so there and
+  offers the way out: every blocker it lists is a refusal `mire` is already known
+  to make — an identity or a server no file declares, a credential outside its
+  `allowed_hosts` or missing from this tab, a browser session nobody has fetched.
+  It says nothing about whether the endpoint is up. That is the question you came
+  to ask, and answering it here would be answering it by guessing.
+- **Auth, folded away until it is wanted, and read-only.** The identity is the
+  profile's, declared in its `auth:` next to the URL it authenticates against,
+  so the panel shows it rather than offering alternatives — what you read in the
+  file is what went out, and the UI never puts an `auth` of its own on the wire.
+  To ask the same endpoint as somebody else, copy the profile and change one
+  line; that copy is a thing you can name, keep and re-run, which a click never
+  was. A profile with no `auth:` says so and resolves to `anonymous`, where a
+  `401` shows up green with a note that the route is protected, because that is
+  a pass. A profile naming a credential whose `allowed_hosts` excludes its own
+  URL is flagged outright — every call it makes is refused before anything goes
+  out.
 
-  What stays interactive is what no file could hold: a credential typed into this
-  tab, and a browser session somebody has to go and fetch — **Sign in**, then who
-  you are and a countdown.
+  It opens from **Auth** on the bar above, and by itself when the way out of a
+  blocker is a field inside it. What stays interactive is what no file could
+  hold: a credential typed into this tab, and a browser session somebody has to
+  go and fetch — **Sign in**, then who you are and a countdown.
 
   Under it, in its own section, the same panel lists the identities the profile's
   **MCP servers** will use. A separate question answered in a separate file: the
@@ -164,6 +175,11 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   [loop](#agent-mode) — always, because a profile with no tools stops on turn one
   and that is the same one turn a single call would have made. **Stream** is the
   exception: one turn, read chunk by chunk, the text appearing as it arrives.
+  While either is in flight, **Stop** drops the request where it stands and
+  whatever had arrived stays on the page — a stream cut off after four tokens
+  produced four tokens, and that is a finding rather than a mess to clear up.
+  Nothing is sent upstream to call the work off: an endpoint that has been asked
+  a question is going to answer it, so this is about your tab and says only that.
   More on what the transcript is [below](#having-a-conversation).
 - **Input**, for embedding profiles. One text per line, a run count, and a
   checkbox for the full vectors. There is no second turn of an embedding, so
@@ -718,8 +734,9 @@ bad entry, without taking the rest of the file down.
 #### Or choose it per run
 
 Editing a file, restarting and putting it back is a lot of ceremony for one
-question. The **Protocol** dropdown above the MCP servers in the UI asks it
-directly, and `POST /api/agent` takes the same thing:
+question. The **Protocol** dropdown in the composer — next to **max turns**,
+because both are parameters of the run — asks it directly, and `POST /api/agent`
+takes the same thing:
 
 ```json
 { "profile": "chat", "prompt": "weather in Paris?", "mcpProtocol": "2025-03-26" }

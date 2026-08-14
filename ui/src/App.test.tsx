@@ -189,6 +189,27 @@ function agentStream(turns: ReturnType<typeof answerTurn>[]): string {
   ].join('\n')
 }
 
+/**
+ * A stream that opens and then says nothing until the caller gives up.
+ *
+ * `fetch` wires its signal to the body, so a real abort surfaces as the reader
+ * rejecting; a mock that resolved and then sat there would test a hang rather
+ * than a cancellation.
+ */
+function stalled(signal: AbortSignal | null | undefined): Response {
+  const body = new ReadableStream({
+    start(controller) {
+      signal?.addEventListener('abort', () => {
+        controller.error(new DOMException('The operation was aborted.', 'AbortError'))
+      })
+    },
+  })
+  return new Response(body, {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  })
+}
+
 /** An SSE response, as `mire` serves both streaming endpoints. */
 function sse(text: string): Response {
   return new Response(text, {
@@ -274,6 +295,20 @@ function recordingApi(answers: string[]) {
   return { fetchMock, sent }
 }
 
+/**
+ * Unfolds the auth detail.
+ *
+ * It is shut unless something needs acting on, so a test that reads the panel
+ * has to open it — the same click the page asks for. Already-open is not a
+ * failure: a profile blocked on a field opens it on arrival.
+ */
+async function openAuth(user: ReturnType<typeof userEvent.setup>) {
+  const toggle = await screen.findByRole('button', { name: /^(Auth|Hide auth)$/ })
+  if (toggle.textContent === 'Auth') {
+    await user.click(toggle)
+  }
+}
+
 beforeEach(() => {
   vi.stubGlobal('fetch', mockApi({ 'api/profiles': PROFILES, 'api/auth': AUTH, 'api/mcp': MCP }))
 })
@@ -306,6 +341,8 @@ describe('App', () => {
     // Anchored: a profile of kind `chat` carries the word in its badge too.
     expect(await screen.findByRole('button', { name: /^chat/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /embed/ })).toBeInTheDocument()
+
+    await openAuth(user)
 
     // `chat` declares no `auth:`, which resolves to the anonymous provider —
     // shown, and said out loud rather than left to be inferred from a blank.
@@ -388,6 +425,7 @@ describe('App', () => {
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: /pinned/ }))
+    await openAuth(user)
 
     expect(screen.getByText('out of allowed_hosts')).toBeInTheDocument()
     expect(screen.getByText(/refused before anything goes out/)).toBeInTheDocument()
@@ -1022,6 +1060,7 @@ describe('browser login', () => {
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: /^chat/ }))
+    await openAuth(user)
     expect(screen.queryByRole('button', { name: 'Sign in' })).not.toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: /as-me/ }))
@@ -1070,6 +1109,7 @@ describe('browser login', () => {
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: /as-me/ }))
+    await openAuth(user)
     await user.click(screen.getByRole('button', { name: 'Sign in' }))
 
     const login = await waitFor(() => {
@@ -1134,6 +1174,7 @@ describe('browser login', () => {
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: /as-me/ }))
+    await openAuth(user)
 
     // The reason survives the tab that closed, which is the whole point.
     expect(screen.getByText(/refused the login/)).toBeInTheDocument()
@@ -1232,6 +1273,7 @@ describe('browser login', () => {
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: /as-me/ }))
+    await openAuth(user)
     expect(screen.getByText('gleroy')).toBeInTheDocument()
     expect(screen.getByText('expires in 4 min')).toBeInTheDocument()
     expect(screen.getByText(/granted: openid profile/)).toBeInTheDocument()
@@ -1484,5 +1526,126 @@ describe('conversation', () => {
     await user.click(await screen.findByRole('button', { name: /embed/ }))
     // There is no such thing as a second turn of an embedding.
     expect(screen.queryByRole('heading', { name: 'Conversation' })).not.toBeInTheDocument()
+  })
+})
+
+describe('preflight', () => {
+  it('says where the call is going and who it goes as, before it is made', async () => {
+    render(<App />)
+
+    await screen.findByRole('button', { name: /^chat/ })
+    const bar = screen.getByLabelText('What the next call will do')
+
+    expect(within(bar).getByText('ready')).toBeInTheDocument()
+    expect(within(bar).getByText('https://models.internal/v1/chat/completions')).toBeInTheDocument()
+    expect(bar).toHaveTextContent('as anonymous')
+  })
+
+  it('counts the servers a run would set up first', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: /guarded/ }))
+    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('3 MCP servers')
+  })
+
+  it('names what would refuse the call, and starts the login that fixes it', async () => {
+    const popup = { location: { href: '' }, closed: false, close: vi.fn() }
+    vi.stubGlobal(
+      'open',
+      vi.fn(() => popup),
+    )
+
+    const logins: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input)
+        let payload: unknown = PROFILES
+        if (url.endsWith('/login')) {
+          logins.push(url)
+          payload = {
+            authorizationUrl: 'https://idp.example/authorize',
+            redirectUri: 'x',
+            state: 's',
+          }
+        } else if (url.endsWith('api/mcp')) {
+          payload = MCP
+        } else if (url.endsWith('api/auth')) {
+          payload = AUTH
+        }
+        return Promise.resolve(Response.json(payload))
+      }),
+    )
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    // `as-me` calls as a human, and nobody is signed in.
+    await user.click(await screen.findByRole('button', { name: /as-me/ }))
+    const bar = screen.getByLabelText('What the next call will do')
+    expect(within(bar).getByText('blocked')).toBeInTheDocument()
+    expect(bar).toHaveTextContent('Nobody is signed in to me')
+
+    // The fix is on the bar rather than three panels away.
+    await user.click(within(bar).getByRole('button', { name: 'Sign in to me' }))
+    await waitFor(() => expect(logins).toHaveLength(1))
+    expect(logins[0]).toContain('/api/auth/me/login')
+  })
+
+  it('opens the auth detail by itself when the fix is a field inside it', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    // `guarded` names `pasted`, whose value only this tab can supply — so the
+    // panel holding the box is already open rather than folded away.
+    await user.click(await screen.findByRole('button', { name: /guarded/ }))
+    expect(await screen.findByPlaceholderText('paste the credential')).toBeInTheDocument()
+
+    await user.type(screen.getByPlaceholderText('paste the credential'), 'sk-test')
+    expect(screen.getByLabelText('What the next call will do')).not.toHaveTextContent(
+      'has no value',
+    )
+  })
+})
+
+describe('stopping a run', () => {
+  it('drops the request and keeps what had already arrived', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input)
+        if (url.endsWith('api/agent')) {
+          return Promise.resolve(stalled(init?.signal))
+        }
+        let payload: unknown = PROFILES
+        if (url.endsWith('api/mcp')) {
+          payload = MCP
+        } else if (url.endsWith('api/auth')) {
+          payload = AUTH
+        }
+        return Promise.resolve(Response.json(payload))
+      }),
+    )
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: /^chat/ }))
+    // The box arrives prefilled, so it is cleared rather than typed into twice.
+    await user.clear(screen.getByLabelText('Message'))
+    await user.type(screen.getByLabelText('Message'), 'are you there')
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+
+    // Nothing to stop until there is something in flight.
+    const stop = await screen.findByRole('button', { name: 'Stop' })
+    await user.click(stop)
+
+    expect(await screen.findByText(/Stopped\./)).toBeInTheDocument()
+    // The question stays: it was asked, and the endpoint was told about it.
+    expect(screen.getByText('are you there')).toBeInTheDocument()
+    // Being called off is not a failure, and must not be reported as one.
+    expect(screen.queryByText(/could not run this call/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument()
   })
 })

@@ -16,6 +16,7 @@ export function EmbeddingRequest({
   onRepeat,
   onIncludeVectors,
   onSend,
+  onStop,
 }: {
   input: string
   repeat: number
@@ -25,6 +26,7 @@ export function EmbeddingRequest({
   onRepeat: (value: number) => void
   onIncludeVectors: (value: boolean) => void
   onSend: () => void
+  onStop: () => void
 }) {
   return (
     <Panel title="Input">
@@ -59,9 +61,16 @@ export function EmbeddingRequest({
           </label>
         </div>
 
-        <Button variant="primary" size="md" disabled={busy} onClick={onSend}>
-          Send
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="primary" size="md" disabled={busy} onClick={onSend}>
+            Send
+          </Button>
+          {busy ? (
+            <Button size="md" onClick={onStop} title="Drop this request. What has arrived stays.">
+              Stop
+            </Button>
+          ) : null}
+        </div>
       </div>
     </Panel>
   )

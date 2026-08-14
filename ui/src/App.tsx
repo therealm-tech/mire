@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   type AgentRequest,
   ApiError,
@@ -19,13 +19,12 @@ import {
   startLogin,
   streamCall,
 } from './api'
+import { AuthPanel } from './components/AuthPanel'
 import { ChatPanel } from './components/ChatPanel'
 import { EmbeddingPanel } from './components/EmbeddingPanel'
 import { EmbeddingRequest } from './components/EmbeddingRequest'
 import { Mark } from './components/Mark'
-import { McpAuth } from './components/McpAuth'
-import { McpProtocol } from './components/McpProtocol'
-import { ModelAuth } from './components/ModelAuth'
+import { Preflight } from './components/Preflight'
 import { ProfileList } from './components/ProfileList'
 import { Panel, Spinner } from './components/primitives'
 import { TrafficPanel } from './components/TrafficPanel'
@@ -41,6 +40,7 @@ import {
   wireMessages,
 } from './conversation'
 import { logger } from './logger'
+import { preflight } from './preflight'
 
 const ANONYMOUS = 'anonymous'
 
@@ -67,6 +67,26 @@ function assistantTurn(outcome: CallOutcome): Message | null {
     ...(decoded.content ? { content: decoded.content } : {}),
     ...(toolCalls.length > 0 ? { toolCalls } : {}),
   }
+}
+
+/**
+ * Whether this is the run being called off, rather than a run that went wrong.
+ *
+ * `fetch` rejects with an `AbortError` when its signal fires, and surfacing that
+ * as a failure would be reporting the button somebody just pressed as a fault.
+ *
+ * The name is read off the object rather than the constructor: what arrives is a
+ * `DOMException`, which is only *sometimes* an `instanceof Error` — not in jsdom,
+ * and not across a realm boundary. A rejection that calls itself `AbortError` is
+ * one, whatever it was built from.
+ */
+function abandoned(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'name' in error &&
+    (error as { name: unknown }).name === 'AbortError'
+  )
 }
 
 /** How long to wait for someone to get through their identity provider. */
@@ -138,6 +158,10 @@ export function App() {
   const [loginError, setLoginError] = useState<{ provider: string; message: string } | null>(null)
 
   const [busy, setBusy] = useState(false)
+  // The auth detail, which is a thing you read once. Shut by default so the box
+  // you actually came to type in starts near the top of the page.
+  const [authOpen, setAuthOpen] = useState(false)
+  const [stopped, setStopped] = useState(false)
   const [live, setLive] = useState<string | null>(null)
   const [embedding, setEmbedding] = useState<Embedding | null>(null)
   const [exchanges, setExchanges] = useState<Exchange[]>([])
@@ -146,6 +170,49 @@ export function App() {
   // The history is the timeline, not a copy of it: the two cannot drift, so what
   // the transcript shows is exactly what the next request will carry.
   const messages = useMemo(() => wireMessages(timeline), [timeline])
+
+  /**
+   * The run in flight, so that it can be called off.
+   *
+   * A ref rather than state: nothing renders differently for holding it, and a
+   * re-render between starting a call and aborting it would be a re-render that
+   * loses the handle.
+   */
+  const running = useRef<AbortController | null>(null)
+
+  /** Opens a run, replacing whatever the last one left behind. */
+  const begin = useCallback((): AbortSignal => {
+    running.current?.abort()
+    const controller = new AbortController()
+    running.current = controller
+    setBusy(true)
+    setStopped(false)
+    setCallError(null)
+    return controller.signal
+  }, [])
+
+  /** Closes it, however it ended. */
+  const settle = useCallback(() => {
+    running.current = null
+    setBusy(false)
+  }, [])
+
+  /**
+   * Stop waiting.
+   *
+   * The request is dropped where it stands and whatever arrived stays on the
+   * page: a stream cut off after four tokens produced four tokens, and that is a
+   * finding rather than a mess to clear up. Nothing is sent to call off the work
+   * upstream — an endpoint that has been asked a question is going to answer it —
+   * so this is about this tab, and says only that.
+   */
+  const stop = useCallback(() => {
+    running.current?.abort()
+    running.current = null
+    setStopped(true)
+    setBusy(false)
+    logger.info('run.stopped', {})
+  }, [])
 
   useEffect(() => {
     Promise.all([fetchProfiles(), fetchAuth(), fetchMcp()])
@@ -179,6 +246,25 @@ export function App() {
    * can disagree with the file.
    */
   const provider = auth?.providers.find((entry) => entry.name === (profile?.auth ?? ANONYMOUS))
+
+  /** What the next call would do, and what would stop it. */
+  const ready = useMemo(
+    () =>
+      profile && auth && mcp
+        ? preflight({ profile, provider, providers: auth.providers, servers: mcp.servers, token })
+        : null,
+    [profile, provider, auth, mcp, token],
+  )
+
+  // One kind of blocker is fixed by a field inside the panel rather than by a
+  // button on the bar, and telling somebody to paste a credential below while
+  // the box to paste it into is folded away would be a joke at their expense.
+  const blockedOnAField = ready?.blockers.some((blocker) => blocker.opensAuth) ?? false
+  useEffect(() => {
+    if (blockedOnAField) {
+      setAuthOpen(true)
+    }
+  }, [blockedOnAField])
 
   const signIn = useCallback((provider: string, prompt?: string) => {
     // Opened *before* awaiting anything: a popup opened after an await has lost
@@ -228,8 +314,7 @@ export function App() {
     if (!profile) {
       return
     }
-    setBusy(true)
-    setCallError(null)
+    const signal = begin()
     setLive(null)
     setEmbedding(null)
 
@@ -243,7 +328,7 @@ export function App() {
       body.token = token
     }
 
-    call(body)
+    call(body, signal)
       .then((result) => {
         setExchanges((current) => [...current, callExchange(result)])
         const decoded = result.response.decoded
@@ -255,14 +340,17 @@ export function App() {
         })
       })
       .catch((error: unknown) => {
+        if (abandoned(error)) {
+          return
+        }
         if (error instanceof ApiError) {
           setCallError(error)
         } else {
           logger.error('call.failed', { message: String(error) })
         }
       })
-      .finally(() => setBusy(false))
-  }, [profile, token, input, repeat, includeVectors])
+      .finally(settle)
+  }, [profile, token, input, repeat, includeVectors, begin, settle])
 
   /**
    * The turn about to be sent, appended to what came before.
@@ -288,8 +376,7 @@ export function App() {
     if (!profile) {
       return
     }
-    setBusy(true)
-    setCallError(null)
+    const signal = begin()
     setEmbedding(null)
     // Empty rather than null: the bubble appears immediately, so a stream that
     // never produces a token is visibly a stream that never produced a token.
@@ -301,46 +388,54 @@ export function App() {
       body.token = token
     }
 
-    streamCall(body, (event) => {
-      switch (event.event) {
-        case 'open':
-          logger.debug('stream.open', { status: event.status })
-          break
-        case 'delta':
-          setLive((current) => (current ?? '') + event.text)
-          break
-        case 'done': {
-          setExchanges((current) => [...current, callExchange(event)])
-          // The `done` event carries the same decoded answer the non-streaming
-          // endpoint returns, so the conversation is built from that rather than
-          // from the deltas: one source of truth, and it survives a stream whose
-          // last chunk arrived in a shape the delta reader skipped.
-          const answer = assistantTurn(event)
-          if (answer) {
-            setTimeline((current) => [...current, messageItem(answer)])
-            setLive(null)
+    streamCall(
+      body,
+      (event) => {
+        switch (event.event) {
+          case 'open':
+            logger.debug('stream.open', { status: event.status })
+            break
+          case 'delta':
+            setLive((current) => (current ?? '') + event.text)
+            break
+          case 'done': {
+            setExchanges((current) => [...current, callExchange(event)])
+            // The `done` event carries the same decoded answer the non-streaming
+            // endpoint returns, so the conversation is built from that rather
+            // than from the deltas: one source of truth, and it survives a
+            // stream whose last chunk arrived in a shape the delta reader
+            // skipped.
+            const answer = assistantTurn(event)
+            if (answer) {
+              setTimeline((current) => [...current, messageItem(answer)])
+              setLive(null)
+            }
+            logger.info('stream.done', {
+              status: event.response?.http.status ?? null,
+              ttftMs: event.response?.http.ttftMs ?? null,
+              chunks: event.response?.stream?.chunks ?? null,
+            })
+            break
           }
-          logger.info('stream.done', {
-            status: event.response?.http.status ?? null,
-            ttftMs: event.response?.http.ttftMs ?? null,
-            chunks: event.response?.stream?.chunks ?? null,
-          })
-          break
+          case 'failed':
+            setCallError(new ApiError(500, { code: event.code, message: event.message }))
+            break
         }
-        case 'failed':
-          setCallError(new ApiError(500, { code: event.code, message: event.message }))
-          break
-      }
-    })
+      },
+      signal,
+    )
       .catch((error: unknown) => {
+        if (abandoned(error)) {
+          return
+        }
         if (error instanceof ApiError) {
           setCallError(error)
         } else {
           logger.error('stream.failed', { message: String(error) })
         }
       })
-      .finally(() => setBusy(false))
-  }, [profile, token, ask])
+      .finally(settle)
+  }, [profile, token, ask, begin, settle])
 
   /**
    * A chat profile, run in a loop over the history it is handed. This is what
@@ -357,8 +452,7 @@ export function App() {
       if (!profile) {
         return
       }
-      setBusy(true)
-      setCallError(null)
+      const signal = begin()
       setLive(null)
       setEmbedding(null)
 
@@ -377,52 +471,59 @@ export function App() {
         body.mcpProtocol = mcpProtocol
       }
 
-      runAgent(body, (event) => {
-        switch (event.event) {
-          case 'setup':
-            // Before the first turn, because that is when it happened: a run
-            // that never got past `initialize` has no turn to hang the reason
-            // off.
-            setExchanges((current) => [...current, ...setupExchanges(event.mcp)])
-            break
-          case 'turn':
-            // Everything the turn put on a wire, in the order it left: the model
-            // call, then each tool that answered it.
-            setExchanges((current) => [...current, ...turnExchanges(event)])
-            if (event.tools.length > 0) {
-              setTimeline((current) => [...current, activityItem(event)])
+      runAgent(
+        body,
+        (event) => {
+          switch (event.event) {
+            case 'setup':
+              // Before the first turn, because that is when it happened: a run
+              // that never got past `initialize` has no turn to hang the reason
+              // off.
+              setExchanges((current) => [...current, ...setupExchanges(event.mcp)])
+              break
+            case 'turn':
+              // Everything the turn put on a wire, in the order it left: the model
+              // call, then each tool that answered it.
+              setExchanges((current) => [...current, ...turnExchanges(event)])
+              if (event.tools.length > 0) {
+                setTimeline((current) => [...current, activityItem(event)])
+              }
+              break
+            case 'done': {
+              // Only the answer it finished on rejoins the history. The turns in
+              // between are tool calls and their results; they are in the traffic
+              // below, and replaying them without the results would break the next
+              // call.
+              const last = event.turns.at(-1)
+              const answer = last ? assistantTurn(last.call) : null
+              setTimeline((current) => [
+                ...current,
+                ...(answer ? [messageItem(answer)] : []),
+                verdictItem(event),
+              ])
+              logger.info('agent.done', { turns: event.turns.length, stop: event.stop.outcome })
+              break
             }
-            break
-          case 'done': {
-            // Only the answer it finished on rejoins the history. The turns in
-            // between are tool calls and their results; they are in the traffic
-            // below, and replaying them without the results would break the next
-            // call.
-            const last = event.turns.at(-1)
-            const answer = last ? assistantTurn(last.call) : null
-            setTimeline((current) => [
-              ...current,
-              ...(answer ? [messageItem(answer)] : []),
-              verdictItem(event),
-            ])
-            logger.info('agent.done', { turns: event.turns.length, stop: event.stop.outcome })
-            break
+            case 'failed':
+              setCallError(new ApiError(500, { code: event.code, message: event.message }))
+              break
           }
-          case 'failed':
-            setCallError(new ApiError(500, { code: event.code, message: event.message }))
-            break
-        }
-      })
+        },
+        signal,
+      )
         .catch((error: unknown) => {
+          if (abandoned(error)) {
+            return
+          }
           if (error instanceof ApiError) {
             setCallError(error)
           } else {
             logger.error('agent.failed', { message: String(error) })
           }
         })
-        .finally(() => setBusy(false))
+        .finally(settle)
     },
-    [profile, token, maxIterations, mcpProtocol],
+    [profile, token, maxIterations, mcpProtocol, begin, settle],
   )
 
   const send = useCallback(() => runChat(ask()), [runChat, ask])
@@ -489,56 +590,6 @@ export function App() {
         <p className="text-faint text-xs">A known signal in, a look at what comes out.</p>
       </header>
 
-      <Panel title="Auth">
-        <div className="space-y-3">
-          <section className="space-y-2">
-            <h3 className="font-semibold text-muted text-xs">Model endpoint</h3>
-            <ModelAuth
-              provider={provider}
-              profile={profile}
-              issues={auth.issues}
-              token={token}
-              signingIn={signingIn}
-              loginError={loginError}
-              onToken={setToken}
-              onLogin={signIn}
-              onLogout={signOut}
-            />
-          </section>
-
-          {/*
-            Its own section because it is its own question: the model's identity
-            comes from the profile, a server's from `mcp.yaml`, and one says
-            nothing about the other.
-          */}
-          {profile && profile.mcp.length > 0 ? (
-            <section className="space-y-2 border-line border-t pt-3">
-              <h3 className="font-semibold text-muted text-xs">MCP servers</h3>
-              {/*
-                Above the servers rather than on each one: the revision is a
-                property of the run, and one trace speaking two of them is a
-                result nobody could attribute.
-              */}
-              <McpProtocol
-                revisions={mcp.revisions}
-                selected={mcpProtocol}
-                disabled={busy}
-                onSelect={setMcpProtocol}
-              />
-              <McpAuth
-                names={profile.mcp}
-                servers={mcp.servers}
-                providers={auth.providers}
-                signingIn={signingIn}
-                loginError={loginError}
-                onLogin={signIn}
-                onLogout={signOut}
-              />
-            </section>
-          ) : null}
-        </div>
-      </Panel>
-
       {/*
         `min-w-0` on both columns: a grid child is `min-width: auto`, so a wide
         request body would widen the column and put the scrollbar on the page
@@ -563,18 +614,54 @@ export function App() {
             </Panel>
           ) : null}
 
+          {/*
+            Above the box, because it is about the call that box is going to
+            make. The auth detail hangs off it rather than off the page: it is
+            the answer to a question this bar has already summarised.
+          */}
+          {ready ? (
+            <Preflight
+              state={ready}
+              authOpen={authOpen}
+              signingIn={signingIn}
+              onSignIn={signIn}
+              onOpenAuth={() => setAuthOpen((open) => !open)}
+            />
+          ) : null}
+
+          {authOpen ? (
+            <AuthPanel
+              auth={auth}
+              mcp={mcp}
+              profile={profile}
+              provider={provider}
+              token={token}
+              signingIn={signingIn}
+              loginError={loginError}
+              onToken={setToken}
+              onLogin={signIn}
+              onLogout={signOut}
+            />
+          ) : null}
+
           {chatting ? (
             <ChatPanel
               items={timeline}
               live={live}
               busy={busy}
+              stopped={stopped}
               prompt={prompt}
               maxIterations={maxIterations}
               error={callError ? callError.body : null}
+              revisions={mcp.revisions}
+              mcpProtocol={profile.mcp.length > 0 ? mcpProtocol : null}
+              showProtocol={profile.mcp.length > 0}
               onPrompt={setPrompt}
               onMaxIterations={setMaxIterations}
+              onMcpProtocol={setMcpProtocol}
               onSend={send}
               onStream={stream}
+              onStop={stop}
               onRetry={retry}
               onReset={reset}
             />
@@ -591,9 +678,11 @@ export function App() {
                 onRepeat={setRepeat}
                 onIncludeVectors={setIncludeVectors}
                 onSend={embed}
+                onStop={stop}
               />
 
               {busy ? <Spinner label="Calling…" /> : null}
+              {stopped && !busy ? <Spinner label="Stopped." /> : null}
 
               {callError ? (
                 <Panel title="mire could not run this call">

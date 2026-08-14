@@ -523,11 +523,12 @@ export function logout(provider: string): Promise<{ signedOut: boolean }> {
   })
 }
 
-export function call(body: CallRequest): Promise<CallOutcome> {
+export function call(body: CallRequest, signal?: AbortSignal): Promise<CallOutcome> {
   return request('api/call', callOutcomeSchema, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
+    ...(signal ? { signal } : {}),
   })
 }
 

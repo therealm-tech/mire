@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import type { Message, ToolInvocation } from '../api'
 import { type ChatItem, describeStop, messagePositions, type VerdictItem } from '../conversation'
+import { McpProtocol } from './McpProtocol'
 import { Badge, Button, INPUT_CLASSES, Panel } from './primitives'
 
 /**
@@ -22,13 +23,19 @@ export function ChatPanel({
   items,
   live,
   busy,
+  stopped,
   prompt,
   maxIterations,
   error,
+  revisions,
+  mcpProtocol,
+  showProtocol,
   onPrompt,
   onMaxIterations,
+  onMcpProtocol,
   onSend,
   onStream,
+  onStop,
   onRetry,
   onReset,
 }: {
@@ -36,13 +43,21 @@ export function ChatPanel({
   /** Text arriving chunk by chunk, shown as an answer still being written. */
   live: string | null
   busy: boolean
+  /** The last run was called off rather than finished. */
+  stopped: boolean
   prompt: string
   maxIterations: number
   error: { code: string; message: string; detail?: unknown } | null
+  revisions: string[]
+  mcpProtocol: string | null
+  /** Only a profile that names a server has a revision to speak. */
+  showProtocol: boolean
   onPrompt: (value: string) => void
   onMaxIterations: (value: number) => void
+  onMcpProtocol: (revision: string | null) => void
   onSend: () => void
   onStream: () => void
+  onStop: () => void
   onRetry: (id: string) => void
   onReset: () => void
 }) {
@@ -113,6 +128,12 @@ export function ChatPanel({
             </p>
           ) : null}
 
+          {stopped && !busy ? (
+            <p className="text-muted text-sm" role="status">
+              Stopped. Whatever had arrived is above, and on the wire below.
+            </p>
+          ) : null}
+
           {error ? (
             <div className="rounded border border-bad bg-bad-soft p-2">
               <p className="flex flex-wrap items-baseline gap-2 text-sm">
@@ -135,10 +156,15 @@ export function ChatPanel({
           turns={turns}
           busy={busy}
           maxIterations={maxIterations}
+          revisions={revisions}
+          mcpProtocol={mcpProtocol}
+          showProtocol={showProtocol}
           onPrompt={onPrompt}
           onMaxIterations={onMaxIterations}
+          onMcpProtocol={onMcpProtocol}
           onSend={onSend}
           onStream={onStream}
+          onStop={onStop}
         />
       </div>
     </Panel>
@@ -304,19 +330,29 @@ function Composer({
   turns,
   busy,
   maxIterations,
+  revisions,
+  mcpProtocol,
+  showProtocol,
   onPrompt,
   onMaxIterations,
+  onMcpProtocol,
   onSend,
   onStream,
+  onStop,
 }: {
   prompt: string
   turns: number
   busy: boolean
   maxIterations: number
+  revisions: string[]
+  mcpProtocol: string | null
+  showProtocol: boolean
   onPrompt: (value: string) => void
   onMaxIterations: (value: number) => void
+  onMcpProtocol: (revision: string | null) => void
   onSend: () => void
   onStream: () => void
+  onStop: () => void
 }) {
   // An empty box is nothing to say, not an instruction to send the history
   // again — that is what **Retry** is for, and it says which turn it repeats.
@@ -368,6 +404,15 @@ function Composer({
         >
           Stream
         </Button>
+        {/*
+          Only while there is something to stop. A permanently disabled Stop
+          would be a third button competing with the two that do something.
+        */}
+        {busy ? (
+          <Button size="md" onClick={onStop} title="Drop this request. What has arrived stays.">
+            Stop
+          </Button>
+        ) : null}
         <label className="ml-auto flex items-center gap-1.5 text-muted text-xs">
           max turns
           <input
@@ -380,6 +425,19 @@ function Composer({
           />
         </label>
       </div>
+
+      {/*
+        A run parameter, so it sits with the other one. It used to live in the
+        auth panel, which is the one thing on the page it is not about.
+      */}
+      {showProtocol ? (
+        <McpProtocol
+          revisions={revisions}
+          selected={mcpProtocol}
+          disabled={busy}
+          onSelect={onMcpProtocol}
+        />
+      ) : null}
     </div>
   )
 }
