@@ -39,7 +39,7 @@ export interface Preflight {
   url: string
   /** The name of the identity it would call as. */
   identity: string
-  /** The MCP servers it would set up before the first turn. */
+  /** The MCP servers it would set up before the first turn. Empty on a chat. */
   servers: string[]
   /** Each one refuses this call outright — see the message for which and why. */
   blockers: Blocker[]
@@ -67,6 +67,7 @@ export function preflight({
   providers,
   servers,
   token,
+  usesMcp,
 }: {
   profile: ProfileSummary
   /** The resolved model identity, `undefined` when the profile names one that is not declared. */
@@ -75,9 +76,20 @@ export function preflight({
   servers: McpDescriptor[]
   /** What has been typed into this tab, for a provider that has to be asked. */
   token: string
+  /**
+   * Whether this run will speak to the profile's servers at all.
+   *
+   * False in chat mode, which is one turn and calls no tool. Their credentials
+   * are then not blockers of anything: reporting "tool calls answer 409" about a
+   * run that makes none would be painting the bar red over a call that is going
+   * to go through.
+   */
+  usesMcp: boolean
 }): Preflight {
   const blockers: Blocker[] = []
   const notes: string[] = []
+  // Named by the file, but only set up by a run that can call one.
+  const declared = usesMcp ? profile.mcp : []
 
   if (provider === undefined) {
     blockers.push({
@@ -103,7 +115,7 @@ export function preflight({
     }
   }
 
-  for (const name of profile.mcp) {
+  for (const name of declared) {
     const server = servers.find((candidate) => candidate.name === name)
     if (!server) {
       blockers.push({
@@ -135,7 +147,7 @@ export function preflight({
   return {
     url: profile.url,
     identity: provider?.name ?? profile.auth ?? 'unknown',
-    servers: profile.mcp,
+    servers: declared,
     blockers,
     notes,
   }

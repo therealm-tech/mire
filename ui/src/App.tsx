@@ -23,7 +23,7 @@ import {
   uploadFile,
 } from './api'
 import { AuthPanel } from './components/AuthPanel'
-import { ChatPanel } from './components/ChatPanel'
+import { ChatPanel, runModeSchema } from './components/ChatPanel'
 import { EmbeddingPanel } from './components/EmbeddingPanel'
 import { EmbeddingRequest } from './components/EmbeddingRequest'
 import { Failure } from './components/Failure'
@@ -162,10 +162,10 @@ export function App() {
   const [includeVectors, setIncludeVectors] = usePersisted('vectors', z.boolean(), false)
 
   const [maxIterations, setMaxIterations] = usePersisted('maxTurns', z.number(), 6)
-  // On by default: reading the answer as it is written is what you came for, and
-  // time to first token cannot be measured any other way. Off is the loop, which
-  // is the only mode that answers tool calls.
-  const [streaming, setStreaming] = usePersisted('stream', z.boolean(), true)
+  // Agent by default: the loop is what this tool is for, and it is the only mode
+  // that answers tool calls. Chat is one streamed turn, which is what you switch
+  // to when the question is about the answer arriving rather than about tools.
+  const [mode, setMode] = usePersisted('mode', runModeSchema, 'agent')
   // `null` is auto: every server settles its own revision the way it always did.
   const [mcpProtocol, setMcpProtocol] = usePersisted<string | null>(
     'mcpProtocol',
@@ -292,13 +292,31 @@ export function App() {
    */
   const provider = auth?.providers.find((entry) => entry.name === (profile?.auth ?? ANONYMOUS))
 
+  /**
+   * Whether the profile's MCP servers are part of the run that is about to
+   * happen.
+   *
+   * Only agent mode ever speaks to one: a chat is a single turn, and `POST
+   * /api/call/stream` sets nothing up and calls no tool. So on **Chat** the
+   * servers are not merely idle, they are not in the picture — and neither are
+   * their credentials, their revision, or the sign-ins they would need.
+   */
+  const usesMcp = mode === 'agent' && (profile?.mcp.length ?? 0) > 0
+
   /** What the next call would do, and what would stop it. */
   const ready = useMemo(
     () =>
       profile && auth && mcp
-        ? preflight({ profile, provider, providers: auth.providers, servers: mcp.servers, token })
+        ? preflight({
+            profile,
+            provider,
+            providers: auth.providers,
+            servers: mcp.servers,
+            token,
+            usesMcp,
+          })
         : null,
-    [profile, provider, auth, mcp, token],
+    [profile, provider, auth, mcp, token, usesMcp],
   )
 
   // One kind of blocker is fixed by a field inside the panel rather than by a
@@ -418,10 +436,10 @@ export function App() {
   }, [messages, prompt, setPrompt])
 
   /**
-   * The same history, read chunk by chunk instead of whole.
+   * **Chat** mode: the same history, read chunk by chunk instead of whole.
    *
    * One turn and no loop: tool calls do not reassemble from a stream, so there
-   * is nothing to answer and nothing to run again. Like `runChat`, it takes the
+   * is nothing to answer and nothing to run again. Like `runLoop`, it takes the
    * history rather than reading it, so **Retry** can shorten the timeline and
    * run it in the same breath.
    */
@@ -496,16 +514,17 @@ export function App() {
   )
 
   /**
-   * A chat profile, run in a loop over the history it is handed. This is what
-   * **Send** and **Retry** do with **stream** off, whether or not the profile
-   * declares a single tool: a profile with nothing to call stops on turn one,
-   * which is the same one turn a plain call would have made.
+   * **Agent** mode: a chat profile, run in a loop over the history it is handed.
+   *
+   * This is what **Send** and **Retry** do on `agent`, whether or not the
+   * profile declares a single tool: a profile with nothing to call stops on turn
+   * one, which is the same one turn a plain call would have made.
    *
    * It takes the history rather than reading it, because **Retry** shortens the
    * timeline and then runs it in the same breath — and `setTimeline` has not
    * landed by then.
    */
-  const runChat = useCallback(
+  const runLoop = useCallback(
     (sent: Message[]) => {
       if (!profile) {
         return
@@ -600,8 +619,8 @@ export function App() {
    * be answering a different question than the one it repeats.
    */
   const run = useCallback(
-    (sent: Message[]) => (streaming ? runStream(sent) : runChat(sent)),
-    [streaming, runStream, runChat],
+    (sent: Message[]) => (mode === 'chat' ? runStream(sent) : runLoop(sent)),
+    [mode, runStream, runLoop],
   )
 
   const send = useCallback(() => run(ask()), [run, ask])
@@ -807,6 +826,7 @@ export function App() {
               token={token}
               signingIn={signingIn}
               loginError={loginError}
+              showMcp={usesMcp}
               onToken={setToken}
               onLogin={signIn}
               onLogout={signOut}
@@ -821,17 +841,17 @@ export function App() {
               stopped={stopped}
               prompt={prompt}
               maxIterations={maxIterations}
-              streaming={streaming}
+              mode={mode}
               error={callError ? callError.body : null}
               revisions={mcp.revisions}
-              mcpProtocol={profile.mcp.length > 0 ? mcpProtocol : null}
-              showProtocol={profile.mcp.length > 0}
+              mcpProtocol={usesMcp ? mcpProtocol : null}
+              showProtocol={usesMcp}
               attachments={attachments}
               attaching={attaching}
               attachError={attachError ? attachError.body : null}
               onPrompt={setPrompt}
               onMaxIterations={setMaxIterations}
-              onStreaming={setStreaming}
+              onMode={setMode}
               onMcpProtocol={setMcpProtocol}
               onAttach={attach}
               onDetach={detach}

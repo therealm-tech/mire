@@ -235,17 +235,19 @@ function card(label: RegExp): HTMLElement {
 }
 
 /**
- * Clears the **stream** box, which is what puts **Send** back on the loop.
+ * Picks a mode in the composer, which is what decides where **Send** goes.
  *
- * **Send** streams by default, and a stream is one turn that answers no tools —
- * so every test about the loop says so first, exactly like the person running it
- * has to.
+ * **Agent** is the default and the loop; **Chat** is one streamed turn that
+ * answers no tools. Said out loud in every test that depends on it, default or
+ * not: a test that reads as "the loop" because nobody has touched the dropdown
+ * is a test that quietly changes meaning the day the default does.
  */
-async function loopMode(user: ReturnType<typeof userEvent.setup>): Promise<void> {
-  const box = await screen.findByLabelText('stream')
-  if ((box as HTMLInputElement).checked) {
-    await user.click(box)
-  }
+async function agentMode(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+  await user.selectOptions(await screen.findByLabelText('mode'), 'agent')
+}
+
+async function chatMode(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+  await user.selectOptions(await screen.findByLabelText('mode'), 'chat')
 }
 
 /** The `<section>` a titled panel renders, for assertions scoped to one panel. */
@@ -396,7 +398,7 @@ describe('App', () => {
     )
     render(<App />)
 
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     await waitFor(() => {
@@ -429,7 +431,7 @@ describe('App', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(1))
 
@@ -489,6 +491,28 @@ describe('App', () => {
     expect(screen.getByText(/declared in no/)).toBeInTheDocument()
   })
 
+  it('takes the servers out of the picture on a chat, which calls no tool', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    // Agent mode: three servers, their identities, and the revision to reach
+    // them in — all of it about the run that is about to happen.
+    await user.click(await screen.findByRole('button', { name: /guarded/ }))
+    expect(screen.getByRole('heading', { name: 'MCP servers' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Protocol')).toBeInTheDocument()
+    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('3 MCP servers')
+    expect(screen.getByText(/answer 409 until/)).toBeInTheDocument()
+
+    // Chat mode: one turn, which sets nothing up and calls nothing. None of it
+    // is this run's business — least of all a 409 it cannot be given.
+    await chatMode(user)
+    expect(screen.queryByRole('heading', { name: 'MCP servers' })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Protocol')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('What the next call will do')).not.toHaveTextContent('MCP server')
+    expect(screen.queryByText(/answer 409 until/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/declared in no/)).not.toBeInTheDocument()
+  })
+
   it('offers the revisions the server says it speaks, and negotiates by default', async () => {
     const user = userEvent.setup()
     render(<App />)
@@ -521,7 +545,7 @@ describe('App', () => {
     await user.click(await screen.findByRole('button', { name: /guarded/ }))
     // First, because a stream speaks to no server: the selector is inert until
     // the run is one that can call a tool.
-    await loopMode(user)
+    await agentMode(user)
     await user.selectOptions(screen.getByLabelText('Protocol'), '2025-03-26')
     await user.click(screen.getByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(1))
@@ -586,20 +610,27 @@ describe('agent mode', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    expect(await screen.findByLabelText('stream')).toBeInTheDocument()
-    // A stream is one turn, so the cap on the second one is shown as inert
-    // rather than quietly ignored.
-    expect(screen.getByLabelText(/max turns/)).toBeDisabled()
-    await loopMode(user)
+    // Two named runs rather than a mechanism to switch on, and it starts on the
+    // loop, which is the mode this tool is about.
+    const picker = await screen.findByLabelText('mode')
+    expect(
+      Array.from(picker.querySelectorAll('option')).map((option) => option.textContent),
+    ).toEqual(['Agent', 'Chat'])
+    expect(picker).toHaveValue('agent')
     expect(screen.getByLabelText(/max turns/)).toBeEnabled()
+
+    // A chat is one turn, so the cap on the second one is shown as inert rather
+    // than quietly ignored.
+    await chatMode(user)
+    expect(screen.getByLabelText(/max turns/)).toBeDisabled()
 
     // There is no second turn of an embedding, so there is nothing to loop.
     await user.click(screen.getByRole('button', { name: /embed/ }))
-    expect(screen.queryByLabelText('stream')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('mode')).not.toBeInTheDocument()
     expect(screen.queryByLabelText(/max turns/)).not.toBeInTheDocument()
   })
 
-  it('streams what it sends until the box is cleared, and only ever offers one Send', async () => {
+  it('streams on Chat and loops on Agent, and only ever offers one Send', async () => {
     const user = userEvent.setup()
     const urls: string[] = []
     vi.stubGlobal(
@@ -626,17 +657,17 @@ describe('agent mode', () => {
     render(<App />)
 
     // Nothing is chosen, nothing is typed but the draft that was already there:
-    // pressing the one button reads the answer as it arrives.
+    // pressing the one button runs the loop.
     await user.click(await screen.findByRole('button', { name: 'Send' }))
-    await waitFor(() => expect(urls.some((url) => url.endsWith('api/call/stream'))).toBe(true))
-    expect(urls.some((url) => url.endsWith('api/agent'))).toBe(false)
+    await waitFor(() => expect(urls.some((url) => url.endsWith('api/agent'))).toBe(true))
+    expect(urls.some((url) => url.endsWith('api/call/stream'))).toBe(false)
 
-    // Clearing the box is what asks for the loop, and it is the only thing that
-    // does: there is no second button to press.
-    await loopMode(user)
+    // Picking **Chat** is what asks for the stream, and it is the only thing
+    // that does: there is no second button to press.
+    await chatMode(user)
     await user.type(screen.getByRole('textbox', { name: /message/i }), 'again')
     await user.click(screen.getByRole('button', { name: 'Send' }))
-    await waitFor(() => expect(urls.some((url) => url.endsWith('api/agent'))).toBe(true))
+    await waitFor(() => expect(urls.some((url) => url.endsWith('api/call/stream'))).toBe(true))
 
     expect(screen.getAllByRole('button', { name: 'Send' })).toHaveLength(1)
     expect(screen.queryByRole('button', { name: 'Stream' })).not.toBeInTheDocument()
@@ -669,7 +700,7 @@ describe('agent mode', () => {
     render(<App />)
 
     // There is one send button, and for a chat profile it is the loop.
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => expect(urls.some((url) => url.endsWith('api/agent'))).toBe(true))
 
@@ -725,6 +756,7 @@ describe('agent mode', () => {
     )
 
     render(<App />)
+    await chatMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     // The answer joins the conversation as a turn rather than staying in a
@@ -776,6 +808,7 @@ describe('agent mode', () => {
     )
 
     render(<App />)
+    await chatMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     await waitFor(() => {
@@ -790,7 +823,7 @@ describe('agent mode', () => {
     vi.stubGlobal('fetch', toolRunApi())
 
     render(<App />)
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     // What the run did on its own sits between the question and the answer,
@@ -840,7 +873,7 @@ describe('agent mode', () => {
     )
 
     render(<App />)
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     // A refusal opens its own body: a red `400` with nothing under it is the
@@ -896,7 +929,7 @@ describe('agent mode', () => {
     )
 
     render(<App />)
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     const traffic = within(panel('Traffic'))
@@ -1024,7 +1057,7 @@ describe('traffic', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     // One card for what was asked of the model, one for what the tool was asked.
@@ -1042,7 +1075,7 @@ describe('traffic', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     // No tool was called by these, so a tool listing could never show them —
@@ -1065,7 +1098,7 @@ describe('traffic', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /Turn 1 · model/ })).toBeInTheDocument()
@@ -1090,7 +1123,7 @@ describe('traffic', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /Turn 1 · model/ })).toBeInTheDocument()
@@ -1113,7 +1146,7 @@ describe('traffic', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /Turn 1 · get_weather/ })).toBeInTheDocument()
@@ -1134,7 +1167,7 @@ describe('traffic', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /Turn 1 · model/ })).toBeInTheDocument()
@@ -1160,7 +1193,7 @@ describe('traffic', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => {
       expect(within(panel('Traffic')).getByText('1 exchange')).toBeInTheDocument()
@@ -1484,7 +1517,7 @@ describe('conversation', () => {
     render(<App />)
 
     await type(user, 'Capital of France?')
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(1))
 
@@ -1512,7 +1545,7 @@ describe('conversation', () => {
     render(<App />)
 
     await type(user, 'Capital of France?')
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     const conversation = within(panel('Conversation'))
@@ -1530,7 +1563,7 @@ describe('conversation', () => {
     render(<App />)
 
     await type(user, 'Which crate for **json**?')
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     const conversation = within(panel('Conversation'))
@@ -1551,7 +1584,7 @@ describe('conversation', () => {
     render(<App />)
 
     await type(user, 'hello')
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     await waitFor(() => expect(screen.getByRole('textbox', { name: /message/i })).toHaveValue(''))
@@ -1564,7 +1597,7 @@ describe('conversation', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await loopMode(user)
+    await agentMode(user)
     const box = await screen.findByRole('textbox', { name: /message/i })
     await user.clear(box)
     await user.type(box, 'one{Shift>}{Enter}{/Shift}two')
@@ -1583,7 +1616,7 @@ describe('conversation', () => {
     render(<App />)
 
     await type(user, 'one')
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(1))
 
@@ -1604,7 +1637,7 @@ describe('conversation', () => {
     render(<App />)
 
     await type(user, 'one')
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(1))
 
@@ -1648,7 +1681,7 @@ describe('conversation', () => {
     render(<App />)
 
     await type(user, 'one')
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => expect(screen.getByText('the endpoint refused')).toBeInTheDocument())
 
@@ -1671,7 +1704,7 @@ describe('conversation', () => {
     render(<App />)
 
     await type(user, 'one')
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(1))
     expect(within(panel('Conversation')).getByText('one')).toBeInTheDocument()
@@ -1695,7 +1728,7 @@ describe('conversation', () => {
     render(<App />)
 
     await type(user, 'a question')
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(1))
 
@@ -1832,7 +1865,7 @@ describe('stopping a run', () => {
     // The box arrives prefilled, so it is cleared rather than typed into twice.
     await user.clear(screen.getByLabelText('Message'))
     await user.type(screen.getByLabelText('Message'), 'are you there')
-    await loopMode(user)
+    await agentMode(user)
     await user.click(screen.getByRole('button', { name: 'Send' }))
 
     // Nothing to stop until there is something in flight.
@@ -1854,7 +1887,7 @@ describe('reading a run', () => {
     vi.stubGlobal('fetch', toolRunApi())
 
     render(<App />)
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     const conversation = within(panel('Conversation'))
@@ -1885,7 +1918,7 @@ describe('reading a run', () => {
     vi.stubGlobal('fetch', toolRunApi())
 
     render(<App />)
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     const traffic = within(panel('Traffic'))
@@ -1908,7 +1941,7 @@ describe('reading a run', () => {
     vi.stubGlobal('fetch', toolRunApi())
 
     render(<App />)
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     const traffic = within(panel('Traffic'))
@@ -1931,7 +1964,7 @@ describe('reading a run', () => {
     vi.stubGlobal('fetch', toolRunApi([broken]))
 
     render(<App />)
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     const traffic = within(panel('Traffic'))
@@ -1950,7 +1983,7 @@ describe('reading a run', () => {
     vi.stubGlobal('fetch', toolRunApi())
 
     render(<App />)
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     const traffic = within(panel('Traffic'))
@@ -1982,6 +2015,20 @@ describe('coming back to it', () => {
     expect(screen.getByLabelText('What the next call will do')).toHaveTextContent(
       'http://127.0.0.1:11435/v1/messages',
     )
+  })
+
+  it('reopens in the mode it was left in', async () => {
+    const user = userEvent.setup()
+    const first = render(<App />)
+
+    // Away from the default, which is the only setting a reload can get wrong.
+    await chatMode(user)
+    first.unmount()
+
+    render(<App />)
+    expect(await screen.findByLabelText('mode')).toHaveValue('chat')
+    // And the controls a chat has no use for stay out of the way with it.
+    expect(screen.getByLabelText(/max turns/)).toBeDisabled()
   })
 
   it('never keeps the credential, whatever else it keeps', async () => {
@@ -2043,7 +2090,7 @@ describe('taking the run away with you', () => {
     const clicked = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
 
     render(<App />)
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() =>
       expect(within(panel('Traffic')).getByText('5 exchanges')).toBeInTheDocument(),
@@ -2183,7 +2230,7 @@ describe('attaching a file', () => {
     })
     vi.stubGlobal('fetch', fetchMock)
     render(<App />)
-    await loopMode(user)
+    await agentMode(user)
     await screen.findByRole('button', { name: 'Send' })
 
     pick([new File(['a known signal'], 'report.pdf', { type: 'application/pdf' })])
@@ -2207,7 +2254,7 @@ describe('attaching a file', () => {
     })
     vi.stubGlobal('fetch', fetchMock)
     render(<App />)
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     await waitFor(() => {
@@ -2318,7 +2365,7 @@ describe('attaching a file', () => {
       }),
     )
     render(<App />)
-    await loopMode(user)
+    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() =>
       expect(within(panel('Traffic')).getByText('1 exchange')).toBeInTheDocument(),

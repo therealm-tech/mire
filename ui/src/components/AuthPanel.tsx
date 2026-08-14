@@ -11,6 +11,9 @@ import { Panel } from './primitives'
  * `mcp.yaml`, and neither follows the other. What is here is the detail — the
  * one-line answer, and anything that would refuse the call, is in the preflight
  * bar above, which is also what opens this.
+ *
+ * The second question is only asked when the run would ask it: a chat calls no
+ * tool, so its profile's servers are nobody's business until the mode changes.
  */
 export function AuthPanel({
   auth,
@@ -20,6 +23,7 @@ export function AuthPanel({
   token,
   signingIn,
   loginError,
+  showMcp,
   onToken,
   onLogin,
   onLogout,
@@ -31,6 +35,8 @@ export function AuthPanel({
   token: string
   signingIn: string | null
   loginError: { provider: string; message: string } | null
+  /** False on a run that will not speak to a server — see `usesMcp` in `App`. */
+  showMcp: boolean
   onToken: (token: string) => void
   onLogin: (name: string, prompt?: string) => void
   onLogout: (name: string) => void
@@ -53,7 +59,7 @@ export function AuthPanel({
           />
         </section>
 
-        {profile && profile.mcp.length > 0 ? (
+        {showMcp && profile && profile.mcp.length > 0 ? (
           <section className="space-y-2 border-line border-t pt-3">
             <h3 className="font-semibold text-muted text-xs">MCP servers</h3>
             <McpAuth
