@@ -135,6 +135,7 @@ impl Vars {
         else {
             debug!(
                 %tool,
+                result = %head(text),
                 "the result is not JSON, so there is nothing for a path to select"
             );
             return captured;
@@ -154,6 +155,23 @@ impl Vars {
         }
         captured
     }
+}
+
+/// The head of a result, short enough for a log line.
+///
+/// Quoted, because the answer to "why did nothing capture" is usually visible in
+/// the first few words — an empty result, prose, a fenced block — and a line
+/// saying only that the parse failed sends the reader back to the traffic pane
+/// to guess.
+fn head(text: &str) -> String {
+    const MAX: usize = 120;
+
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut short: String = collapsed.chars().take(MAX).collect();
+    if collapsed.chars().count() > MAX {
+        short.push('…');
+    }
+    format!("`{short}`")
 }
 
 #[cfg(test)]

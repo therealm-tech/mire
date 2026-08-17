@@ -1161,10 +1161,21 @@ fn last_event(body: &str) -> Option<String> {
 ///
 /// Text is joined; anything else is described rather than inlined. A tool that
 /// answers with a megabyte of base64 PNG should not become a megabyte of prompt.
+///
+/// Text is text wherever the spec files it, so an embedded resource carrying a
+/// `text` is joined like a text block rather than described. A server answering
+/// JSON as an `application/json` resource — which plenty do — means that JSON to
+/// be read, by the model and by [`crate::vars`] alike; describing it as
+/// `[resource: …]` would drop the answer on the floor and leave a capture rule
+/// with nothing to select from.
 fn flatten(content: &[Value]) -> String {
     let mut parts = Vec::new();
 
     for block in content {
+        // An embedded resource keeps its payload one level down; every other
+        // block carries it on itself.
+        let payload = block.get("resource").unwrap_or(block);
+
         match block.get("type").and_then(Value::as_str) {
             Some("text") => parts.push(
                 block
@@ -1173,13 +1184,23 @@ fn flatten(content: &[Value]) -> String {
                     .unwrap_or_default()
                     .to_owned(),
             ),
+            Some("resource") if payload.get("text").is_some() => parts.push(
+                payload
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            ),
             Some(kind) => {
-                let mime = block
+                let mime = payload
                     .get("mimeType")
                     .and_then(Value::as_str)
                     .unwrap_or("unknown");
-                let bytes = block
+                // `data` on an image or audio block, `blob` on a binary
+                // resource: the same base64 under two names.
+                let bytes = payload
                     .get("data")
+                    .or_else(|| payload.get("blob"))
                     .and_then(Value::as_str)
                     .map_or(0, |data| data.len() * 3 / 4);
                 parts.push(format!("[{kind}: {mime}, {bytes} bytes]"));
@@ -1475,6 +1496,37 @@ mod tests {
         assert!(flat.starts_with("21 degrees"));
         assert!(flat.contains("[image: image/png, 6 bytes]"));
         // The payload itself never reaches the prompt.
+        assert!(!flat.contains("AAAAAAAA"));
+    }
+
+    #[test]
+    fn an_embedded_text_resource_is_read_rather_than_described() {
+        let content = vec![json!({
+            "type": "resource",
+            "resource": {
+                "uri": "mire://session",
+                "mimeType": "application/json",
+                "text": r#"{"sessionId": "abc-123"}"#,
+            },
+        })];
+
+        // Verbatim, so a capture rule has a document to select from.
+        assert_eq!(flatten(&content), r#"{"sessionId": "abc-123"}"#);
+    }
+
+    #[test]
+    fn an_embedded_binary_resource_is_described_by_what_it_holds() {
+        let content = vec![json!({
+            "type": "resource",
+            "resource": {
+                "uri": "mire://scan.png",
+                "mimeType": "image/png",
+                "blob": "AAAAAAAA",
+            },
+        })];
+
+        let flat = flatten(&content);
+        assert_eq!(flat, "[resource: image/png, 6 bytes]");
         assert!(!flat.contains("AAAAAAAA"));
     }
 
