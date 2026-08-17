@@ -382,8 +382,11 @@ one place `mire` writes anything:
 ### Reading the traffic
 
 Under the conversation, **Traffic** is every wire this process touched, in the
-order it touched them. Three kinds of card, each showing what went out and what
-came back:
+order it touched them. **Cards land folded**: the summary line — turn, kind,
+status, latency, the badges that say something went wrong — is the list, and the
+list is a table of contents before it is a transcript. You open the one you came
+for, and *Expand all* opens the lot when the whole run is what you are reading.
+Three kinds of card, each showing what went out and what came back:
 
 | | Model call | MCP round trip | Tool call |
 | --- | --- | --- | --- |
@@ -448,8 +451,9 @@ is the easiest way to believe an integration works.
 
 The list **accumulates across the whole conversation** rather than resetting on
 every send, because "it worked on turn one and not on turn four" is a comparison
-and a panel showing only the latest turn cannot make one. *Collapse all* folds it
-away; *Clear* empties it, on purpose, when you want a clean read.
+and a panel showing only the latest turn cannot make one. *Expand all* opens
+everything it holds and *Collapse all* folds it back; *Clear* empties it, on
+purpose, when you want a clean read.
 
 ## A stack to point it at
 
