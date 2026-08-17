@@ -37,6 +37,12 @@
 //! as JSON otherwise. A tool answering something that is not JSON captures
 //! nothing — there is no path into prose.
 //!
+//! Prose *around* the JSON is another matter. `HTTP 201 Created {"id": "abc"}`
+//! is a JSON answer with a status line on it, and so is one fenced in markdown
+//! or signed off underneath; the first complete value in the text is read when
+//! the text as a whole is not one. `structuredContent` and a clean body are
+//! still tried first, so nothing about a well-behaved server changes.
+//!
 //! # When nothing is captured
 //!
 //! Not an error: the run carries on, and a hook naming the variable says so
@@ -145,6 +151,15 @@ impl Vars {
         let Some(document) = structured
             .cloned()
             .or_else(|| serde_json::from_str::<Value>(text).ok())
+            .or_else(|| {
+                let value = embedded(text)?;
+                debug!(
+                    %tool,
+                    result = %head(text),
+                    "capture: read the JSON out of a result that had prose around it"
+                );
+                Some(value)
+            })
         else {
             warn!(
                 %tool,
@@ -175,6 +190,30 @@ impl Vars {
         }
         captured
     }
+}
+
+/// The first JSON value inside a result that is not one on its own.
+///
+/// A tool answering `HTTP 201 Created {"sessionId": "abc"}` has answered JSON
+/// with a status line stapled to the front of it, and so has one that fences its
+/// answer in markdown or signs off after it. The document is right there; making
+/// a profile fail because of the prose around it would be pedantry, and the
+/// alternative it pushes people towards — a regex in a decode script — is worse
+/// than reading the JSON.
+///
+/// Each `{` or `[` is tried in turn until one parses, so a preamble containing a
+/// brace does not hide the answer behind it. Parsing stops at the end of the
+/// first complete value, which is what lets a trailing signature be ignored
+/// rather than break the parse.
+fn embedded(text: &str) -> Option<Value> {
+    text.char_indices()
+        .filter(|(_, c)| matches!(c, '{' | '['))
+        .find_map(|(start, _)| {
+            serde_json::Deserializer::from_str(&text[start..])
+                .into_iter::<Value>()
+                .next()?
+                .ok()
+        })
 }
 
 /// The paths a cascade tried, as written in the profile.
@@ -292,6 +331,67 @@ mod tests {
             vars.capture("t", None, "it worked, thanks for asking")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn a_status_line_in_front_of_the_json_does_not_hide_it() {
+        let vars = Vars::new(vec![rule(&["t"], &[("session", &["$.sessionId"])])]);
+
+        let captured = vars.capture("t", None, r#"HTTP 201 Created {"sessionId": "abc"}"#);
+
+        assert_eq!(captured.get("session"), Some(&json!("abc")));
+    }
+
+    #[test]
+    fn a_fenced_answer_is_read_through_the_fence() {
+        let vars = Vars::new(vec![rule(&["t"], &[("session", &["$.id"])])]);
+
+        let captured = vars.capture("t", None, "```json\n{\"id\": \"abc\"}\n```");
+
+        assert_eq!(captured.get("session"), Some(&json!("abc")));
+    }
+
+    #[test]
+    fn anything_after_the_value_is_left_where_it_is() {
+        let vars = Vars::new(vec![rule(&["t"], &[("session", &["$.id"])])]);
+
+        let captured = vars.capture("t", None, r#"{"id": "abc"} — created in 12ms"#);
+
+        assert_eq!(captured.get("session"), Some(&json!("abc")));
+    }
+
+    #[test]
+    fn a_brace_in_the_preamble_does_not_hide_the_answer_behind_it() {
+        let vars = Vars::new(vec![rule(&["t"], &[("session", &["$.id"])])]);
+
+        let captured = vars.capture("t", None, r#"POST /s {tenant} -> {"id": "abc"}"#);
+
+        assert_eq!(captured.get("session"), Some(&json!("abc")));
+    }
+
+    #[test]
+    fn prose_with_no_json_in_it_at_all_still_captures_nothing() {
+        let vars = Vars::new(vec![rule(&["t"], &[("session", &["$.id"])])]);
+
+        assert!(
+            vars.capture("t", None, "created the session {as requested}")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_clean_body_is_read_whole_rather_than_from_its_first_brace() {
+        let vars = Vars::new(vec![rule(&["t"], &[("session", &["$.id"])])]);
+
+        // A leading `[` of an array the profile means to select out of: reading
+        // from the first brace would work here by accident, so the assertion is
+        // that the whole document is the document.
+        let captured = vars.capture("t", None, r#"[{"id": "first"}, {"id": "second"}]"#);
+        assert!(captured.is_empty());
+
+        let vars = Vars::new(vec![rule(&["t"], &[("session", &["$[1].id"])])]);
+        let captured = vars.capture("t", None, r#"[{"id": "first"}, {"id": "second"}]"#);
+        assert_eq!(captured.get("session"), Some(&json!("second")));
     }
 
     #[test]

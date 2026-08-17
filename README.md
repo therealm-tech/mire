@@ -1365,9 +1365,13 @@ Three rules, each of them a decision rather than an accident:
   ordering that lets a hook report on the session the call it wrapped has opened.
   A `before` hook sees what earlier calls captured, since that is all there is.
 - **What gets read is `structuredContent` when the server sent one, and the
-  result text parsed as JSON otherwise.** A tool answering prose captures
-  nothing: there is no path into it. That is not an error — the run carries on —
-  but it is a warning, and so is a cascade that resolved none of its paths:
+  result text parsed as JSON otherwise.** Prose *around* the JSON does not hide
+  it: `HTTP 201 Created {"sessionId": "abc"}` is a JSON answer with a status line
+  on it, and so is one fenced in markdown or signed off underneath. When the text
+  as a whole is not a document, the first complete value in it is. A tool
+  answering prose and nothing else still captures nothing — there is no path into
+  it. That is not an error — the run carries on — but it is a warning, and so is
+  a cascade that resolved none of its paths:
 
   ```text
   WARN capture: no path resolved, so the variable stays unset
