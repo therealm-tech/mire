@@ -483,8 +483,14 @@ function Attachments({
   )
 }
 
-/** Bytes, at the precision a human reading a chip actually wants. */
-function formatBytes(bytes: number): string {
+/**
+ * Bytes, at the precision a human reading a chip actually wants.
+ *
+ * Exported for the traffic panel's hook cards, which size attachments the same
+ * way. Still lives here, where it started and where it is mostly used: two call
+ * sites is a reason to share one, not to invent a module to keep it in.
+ */
+export function formatBytes(bytes: number): string {
   if (bytes < 1024) {
     return `${bytes} B`
   }

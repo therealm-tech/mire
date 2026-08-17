@@ -13,6 +13,7 @@
 
 import type {
   CallOutcome,
+  HookRecord,
   McpExchange,
   Message,
   StopOutcome,
@@ -150,7 +151,21 @@ export interface ProtocolExchange {
   exchange: McpExchange
 }
 
-export type Exchange = ModelExchange | ToolExchange | ProtocolExchange
+/**
+ * One hook firing around a tool call.
+ *
+ * Its own card rather than a line on the tool's, because it is traffic to a
+ * third address: when a gate refuses a call, the tool card says the call did not
+ * happen and only this says who decided that, and what they answered.
+ */
+export interface HookExchange {
+  kind: 'hook'
+  id: string
+  turn: number | null
+  record: HookRecord
+}
+
+export type Exchange = ModelExchange | ToolExchange | ProtocolExchange | HookExchange
 
 export function callExchange(outcome: CallOutcome): ModelExchange {
   return { kind: 'model', id: nextId('model'), turn: null, outcome }
@@ -193,13 +208,19 @@ export function turnExchanges(turn: Turn): Exchange[] {
     turn: turn.index,
     exchange,
   }))
+  const hooks: HookExchange[] = turn.hooks.map((record) => ({
+    kind: 'hook',
+    id: nextId('hook'),
+    turn: turn.index,
+    record,
+  }))
   const tools: ToolExchange[] = turn.tools.map((invocation) => ({
     kind: 'tool',
     id: nextId('tool'),
     turn: turn.index,
     invocation,
   }))
-  return [model, ...protocol, ...tools]
+  return [model, ...protocol, ...hooks, ...tools]
 }
 
 /**
@@ -245,6 +266,10 @@ export function failed(exchange: Exchange, expectUnauthorized: boolean): boolean
     case 'tool': {
       const tool = exchange.invocation
       return tool.error !== undefined || tool.reportedError || tool.schemaErrors.length > 0
+    }
+    case 'hook': {
+      const hook = exchange.record
+      return hook.error !== undefined || hook.status === 0 || hook.status >= 400
     }
   }
 }

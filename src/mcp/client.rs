@@ -39,12 +39,14 @@ use tracing::{debug, warn};
 use url::Url;
 
 use super::headers::HeaderTemplates;
+use super::hook::{self, Hook, HookJournal, HookPhase, HookRecord, Payload, ToolOutcome};
 use super::negotiate::{self, Session};
 use super::{McpError, McpExchange, McpJournal, McpTool, Revision, ToolResult};
 use crate::auth::AuthProvider;
 
 use super::McpCredentials;
 use crate::redact::Redactor;
+use crate::uploads::UploadRef;
 
 /// Pages of `tools/list` to follow before deciding a server is toying with us.
 const MAX_PAGES: usize = 20;
@@ -76,6 +78,8 @@ pub struct McpServer {
     /// a legitimate thing to want to see from a tool whose job is to tell you
     /// what your endpoint does.
     pub protocol_version: Option<Revision>,
+    /// What fires around a `tools/call` on this server, in declaration order.
+    pub hooks: Vec<Hook>,
 }
 
 impl McpServer {
@@ -105,6 +109,13 @@ pub struct McpClient {
     /// in flight, so a journal living on it would mix two people's traffic
     /// together. [`recording`](Self::recording) is how one run gets its own.
     journal: Option<McpJournal>,
+    /// Where the hooks that fired are recorded. Separate from `journal` because
+    /// a hook is not JSON-RPC and pretending it is would put a webhook's `POST`
+    /// in a listing of MCP methods.
+    hooks: Option<HookJournal>,
+    /// The run's attached files, for hooks that ask for some. Empty off a
+    /// registry client: files arrive with a call, not with a server.
+    uploads: Arc<[UploadRef]>,
 }
 
 impl McpClient {
@@ -116,18 +127,36 @@ impl McpClient {
             http,
             session: Arc::new(RwLock::new(None)),
             journal: None,
+            hooks: None,
+            uploads: Arc::from(Vec::new()),
         }
     }
 
-    /// The same client, writing every exchange it makes into `journal`.
+    /// The same client, writing everything it does into the run's journals: the
+    /// JSON-RPC round trips into `journal`, the hooks that fired into `hooks`.
     ///
     /// The negotiated session is deliberately *shared* with the client this came
     /// from — it is the same server, and paying for a handshake per run to get a
     /// recording would change the thing being recorded.
     #[must_use]
-    pub fn recording(&self, journal: McpJournal) -> Self {
+    pub fn recording(&self, journal: McpJournal, hooks: HookJournal) -> Self {
         Self {
             journal: Some(journal),
+            hooks: Some(hooks),
+            ..self.clone()
+        }
+    }
+
+    /// The same client, with the run's attached files available to hooks.
+    ///
+    /// Per run rather than per client, like the journals and for the same
+    /// reason: the registry's clients are shared, and the files belong to one
+    /// call. A hook's `files:` selects from these; a run that attached nothing
+    /// leaves every hook with nothing to attach, which is not an error.
+    #[must_use]
+    pub fn carrying(&self, uploads: Arc<[UploadRef]>) -> Self {
+        Self {
+            uploads,
             ..self.clone()
         }
     }
@@ -168,6 +197,15 @@ impl McpClient {
             && let Ok(mut entries) = journal.lock()
         {
             entries.push(exchange);
+        }
+    }
+
+    /// Files one hook firing, if anybody is collecting.
+    fn file_hook(&self, record: HookRecord) {
+        if let Some(journal) = &self.hooks
+            && let Ok(mut entries) = journal.lock()
+        {
+            entries.push(record);
         }
     }
 
@@ -290,14 +328,103 @@ impl McpClient {
         })
     }
 
-    /// Calls a tool for real.
+    /// Calls a tool for real, with whatever the server's hooks say happens around
+    /// it.
+    ///
+    /// The order is the one the names promise: every `before` hook, the call,
+    /// every `after` hook. A `before` hook that fails on `on_error: fail` means
+    /// the call never goes out — which is what makes it a gate rather than a
+    /// notification.
     ///
     /// # Errors
     ///
-    /// Fails on transport and protocol problems. A tool that ran and reported a
-    /// problem comes back as `Ok` with [`ToolResult::is_error`] — that is a
-    /// result, and the model is supposed to see it.
+    /// Fails on transport and protocol problems, and on a hook that said so. A
+    /// tool that ran and reported a problem comes back as `Ok` with
+    /// [`ToolResult::is_error`] — that is a result, and the model is supposed to
+    /// see it.
     pub async fn call_tool(
+        &self,
+        tool: &McpTool,
+        arguments: &Value,
+        credentials: &McpCredentials<'_>,
+    ) -> Result<ToolResult, McpError> {
+        self.fire(HookPhase::Before, tool, arguments, None, credentials)
+            .await?;
+
+        let called = self.perform(tool, arguments, credentials).await;
+
+        // The `after` hooks see what happened either way. An audit trail that
+        // only records the calls that worked is not one — and a call that failed
+        // is the one somebody wants to be told about.
+        let outcome = match &called {
+            Ok(result) => ToolOutcome {
+                text: result.text.clone(),
+                structured: result.structured.clone(),
+                is_error: result.is_error,
+                latency_ms: result.latency_ms,
+                error: None,
+            },
+            Err(failure) => ToolOutcome {
+                text: String::new(),
+                structured: None,
+                is_error: true,
+                latency_ms: 0,
+                error: Some(failure.to_string()),
+            },
+        };
+        let after = self
+            .fire(
+                HookPhase::After,
+                tool,
+                arguments,
+                Some(outcome),
+                credentials,
+            )
+            .await;
+
+        // A call that failed is the more fundamental fact, so it is the one
+        // reported: the `after` hook's own failure is in the journal, and
+        // replacing "the server refused" with "the webhook is down" would hide
+        // the thing being tested behind the thing watching it.
+        match called {
+            Ok(result) => after.map(|()| result),
+            Err(failure) => Err(failure),
+        }
+    }
+
+    /// Fires the hooks that apply, recording each one.
+    async fn fire(
+        &self,
+        phase: HookPhase,
+        tool: &McpTool,
+        arguments: &Value,
+        result: Option<ToolOutcome>,
+        credentials: &McpCredentials<'_>,
+    ) -> Result<(), McpError> {
+        if self.server.hooks.is_empty() {
+            return Ok(());
+        }
+
+        let payload = Payload {
+            phase,
+            server: &self.server.name,
+            tool: &tool.name,
+            arguments,
+            result,
+        };
+        hook::fire(
+            &self.http,
+            &self.server.hooks,
+            &payload,
+            &self.uploads,
+            credentials,
+            |record| self.file_hook(record),
+        )
+        .await
+    }
+
+    /// The `tools/call` itself, with nothing around it.
+    async fn perform(
         &self,
         tool: &McpTool,
         arguments: &Value,
@@ -1329,6 +1456,7 @@ mod tests {
             headers: HeaderTemplates::default(),
             timeout: Duration::from_secs(30),
             protocol_version: None,
+            hooks: Vec::new(),
         };
         assert!(server.offers("anything"));
 
@@ -1348,6 +1476,7 @@ mod tests {
                 headers: HeaderTemplates::default(),
                 timeout: Duration::from_secs(30),
                 protocol_version: None,
+                hooks: Vec::new(),
             },
             Client::new(),
         );

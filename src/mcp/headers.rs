@@ -120,6 +120,12 @@ impl HeaderTemplates {
         self.providers.iter().map(String::as_str)
     }
 
+    /// The header names, for a listing. **Names only** — a rendered value is
+    /// usually a credential, and there is no method here that hands one out.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.entries.iter().map(|(name, _)| name.as_str())
+    }
+
     /// Whether anything is declared at all.
     #[must_use]
     pub fn is_empty(&self) -> bool {

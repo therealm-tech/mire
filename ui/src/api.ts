@@ -352,6 +352,52 @@ export const mcpExchangeSchema = z.object({
   error: z.string().optional(),
 })
 
+/**
+ * One hook firing, as it happened.
+ *
+ * Its own shape rather than an MCP exchange: a hook talks to a third party over
+ * plain HTTP, and `status: 0` means the request never left — `error` then says
+ * why, and `stoppedTheCall` says whether that is also why the tool never ran.
+ */
+/**
+ * One file a hook attached, described rather than repeated.
+ *
+ * The bytes went out as a multipart part; a trace carrying them too would cost
+ * the panel everything and tell the reader nothing.
+ */
+export const attachmentSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  size: z.number(),
+  contentType: z.string(),
+})
+
+export const hookRecordSchema = z.object({
+  server: z.string(),
+  hook: z.string(),
+  /** `before` the tools/call went out, or `after` it came back. */
+  phase: z.enum(['before', 'after']),
+  tool: z.string(),
+  /** The action's kind. `http` is the only one so far. */
+  action: z.string(),
+  url: z.string(),
+  method: z.string(),
+  headers: z.record(z.string(), z.string()),
+  /**
+   * The body it sent. With files attached this is the `payload` part alone —
+   * the bytes are in `files`, by name and size.
+   */
+  request: z.string(),
+  /** The uploads it attached. Absent when it attached none. */
+  files: z.array(attachmentSchema).default([]),
+  status: z.number(),
+  response: z.string(),
+  latencyMs: z.number(),
+  error: z.string().optional(),
+  /** Whether this failure is what stopped the tool call. */
+  stoppedTheCall: z.boolean(),
+})
+
 const decisionSchema = z.discriminatedUnion('decision', [
   z.object({ decision: z.literal('continue'), tools: z.number() }),
   z.object({ decision: z.literal('stop'), stop: stopOutcomeSchema }),
@@ -366,6 +412,11 @@ export const turnSchema = z.object({
    * which is every turn of a profile with no MCP server.
    */
   mcp: z.array(mcpExchangeSchema).default([]),
+  /**
+   * Every hook that fired around the tools above. Omitted entirely when a server
+   * declares none, which is every profile that never asked for one.
+   */
+  hooks: z.array(hookRecordSchema).default([]),
   decision: decisionSchema,
 })
 
@@ -428,6 +479,8 @@ export type CallOutcome = z.infer<typeof callOutcomeSchema>
 export type StopOutcome = z.infer<typeof stopOutcomeSchema>
 export type ToolInvocation = z.infer<typeof toolInvocationSchema>
 export type McpExchange = z.infer<typeof mcpExchangeSchema>
+export type Attachment = z.infer<typeof attachmentSchema>
+export type HookRecord = z.infer<typeof hookRecordSchema>
 export type Turn = z.infer<typeof turnSchema>
 export type Trace = z.infer<typeof traceSchema>
 export type AgentEvent = z.infer<typeof agentEventSchema>
