@@ -42,6 +42,7 @@ use crate::message::{Message, Role, ToolCall};
 use crate::profile::{AgentSpec, Profile, ProfileKind, StopWhen, ToolResponse, ToolSpec};
 use crate::script::ScriptError;
 use crate::uploads::UploadRef;
+use crate::vars::Vars;
 
 /// Turns allowed when the profile says nothing.
 const DEFAULT_MAX_ITERATIONS: u32 = 10;
@@ -161,6 +162,13 @@ pub struct ToolInvocation {
     /// failed. The model still gets told, so it has a chance to recover.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// What this call put in the run's variables, per `agent.capture`.
+    ///
+    /// Reported per call rather than only as the run's final bag: a variable is
+    /// a fact about one tool call, and a capture that quietly matched nothing is
+    /// exactly what somebody staring at an empty `vars` needs to see.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub captured: crate::vars::Captured,
 }
 
 /// Where a tool's answer came from.
@@ -517,6 +525,12 @@ struct Tools {
     /// settled state — and on a run that chose its revision, a second handshake
     /// before every single tool.
     clients: BTreeMap<String, McpClient>,
+    /// What this run's tool calls have captured, and the rules that fill it.
+    ///
+    /// Shared with every client the run built, so a variable a simulated tool
+    /// set is one a live server's hook can read. Not drained per turn, unlike
+    /// the journals beside it: carrying a value across turns is the point.
+    vars: Arc<Vars>,
     /// This run's MCP traffic, drained into each turn as it completes.
     journal: McpJournal,
     /// Where the hooks that fired are collected, drained per turn beside it.
@@ -568,6 +582,11 @@ async fn prepare(runner: &Runner, input: &mut AgentInput) -> Result<Prepared, Ag
     let hooks: HookJournal = HookJournal::default();
     let attachments: Arc<[UploadRef]> = Arc::from(input.call.uploads.clone());
 
+    // Resolved before the clients are built, because each of them is handed the
+    // bag its calls will fill.
+    let spec = profile.agent.clone().unwrap_or_else(default_spec);
+    let vars = Vars::new(spec.capture.clone());
+
     let mut live = Vec::new();
     let mut clients = BTreeMap::new();
     for server in &profile.mcp {
@@ -579,6 +598,9 @@ async fn prepare(runner: &Runner, input: &mut AgentInput) -> Result<Prepared, Ag
             .ok_or_else(|| McpError::UnknownServer(server.clone()))?
             .speaking(input.mcp_protocol)
             .recording(journal.clone(), hooks.clone())
+            // Shared across servers on purpose: a run has one set of variables,
+            // however many servers it ends up talking to.
+            .capturing(Arc::clone(&vars))
             // The same files the template gets, for a hook that asked for some.
             // Shared rather than copied per server: a run's uploads are one set
             // of bytes however many servers it ends up talking to.
@@ -590,7 +612,6 @@ async fn prepare(runner: &Runner, input: &mut AgentInput) -> Result<Prepared, Ag
         clients.insert(server.clone(), client);
     }
 
-    let spec = profile.agent.clone().unwrap_or_else(default_spec);
     let validators = compile_validators(&profile.tools, &live);
 
     // The live tools go straight into the render context, so every turn offers
@@ -615,6 +636,7 @@ async fn prepare(runner: &Runner, input: &mut AgentInput) -> Result<Prepared, Ag
             live,
             config,
             clients,
+            vars,
             journal,
             hooks,
         },
@@ -688,6 +710,7 @@ fn default_spec() -> AgentSpec {
         stop_when: StopWhen::default(),
         max_iterations: DEFAULT_MAX_ITERATIONS,
         max_duration_ms: None,
+        capture: Vec::new(),
     }
 }
 
@@ -797,7 +820,7 @@ async fn invoke_tools(tools: &Tools, calls: &[ToolCall], turn: u32) -> Vec<ToolI
             .unwrap_or_default();
 
         if let Some(spec) = tools.profile.tools.iter().find(|t| t.name == call.name) {
-            invocations.push(simulated(spec, call, turn, schema_errors));
+            invocations.push(simulated(&tools.vars, spec, call, turn, schema_errors));
         } else if let Some(tool) = tools.live.iter().find(|t| t.name == call.name) {
             invocations.push(live(tools, tool, call, schema_errors).await);
         } else {
@@ -815,6 +838,7 @@ async fn invoke_tools(tools: &Tools, calls: &[ToolCall], turn: u32) -> Vec<ToolI
                 schema_errors,
                 result: format!("{{\"error\": {}}}", json_string(&message)),
                 error: Some(message),
+                captured: crate::vars::Captured::new(),
             });
         }
     }
@@ -824,6 +848,7 @@ async fn invoke_tools(tools: &Tools, calls: &[ToolCall], turn: u32) -> Vec<ToolI
 
 /// A tool the profile declares. Nothing leaves this process.
 fn simulated(
+    vars: &Vars,
     spec: &ToolSpec,
     call: &ToolCall,
     turn: u32,
@@ -840,6 +865,17 @@ fn simulated(
         }
     };
 
+    // A simulated tool captures on exactly the same terms as a live one: what a
+    // variable is worth does not depend on which of the two answered, and a
+    // stubbed `create_session` is how somebody tries a capture rule out before
+    // pointing it at a server. Nothing to read from a tool that failed, though —
+    // that result is our error message, not the tool's answer.
+    let captured = if error.is_none() {
+        vars.capture(&call.name, None, &result)
+    } else {
+        crate::vars::Captured::new()
+    };
+
     ToolInvocation {
         call: call.clone(),
         source: ToolSource::Simulated,
@@ -849,6 +885,7 @@ fn simulated(
         schema_errors,
         result,
         error,
+        captured,
     }
 }
 
@@ -868,6 +905,7 @@ async fn live(
         schema_errors,
         result: String::new(),
         error: None,
+        captured: crate::vars::Captured::new(),
     };
 
     let outcome = async {
@@ -886,6 +924,9 @@ async fn live(
             // The server's own `isError` is a result, not a failure: reacting to
             // it is exactly what agent mode is checking the model can do.
             invocation.reported_error = result.is_error;
+            // Captured by the client, before its `after` hooks fired; carried up
+            // here so the turn can report which call set what.
+            invocation.captured = result.captured;
             invocation.result = result.text;
         }
         Err(failure) => {
@@ -1046,12 +1087,18 @@ tools:
 
     /// The dispatch context for a profile with no MCP servers.
     fn simulated_only(profile: Profile) -> Tools {
+        capturing(profile, Vars::none())
+    }
+
+    /// The same, with a bag the profile's capture rules fill.
+    fn capturing(profile: Profile, vars: std::sync::Arc<Vars>) -> Tools {
         let profile = std::sync::Arc::new(profile);
         Tools {
             validators: compile_validators(&profile.tools, &[]),
             live: Vec::new(),
             config: std::sync::Arc::new(Config::default()),
             clients: BTreeMap::new(),
+            vars,
             journal: McpJournal::default(),
             hooks: HookJournal::default(),
             profile,
@@ -1158,6 +1205,103 @@ tools:
 
         assert_eq!(invocations[0].result, r#"{"city": "Lyon", "turn": 3}"#);
         assert!(invocations[0].error.is_none());
+    }
+
+    /// A bag filled by one rule on `get_weather`.
+    fn weather_vars(name: &str, paths: &[&str]) -> std::sync::Arc<Vars> {
+        Vars::new(vec![crate::profile::CaptureRule {
+            tools: vec![crate::pattern::NamePattern::compile("get_weather").expect("pattern")],
+            vars: BTreeMap::from([(
+                name.to_owned(),
+                paths
+                    .iter()
+                    .map(|path| path.parse().expect("path"))
+                    .collect(),
+            )]),
+        }])
+    }
+
+    fn weather_call() -> ToolCall {
+        ToolCall {
+            id: None,
+            name: "get_weather".to_owned(),
+            arguments: serde_json::json!({"city": "Lyon"}),
+            arguments_as_text: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_simulated_tool_fills_the_run_variables_it_was_asked_for() {
+        let vars = weather_vars("temp", &["$.temp"]);
+        let tools = capturing(
+            weather_profile(r#"response: '{"temp": 21}'"#),
+            std::sync::Arc::clone(&vars),
+        );
+
+        let invocations = invoke_tools(&tools, &[weather_call()], 1).await;
+
+        // Reported on the call that set it, and readable from the run's bag.
+        assert_eq!(
+            invocations[0].captured.get("temp"),
+            Some(&serde_json::json!(21))
+        );
+        assert_eq!(vars.snapshot().get("temp"), Some(&serde_json::json!(21)));
+    }
+
+    #[tokio::test]
+    async fn a_capture_that_matches_nothing_leaves_the_call_saying_so() {
+        let vars = weather_vars("temp", &["$.temperature"]);
+        let tools = capturing(
+            weather_profile(r#"response: '{"temp": 21}'"#),
+            std::sync::Arc::clone(&vars),
+        );
+
+        let invocations = invoke_tools(&tools, &[weather_call()], 1).await;
+
+        // Empty rather than absent-and-unexplained: a `vars` nobody filled is a
+        // fact to read in the trace, not a mystery in a rendered URL.
+        assert!(invocations[0].captured.is_empty());
+        assert!(vars.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_tool_that_could_not_answer_captures_nothing() {
+        let vars = weather_vars("error", &["$.error"]);
+        let tools = capturing(
+            weather_profile("script: 'arguments.no_such_method()'"),
+            std::sync::Arc::clone(&vars),
+        );
+
+        let invocations = invoke_tools(&tools, &[weather_call()], 1).await;
+
+        // The result is our error message, not the tool's answer, and capturing
+        // from it would put `mire`'s own words in a variable.
+        assert!(invocations[0].error.is_some());
+        assert!(invocations[0].captured.is_empty());
+        assert!(vars.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_tool_answering_something_that_is_not_json_captures_nothing() {
+        let vars = weather_vars("temp", &["$.temp"]);
+        let tools = capturing(
+            weather_profile("response: 'it is sunny in Lyon'"),
+            std::sync::Arc::clone(&vars),
+        );
+
+        let invocations = invoke_tools(&tools, &[weather_call()], 1).await;
+
+        assert!(invocations[0].error.is_none());
+        assert!(invocations[0].captured.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_profile_with_no_capture_rules_reports_nothing_extra() {
+        let tools = simulated_only(weather_profile(r#"response: '{"temp": 21}'"#));
+
+        let invocations = invoke_tools(&tools, &[weather_call()], 1).await;
+
+        assert!(invocations[0].captured.is_empty());
     }
 
     #[tokio::test]

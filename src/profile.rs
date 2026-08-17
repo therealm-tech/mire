@@ -15,6 +15,7 @@ use serde_json_path::JsonPath;
 use url::Url;
 use validator::{Validate, ValidationError};
 
+use crate::pattern::NamePattern;
 use crate::script::ScriptSource;
 
 /// Default request timeout when a profile does not set `timeout_ms`.
@@ -301,6 +302,69 @@ pub struct AgentSpec {
     /// Hard cap on wall-clock time for the whole loop.
     #[serde(default)]
     pub max_duration_ms: Option<u64>,
+    /// What to keep out of the tool results this run produces.
+    ///
+    /// Applied in declaration order, to simulated and live tools alike: what a
+    /// captured variable is worth does not depend on which of the two answered.
+    #[serde(default)]
+    #[validate(nested)]
+    pub capture: Vec<CaptureRule>,
+}
+
+/// Variables to pull out of a tool's result, and the tools they come from.
+///
+/// One rule is one `tools:`-plus-`vars:` pair rather than a flat map of
+/// name-to-path, because the tool a value comes from is part of what the value
+/// *means*: `$.id` is a different thing on `create_session` than on `read_file`,
+/// and a bag keyed only by path would make that a coincidence.
+///
+/// See [`crate::vars`] for what happens with them.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Validate)]
+#[serde(deny_unknown_fields)]
+#[validate(schema(function = usable_variable_names))]
+pub struct CaptureRule {
+    /// Tools it applies to, as patterns matched against the whole name. Empty —
+    /// the default — is every tool the run offers.
+    #[serde(default)]
+    pub tools: Vec<NamePattern>,
+    /// Variable name to the `JSONPath` cascade that fills it. Tried in order,
+    /// first hit wins, exactly like a `decode:` field.
+    #[validate(length(min = 1, message = "a capture rule with no `vars` captures nothing"))]
+    pub vars: BTreeMap<String, Vec<JsonPathExpr>>,
+}
+
+impl CaptureRule {
+    /// Whether this rule has anything to say about `tool`.
+    #[must_use]
+    pub fn covers(&self, tool: &str) -> bool {
+        NamePattern::any_matches(&self.tools, tool)
+    }
+}
+
+/// A captured name has to be one a template can actually write.
+///
+/// `{{ vars.session }}` needs an identifier, and a name that only works as
+/// `{{ vars["my var"] }}` is a trap set at load time and sprung in a URL — so it
+/// is refused where it was written instead.
+fn usable_variable_names(rule: &CaptureRule) -> Result<(), ValidationError> {
+    for (name, cascade) in &rule.vars {
+        let usable = !name.is_empty()
+            && name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !usable {
+            return Err(ValidationError::new("unusable_variable_name").with_message(
+                format!(
+                    "`{name}` cannot be read as `vars.{name}`: use letters, digits and underscores"
+                )
+                .into(),
+            ));
+        }
+        if cascade.is_empty() {
+            return Err(ValidationError::new("empty_capture_cascade")
+                .with_message(format!("`{name}` needs at least one JSONPath").into()));
+        }
+    }
+    Ok(())
 }
 
 /// What a simulated tool answers with.
@@ -481,6 +545,90 @@ tools:
       required: [city]
     response: '{"temp": 21}'
 "#;
+
+    /// A chat profile whose `agent:` block is whatever the test needs.
+    fn with_agent(agent: &str) -> Result<Profile, String> {
+        let yaml = format!(
+            r"
+name: agent
+kind: chat
+url: https://models.internal/v1
+request:
+  template: '{{}}'
+agent:
+{agent}
+"
+        );
+        let profile: Profile = serde_yaml_ng::from_str(&yaml).map_err(|error| error.to_string())?;
+        profile.validate().map_err(|error| error.to_string())?;
+        Ok(profile)
+    }
+
+    #[test]
+    fn a_capture_rule_loads_with_its_patterns_and_its_cascades() {
+        let profile = with_agent(
+            "  capture:\n    - tools: [create_.*]\n      vars:\n        session: [$.sessionId, $.session.id]\n",
+        )
+        .expect("it loads");
+
+        let rules = &profile.agent.as_ref().unwrap().capture;
+        assert_eq!(rules.len(), 1);
+        assert!(rules[0].covers("create_session"));
+        assert!(!rules[0].covers("read_file"));
+        assert_eq!(rules[0].vars["session"].len(), 2);
+        assert_eq!(rules[0].vars["session"][0].source(), "$.sessionId");
+    }
+
+    #[test]
+    fn a_capture_rule_with_no_tools_covers_every_tool() {
+        let profile =
+            with_agent("  capture:\n    - vars:\n        id: [$.id]\n").expect("it loads");
+
+        assert!(profile.agent.as_ref().unwrap().capture[0].covers("anything_at_all"));
+    }
+
+    #[test]
+    fn a_capture_path_that_is_not_a_jsonpath_is_caught_at_load() {
+        let error = with_agent("  capture:\n    - vars:\n        id: ['not a path']\n")
+            .expect_err("`not a path` is not a JSONPath");
+
+        assert!(error.contains("id") || error.contains("path"), "{error}");
+    }
+
+    #[test]
+    fn a_capture_pattern_that_is_not_a_regex_is_caught_at_load() {
+        let error =
+            with_agent("  capture:\n    - tools: ['create_(']\n      vars:\n        id: [$.id]\n")
+                .expect_err("an unclosed group is not a regex");
+
+        assert!(error.contains("create_("), "{error}");
+    }
+
+    #[test]
+    fn a_variable_name_a_template_could_not_read_is_refused_where_it_was_written() {
+        // `{{ vars.my id }}` is not a thing, and finding that out in a rendered
+        // URL is finding it out too late.
+        let error = with_agent("  capture:\n    - vars:\n        'my id': [$.id]\n")
+            .expect_err("a space is not an identifier");
+
+        assert!(error.contains("my id"), "{error}");
+        assert!(error.contains("vars.my id"), "{error}");
+    }
+
+    #[test]
+    fn a_capture_rule_that_captures_nothing_says_so() {
+        let error = with_agent("  capture:\n    - tools: [create_session]\n      vars: {}\n")
+            .expect_err("a rule with no vars is a rule that does nothing");
+
+        assert!(error.contains("vars"), "{error}");
+    }
+
+    #[test]
+    fn a_profile_that_captures_nothing_is_the_ordinary_case() {
+        let profile: Profile = serde_yaml_ng::from_str(CHAT_YAML).unwrap();
+
+        assert!(profile.agent.as_ref().unwrap().capture.is_empty());
+    }
 
     #[test]
     fn parses_a_chat_profile() {

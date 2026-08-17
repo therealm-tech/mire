@@ -3725,6 +3725,413 @@ async fn a_hook_fires_on_both_sides_of_a_tool_call_and_says_what_it_sent() {
     assert!(after["result"]["latencyMs"].is_number());
 }
 
+/// A chat profile that captures `session` out of whatever `get_weather` answers.
+fn capturing_profile(url: &str) -> String {
+    format!(
+        r#"
+name: chat
+kind: chat
+url: {url}
+timeout_ms: 5000
+request:
+  template: |
+    {{"model": "m", "messages": {{{{ messages | tojson }}}}, "tools": {{{{ tools | tojson }}}}}}
+decode:
+  content: ["$.choices[0].message.content"]
+  tool_calls: ["$.choices[0].message.tool_calls"]
+  finish_reason: ["$.choices[0].finish_reason"]
+agent:
+  stop_when:
+    no_tool_calls: true
+  max_iterations: 4
+  capture:
+    - tools: [get_weather]
+      vars:
+        session: [$.sessionId]
+mcp:
+  - weather
+"#
+    )
+}
+
+#[tokio::test]
+async fn a_hook_url_is_addressed_with_what_the_tool_call_captured() {
+    let mcp = mcp_server(
+        weather_tool(),
+        vec![json!({
+            "resultType": "complete",
+            "content": [{"type": "text", "text": "{\"sessionId\": \"abc-123\", \"temp\": 21}"}],
+            "isError": false,
+        })],
+    )
+    .await;
+
+    // Mounted on the path the capture has to produce, so a hook that rendered
+    // anything else gets a `404` instead of a quiet pass.
+    let hook = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/sessions/abc-123/audit"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&hook)
+        .await;
+
+    let endpoint = MockServer::start().await;
+    model_using_a_tool(&endpoint).await;
+
+    let harness = Harness::start(&[
+        (
+            "mcp.yaml",
+            format!(
+                "servers:\n  - name: weather\n    url: {}/mcp\n    hooks:\n      - name: audit\n        \
+                 on: [after]\n        action:\n          kind: http\n          \
+                 url: {}/sessions/{{{{ vars.session }}}}/audit\n",
+                mcp.uri(),
+                hook.uri()
+            ),
+        ),
+        (
+            "chat.yaml",
+            capturing_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+        ),
+    ])
+    .await;
+
+    let (status, events) = harness
+        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .await;
+    assert_eq!(status, 200);
+
+    let turn = &events.iter().find(|(name, _)| name == "turn").unwrap().1;
+
+    // The tool call says what it captured.
+    let tool = &turn["tools"][0];
+    assert_eq!(tool["source"], "mcp");
+    assert_eq!(tool["captured"]["session"], "abc-123");
+
+    // And the `after` hook of that very call reached the address it produced —
+    // which is only possible because the capture happens before it fires.
+    let hooks = turn["hooks"].as_array().expect("the hooks that fired");
+    assert_eq!(hooks.len(), 1, "{hooks:#?}");
+    assert_eq!(hooks[0]["phase"], "after");
+    assert_eq!(hooks[0]["status"], 204, "{:#?}", hooks[0]);
+    assert!(
+        hooks[0]["url"]
+            .as_str()
+            .expect("the url it used")
+            .ends_with("/sessions/abc-123/audit"),
+        "{:#?}",
+        hooks[0]
+    );
+
+    let sent = hook.received_requests().await.expect("hook requests");
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].url.path(), "/sessions/abc-123/audit");
+}
+
+#[tokio::test]
+async fn a_hook_url_naming_a_variable_nobody_captured_fails_the_call_rather_than_guessing() {
+    let mcp = mcp_server(
+        weather_tool(),
+        vec![json!({
+            "resultType": "complete",
+            // No `sessionId` in it, so the capture has nothing to select.
+            "content": [{"type": "text", "text": "{\"temp\": 21}"}],
+            "isError": false,
+        })],
+    )
+    .await;
+    let hook = MockServer::start().await;
+    let endpoint = MockServer::start().await;
+    model_using_a_tool(&endpoint).await;
+
+    let harness = Harness::start(&[
+        (
+            "mcp.yaml",
+            format!(
+                "servers:\n  - name: weather\n    url: {}/mcp\n    hooks:\n      - name: audit\n        \
+                 on: [after]\n        action:\n          kind: http\n          \
+                 url: {}/sessions/{{{{ vars.session }}}}/audit\n",
+                mcp.uri(),
+                hook.uri()
+            ),
+        ),
+        (
+            "chat.yaml",
+            capturing_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+        ),
+    ])
+    .await;
+
+    let (status, events) = harness
+        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .await;
+    assert_eq!(status, 200);
+
+    let turn = &events.iter().find(|(name, _)| name == "turn").unwrap().1;
+    let hooks = turn["hooks"].as_array().expect("the hooks that fired");
+    assert_eq!(hooks.len(), 1, "{hooks:#?}");
+
+    // Loud, and specific about which template and which variable — the loud
+    // default, because rendering it away would send the audit to `/sessions//audit`.
+    assert_eq!(hooks[0]["stoppedTheCall"], true);
+    let error = hooks[0]["error"].as_str().expect("the reason");
+    assert!(error.contains("undefined"), "{error}");
+    assert!(error.contains("url"), "{error}");
+
+    // Nothing left for it: the request never went out.
+    assert!(
+        hook.received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty(),
+        "a hook that could not address itself must not have sent anything"
+    );
+}
+
+#[tokio::test]
+async fn a_hook_header_carries_what_the_tool_call_captured() {
+    let mcp = mcp_server(
+        weather_tool(),
+        vec![json!({
+            "resultType": "complete",
+            "content": [{"type": "text", "text": "{\"sessionId\": \"abc-123\"}"}],
+            "isError": false,
+        })],
+    )
+    .await;
+    let hook = hook_endpoint(204, "").await;
+    let endpoint = MockServer::start().await;
+    model_using_a_tool(&endpoint).await;
+
+    let harness = Harness::start(&[
+        (
+            "mcp.yaml",
+            format!(
+                "servers:\n  - name: weather\n    url: {}/mcp\n    hooks:\n      - name: audit\n        \
+                 on: [after]\n        action:\n          kind: http\n          url: {}/hook\n          \
+                 headers:\n            x-session: '{{{{ vars.session }}}}'\n",
+                mcp.uri(),
+                hook.uri()
+            ),
+        ),
+        (
+            "chat.yaml",
+            capturing_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+        ),
+    ])
+    .await;
+
+    let (status, events) = harness
+        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .await;
+    assert_eq!(status, 200);
+
+    let sent = hook.received_requests().await.expect("hook requests");
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].headers["x-session"], "abc-123");
+
+    // A hook's headers need no `| default(...)`: it only renders around a call.
+    let turn = &events.iter().find(|(name, _)| name == "turn").unwrap().1;
+    let hooks = turn["hooks"].as_array().expect("the hooks that fired");
+    assert_eq!(hooks[0]["status"], 204, "{:#?}", hooks[0]);
+    // The name travels; the rendered value is masked like every other header.
+    assert!(
+        hooks[0]["headers"]["x-session"].is_string(),
+        "{:#?}",
+        hooks[0]
+    );
+}
+
+/// A model that asks for `get_weather` twice, then answers.
+async fn model_using_a_tool_twice(endpoint: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "message": {"content": "", "tool_calls": [{
+                    "id": "call_1",
+                    "function": {"name": "get_weather", "arguments": "{\"city\": \"Paris\"}"},
+                }]},
+                "finish_reason": "tool_calls",
+            }],
+        })))
+        .up_to_n_times(2)
+        .mount(endpoint)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "message": {"content": "It is 21 degrees and clear in Paris."},
+                "finish_reason": "stop",
+            }],
+        })))
+        .mount(endpoint)
+        .await;
+}
+
+#[tokio::test]
+async fn a_server_header_picks_up_a_session_a_tool_opened_on_an_earlier_turn() {
+    let mcp = mcp_server(
+        weather_tool(),
+        vec![
+            json!({
+                "resultType": "complete",
+                "content": [{"type": "text", "text": "{\"sessionId\": \"abc-123\"}"}],
+                "isError": false,
+            }),
+            json!({
+                "resultType": "complete",
+                "content": [{"type": "text", "text": "{\"sessionId\": \"abc-123\"}"}],
+                "isError": false,
+            }),
+        ],
+    )
+    .await;
+    let endpoint = MockServer::start().await;
+    model_using_a_tool_twice(&endpoint).await;
+
+    let harness = Harness::start(&[
+        (
+            "mcp.yaml",
+            format!(
+                "servers:\n  - name: weather\n    url: {}/mcp\n    headers:\n      \
+                 x-session: \"{{{{ vars.session | default('') }}}}\"\n",
+                mcp.uri()
+            ),
+        ),
+        (
+            "chat.yaml",
+            capturing_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+        ),
+    ])
+    .await;
+
+    let (status, _) = harness
+        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .await;
+    assert_eq!(status, 200);
+
+    let sent = mcp.received_requests().await.expect("mcp requests");
+    let sessions: Vec<&str> = sent
+        .iter()
+        .map(|request| {
+            request
+                .headers
+                .get("x-session")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("<absent>")
+        })
+        .collect();
+
+    // Empty on everything up to and including the first `tools/call` — nothing
+    // has been captured yet — and carrying the session from the second one on.
+    // The `| default('')` is what keeps the setup `tools/list` from dying.
+    assert!(
+        sessions.first().is_some_and(|first| first.is_empty()),
+        "{sessions:?}"
+    );
+    assert!(
+        sessions.contains(&"abc-123"),
+        "the session a tool opened never reached a later request: {sessions:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_hook_waits_for_its_variable_then_fires_once_a_call_has_captured_one() {
+    let mcp = mcp_server(
+        weather_tool(),
+        vec![
+            // The first call opens nothing: there is no session to audit yet.
+            json!({
+                "resultType": "complete",
+                "content": [{"type": "text", "text": "{\"temp\": 21}"}],
+                "isError": false,
+            }),
+            json!({
+                "resultType": "complete",
+                "content": [{"type": "text", "text": "{\"sessionId\": \"abc-123\"}"}],
+                "isError": false,
+            }),
+        ],
+    )
+    .await;
+
+    let hook = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/sessions/abc-123/audit"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&hook)
+        .await;
+
+    let endpoint = MockServer::start().await;
+    model_using_a_tool_twice(&endpoint).await;
+
+    let harness = Harness::start(&[
+        (
+            "mcp.yaml",
+            format!(
+                "servers:\n  - name: weather\n    url: {}/mcp\n    hooks:\n      - name: audit\n        \
+                 on: [after]\n        when_defined: [session]\n        action:\n          kind: http\n          \
+                 url: {}/sessions/{{{{ vars.session }}}}/audit\n",
+                mcp.uri(),
+                hook.uri()
+            ),
+        ),
+        (
+            "chat.yaml",
+            capturing_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+        ),
+    ])
+    .await;
+
+    let (status, events) = harness
+        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .await;
+    assert_eq!(status, 200);
+
+    let turns: Vec<&Value> = events
+        .iter()
+        .filter(|(name, _)| name == "turn")
+        .map(|(_, turn)| turn)
+        .collect();
+    assert!(turns.len() >= 2, "{turns:#?}");
+
+    // Turn one: nothing captured, so the hook sits it out — recorded, naming
+    // what it waited for, and emphatically not a failure.
+    let first = turns[0]["hooks"].as_array().expect("the hooks of turn one");
+    assert_eq!(first.len(), 1, "{first:#?}");
+    assert_eq!(first[0]["skipped"], "session");
+    assert_eq!(first[0]["status"], 0);
+    assert_eq!(first[0]["stoppedTheCall"], false);
+    assert!(first[0]["error"].is_null(), "{:#?}", first[0]);
+
+    // And the tool call it sat out is untouched: the model got the real answer.
+    assert!(turns[0]["tools"][0]["error"].is_null(), "{:#?}", turns[0]);
+    assert!(
+        turns[0]["tools"][0]["captured"]
+            .as_object()
+            .is_none_or(serde_json::Map::is_empty)
+    );
+
+    // Turn two captures a session, so the hook fires — at the address that
+    // capture produced.
+    let second = turns[1]["hooks"].as_array().expect("the hooks of turn two");
+    assert_eq!(second.len(), 1, "{second:#?}");
+    assert!(second[0]["skipped"].is_null(), "{:#?}", second[0]);
+    assert_eq!(second[0]["status"], 204, "{:#?}", second[0]);
+    assert_eq!(turns[1]["tools"][0]["captured"]["session"], "abc-123");
+
+    let sent = hook.received_requests().await.expect("hook requests");
+    assert_eq!(
+        sent.len(),
+        1,
+        "the skipped firing must not have sent anything"
+    );
+    assert_eq!(sent[0].url.path(), "/sessions/abc-123/audit");
+}
+
 #[tokio::test]
 async fn a_before_hook_that_says_no_stops_the_call_from_happening_at_all() {
     let mcp = mcp_server(weather_tool(), vec![json!({"resultType": "complete"})]).await;

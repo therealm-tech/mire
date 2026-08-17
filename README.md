@@ -1109,7 +1109,7 @@ With no `body:`, the payload is the call itself:
 the calls that worked is not one.
 
 A `body:` template replaces the payload and sees the same fields by name, plus
-`env`:
+`env` and [`vars`](#keeping-something-a-tool-call-answered):
 
 ```yaml
         action:
@@ -1233,6 +1233,157 @@ header *names* appear in `GET /api/mcp`.
 Other knobs: `method:` (`POST` by default, because a hook carries a payload) and
 `timeout_ms:` (10 s, shorter than a tool's — a slow audit sink must not look like
 a slow tool).
+
+### Keeping something a tool call answered
+
+A tool answers, and something in that answer is what the next thing needs: a
+session id, a job handle, the path a server just wrote. `capture:` in a profile's
+`agent:` block names those, by JSONPath, per tool:
+
+```yaml
+agent:
+  capture:
+    - tools: [create_session]
+      vars:
+        session: [$.sessionId]
+```
+
+and a hook reads them back as `vars` — in its `url:`, its `body:` and its
+`headers:`:
+
+```yaml
+      - name: audit
+        on:
+          - after
+        action:
+          kind: http
+          url: https://audit.internal/sessions/{{ vars.session }}/tool-calls
+          body: '{"session": "{{ vars.session }}", "ran": "{{ tool }}"}'
+          headers:
+            x-session: '{{ vars.session }}'
+```
+
+A **server's** own `headers:` see them too, which is the other half of the point:
+a tool that opens a session can put that session on every later request to the
+server it opened it on.
+
+```yaml
+servers:
+  - name: files
+    url: https://mcp.internal/mcp
+    headers:
+      x-session: "{{ vars.session | default('') }}"
+```
+
+**The `| default('')` there is not decoration.** A server's headers render on
+*every* request it makes, and the first of those is the `tools/list` at setup —
+before any tool has been called, so before anything has been captured. Without a
+default, that run dies negotiating, which is a strange way to find out that a
+session is opened by a tool. A hook's headers have no such problem: a hook only
+fires around a call, so anything captured before that call is already there.
+
+`url:` is ordinarily just a URL, parsed and checked when `mcp.yaml` loads, and it
+stays that: a template is only a template when it contains one, so a typo in a
+scheme is still a startup issue rather than a string that renders beautifully and
+fails on the first tool call. When it *is* a template it sees exactly what
+`body:` sees — one context, so there is no second vocabulary to look up.
+
+**A templated URL is resolved before the credential is.** `allowed_hosts` is a
+statement about where a credential may go, so it is checked against the address
+the request will actually use, not against the one the file happened to be
+written with. A template that renders to a host the provider does not allow gets
+the refusal.
+
+The notation is JSONPath because [`decode:`](#when-a-cascade-is-not-enough)
+already reads responses that way, cascades and all — a list of paths tried in
+order, first hit wins:
+
+```yaml
+      vars:
+        session: [$.sessionId, $.session.id]
+```
+
+Paths and `tools:` patterns compile when the profile loads, so a typo names the
+file and the field at startup. So does a variable name a template could not read:
+`{{ vars.my id }}` is not a thing, and finding that out in a rendered URL is
+finding it out too late.
+
+Three rules, each of them a decision rather than an accident:
+
+- **Simulated and live tools capture alike.** What a variable is worth does not
+  depend on which of the two answered, and stubbing `create_session` is how you
+  try a capture rule out before pointing it at a server. `tools:` is the same
+  anchored-regex list a hook's is; empty is every tool.
+- **An `after` hook sees what its own call just captured.** The capture happens
+  as soon as the result lands, before the `after` hooks fire — which is the only
+  ordering that lets a hook report on the session the call it wrapped has opened.
+  A `before` hook sees what earlier calls captured, since that is all there is.
+- **What gets read is `structuredContent` when the server sent one, and the
+  result text parsed as JSON otherwise.** A tool answering prose captures
+  nothing: there is no path into it. That is not an error — a profile may
+  perfectly well capture from one tool of several.
+
+Nothing about it is silent. Every tool card in the trace carries `captured`, what
+*that* call set:
+
+```json
+{
+  "call": { "name": "create_session", "arguments": {} },
+  "source": "mcp",
+  "captured": { "session": "abc-123" }
+}
+```
+
+so a rule that quietly matched nothing is a fact you read there rather than a
+mystery in a rendered URL. A variable a template names and nobody captured fails
+loudly, and the message **names the variable** — `undefined value — `session` is
+not set`, the way a header template already reports a missing `env` or `auth` —
+rather than rendering away to `/sessions//tool-calls`, which is a different
+endpoint that may well answer `200`. The bag lasts one run, is shared by every
+server that run talks to, and last write wins.
+
+#### A hook that waits for one
+
+Failing loudly is right when the variable *should* be there. When it legitimately
+is not there **yet** — a session that a tool opens partway through a run —
+`when_defined:` says so:
+
+```yaml
+      - name: session-audit
+        on:
+          - after
+        when_defined:
+          - session
+        action:
+          kind: http
+          url: https://audit.internal/sessions/{{ vars.session }}/tool-calls
+```
+
+Plain names, not patterns: this asks whether a value exists, and the place to
+*use* it is `url:`, `body:` or `headers:`. Every name listed has to be there;
+empty — the default — is no condition at all.
+
+The pairing is the point. Without `when_defined:`, that URL fails every call made
+before a session exists. With it, the hook sits those out and starts firing once
+one does.
+
+**Not firing is not failing.** `on_error` does not apply, nothing is sent, no
+credential is resolved, and the tool call proceeds untouched — the model gets the
+real answer. The skip is recorded all the same, naming what it waited for:
+
+```json
+{ "hook": "session-audit", "phase": "after", "skipped": "session", "status": 0 }
+```
+
+A hook that quietly never ran and a hook that was never declared must not look
+the same in a trace. Note that presence is the test, not truthiness: a path that
+resolved to `null` resolved, and `when_defined:` does not second-guess the
+capture that accepted it.
+
+Names are checked against what the run captured and nothing else — there is no
+startup check that some profile fills them, because `mcp.yaml` does not know
+which profiles will use the server. A name nothing ever captures shows up as a
+skip naming it, run after run, which is the readable version of that mistake.
 
 ## Streaming, and the number everybody actually wants
 
@@ -1420,6 +1571,10 @@ tools:
       required: [city]
     response: '{"temp": 21, "conditions": "clear"}'
 ```
+
+`agent:` also takes `capture:`, which keeps something out of a tool's result for
+a hook to use later — see
+[above](#keeping-something-a-tool-call-answered).
 
 **Nothing is executed.** The tools are simulated — a fixed string, or a Rhai
 script that sees `arguments`, `name` and `turn`. What is being checked is that
