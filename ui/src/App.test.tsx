@@ -236,6 +236,21 @@ function card(label: RegExp): HTMLElement {
 }
 
 /**
+ * Unfolds one exchange and hands back its card.
+ *
+ * Cards arrive folded, so every assertion about a request, a decode or a body
+ * has to open the card first — which is also the gesture a reader makes, and a
+ * test that skipped it would be asserting against a panel nobody sees.
+ */
+async function openCard(
+  user: ReturnType<typeof userEvent.setup>,
+  label: RegExp,
+): Promise<HTMLElement> {
+  await user.click(screen.getByRole('button', { name: label }))
+  return card(label)
+}
+
+/**
  * Picks a mode in the composer, which is what decides where **Send** goes.
  *
  * **Agent** is the default and the loop; **Chat** is one streamed turn that
@@ -403,12 +418,12 @@ describe('App', () => {
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     await waitFor(() => {
-      // Scoped to the paragraph, and to wording the auth panel's own hint does
-      // not share: a bare regex matches ancestors too.
-      expect(
-        screen.getByText(/that is a pass, not a failure/i, { selector: 'p' }),
-      ).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Turn 1 · model/ })).toBeInTheDocument()
     })
+    // Scoped to the paragraph, and to wording the auth panel's own hint does
+    // not share: a bare regex matches ancestors too.
+    const model = within(await openCard(user, /Turn 1 · model/))
+    expect(model.getByText(/that is a pass, not a failure/i, { selector: 'p' })).toBeInTheDocument()
   })
 
   it('offers no way to call as somebody else', async () => {
@@ -766,11 +781,12 @@ describe('agent mode', () => {
       expect(within(panel('Conversation')).getByText('pong')).toBeInTheDocument()
     })
 
-    // And the numbers a streaming test is actually for, one panel down.
-    const traffic = within(panel('Traffic'))
-    expect(traffic.getByText(/first token 40 ms/)).toBeInTheDocument()
-    expect(traffic.getByText('3 chunks')).toBeInTheDocument()
-    expect(traffic.getByText(/ended cleanly/)).toBeInTheDocument()
+    // And the numbers a streaming test is actually for, one panel down: the
+    // headline on the folded card, the counters once it is opened.
+    expect(within(panel('Traffic')).getByText(/first token 40 ms/)).toBeInTheDocument()
+    const model = within(await openCard(user, /Call · model/))
+    expect(model.getByText('3 chunks')).toBeInTheDocument()
+    expect(model.getByText(/ended cleanly/)).toBeInTheDocument()
   })
 
   it('says so when a stream stops without ending', async () => {
@@ -812,11 +828,12 @@ describe('agent mode', () => {
     await chatMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
-    await waitFor(() => {
-      expect(screen.getByText(/stopped without ending/i)).toBeInTheDocument()
-    })
     // What arrived is still shown: a truncated answer is the finding.
-    expect(within(panel('Conversation')).getByText('half a sen')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(within(panel('Conversation')).getByText('half a sen')).toBeInTheDocument()
+    })
+    const model = within(await openCard(user, /Call · model/))
+    expect(model.getByText(/stopped without ending/i)).toBeInTheDocument()
   })
 
   it('shows the tools a run called in the transcript and the verdict it ended on', async () => {
@@ -877,11 +894,14 @@ describe('agent mode', () => {
     await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
-    // A refusal opens its own body: a red `400` with nothing under it is the
-    // whole problem this answers.
+    // The card says `400` while folded; opening it opens the body with it,
+    // because a red status with nothing under it is the whole problem this
+    // answers.
     await waitFor(() => {
-      expect(within(panel('Traffic')).getByText(/maximum context length/)).toBeInTheDocument()
+      expect(within(panel('Traffic')).getByText('400')).toBeInTheDocument()
     })
+    const model = within(await openCard(user, /Turn 1 · model/))
+    expect(model.getByText(/maximum context length/)).toBeInTheDocument()
   })
 
   it('reads the error out of a body whose status called it fine', async () => {
@@ -934,15 +954,17 @@ describe('agent mode', () => {
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     const traffic = within(panel('Traffic'))
+    // The status said `200`, so the badge on the folded card is the only thing
+    // that would ever have told you otherwise.
     await waitFor(() => {
-      expect(traffic.getByText('no capacity upstream')).toBeInTheDocument()
+      expect(traffic.getByText(/error in the body/)).toBeInTheDocument()
     })
-    expect(traffic.getByText('service_unavailable')).toBeInTheDocument()
-    // The status said `200`, so the badge is the only thing that would ever
-    // have told you otherwise.
-    expect(traffic.getByText(/error in the body/)).toBeInTheDocument()
+
+    const model = within(await openCard(user, /Turn 1 · model/))
+    expect(model.getByText('no capacity upstream')).toBeInTheDocument()
+    expect(model.getByText('service_unavailable')).toBeInTheDocument()
     // And the profile is not the one at fault, so it is not accused of it.
-    expect(traffic.queryByText(/No configured path resolved the content/)).not.toBeInTheDocument()
+    expect(model.queryByText(/No configured path resolved the content/)).not.toBeInTheDocument()
   })
 })
 
@@ -1107,7 +1129,7 @@ describe('traffic', () => {
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /Turn 1 · gate \(before\)/ })).toBeInTheDocument()
     })
-    const hook = within(card(/Turn 1 · gate \(before\)/))
+    const hook = within(await openCard(user, /Turn 1 · gate \(before\)/))
     expect(hook.getByText('stopped the call')).toBeInTheDocument()
     expect(hook.getByText('403')).toBeInTheDocument()
     // Twice over: the reason it failed, and the body it answered with.
@@ -1149,7 +1171,7 @@ describe('traffic', () => {
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /Turn 1 · audit \(after\)/ })).toBeInTheDocument()
     })
-    const hook = within(card(/Turn 1 · audit \(after\)/))
+    const hook = within(await openCard(user, /Turn 1 · audit \(after\)/))
     expect(hook.getByText('report.pdf')).toBeInTheDocument()
     // Sized the way every other file chip in this UI is sized.
     expect(hook.getByText(/application\/pdf · 2\.0 kB/)).toBeInTheDocument()
@@ -1172,7 +1194,7 @@ describe('traffic', () => {
     // The tool call's own JSON-RPC belongs to the turn that made it.
     expect(screen.getByRole('button', { name: /Turn 1 · tools\/call/ })).toBeInTheDocument()
 
-    const handshake = within(card(/Setup · initialize/))
+    const handshake = within(await openCard(user, /Setup · initialize/))
     expect(handshake.getByText('protocolVersion')).toBeInTheDocument()
     expect(handshake.getByText('"x"')).toBeInTheDocument()
     expect(handshake.getAllByText(/mcp-method:/).length).toBeGreaterThan(0)
@@ -1191,13 +1213,13 @@ describe('traffic', () => {
 
     // The request that went out is one line of JSON. Finding a field in it is
     // the job, so it gets the same foldable tree the response always had.
-    const model = within(card(/Turn 1 · model/))
+    const model = within(await openCard(user, /Turn 1 · model/))
     expect(model.getByText('messages')).toBeInTheDocument()
     // A branch is a button, because folding it is the point.
     expect(model.getByRole('button', { name: /array · 0/ })).toBeInTheDocument()
 
     // Same for the JSON-RPC underneath a tool, in both directions.
-    const protocol = within(card(/Turn 1 · tools\/call/))
+    const protocol = within(await openCard(user, /Turn 1 · tools\/call/))
     expect(protocol.getByText('method')).toBeInTheDocument()
     expect(protocol.getByText('"tools/call"')).toBeInTheDocument()
     expect(protocol.getByText('temp')).toBeInTheDocument()
@@ -1213,7 +1235,7 @@ describe('traffic', () => {
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /Turn 1 · model/ })).toBeInTheDocument()
     })
-    const model = within(card(/Turn 1 · model/))
+    const model = within(await openCard(user, /Turn 1 · model/))
 
     // The request, credentials already masked, with its `curl` equivalent.
     expect(model.getByText(/authorization: \*\*\*/)).toBeInTheDocument()
@@ -1236,7 +1258,7 @@ describe('traffic', () => {
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /Turn 1 · get_weather/ })).toBeInTheDocument()
     })
-    const tool = within(card(/Turn 1 · get_weather/))
+    const tool = within(await openCard(user, /Turn 1 · get_weather/))
 
     expect(tool.getByText('city')).toBeInTheDocument()
     expect(tool.getByText('"Paris"')).toBeInTheDocument()
@@ -1247,7 +1269,7 @@ describe('traffic', () => {
     expect(tool.getByText(/called for real/)).toBeInTheDocument()
   })
 
-  it('folds every exchange away and back', async () => {
+  it('lands folded, and unfolds every exchange and back', async () => {
     vi.stubGlobal('fetch', toolRunApi())
     const user = userEvent.setup()
     render(<App />)
@@ -1258,10 +1280,18 @@ describe('traffic', () => {
       expect(screen.getByRole('button', { name: /Turn 1 · model/ })).toBeInTheDocument()
     })
 
-    await user.click(screen.getByRole('button', { name: 'Collapse all' }))
+    // A run lands as a list of what happened, not as five open bodies: the
+    // summary lines are there, and nothing underneath them is until asked for.
     expect(screen.queryByText(/arguments match the schema/i)).not.toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Expand all' }))
+    expect(screen.getByText(/arguments match the schema/i)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Collapse all' }))
+    expect(screen.queryByText(/arguments match the schema/i)).not.toBeInTheDocument()
+
+    // And one card on its own still opens, which is the ordinary gesture.
+    await user.click(screen.getByRole('button', { name: /Turn 1 · get_weather/ }))
     expect(screen.getByText(/arguments match the schema/i)).toBeInTheDocument()
   })
 
@@ -1978,10 +2008,9 @@ describe('reading a run', () => {
     const conversation = within(panel('Conversation'))
     await waitFor(() => expect(conversation.getByText('get_weather')).toBeInTheDocument())
 
-    // A run puts five cards below; folding them all is how somebody reads a
-    // long session, and the point of the link is that it undoes that for the
-    // one card being pointed at.
-    await user.click(screen.getByRole('button', { name: 'Collapse all' }))
+    // A run puts five folded cards below, which is how somebody reads a long
+    // session, and the point of the link is that it unfolds the one card being
+    // pointed at.
     expect(within(card(/Turn 1 · get_weather/)).queryByText(/"temp"/)).not.toBeInTheDocument()
 
     // The scroll is the half a fold cannot show: jsdom has no layout, so the

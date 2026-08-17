@@ -53,7 +53,11 @@ export function TrafficPanel({
   onExport: () => void
   onClear: () => void
 }) {
-  const [closed, setClosed] = useState<ReadonlySet<string>>(new Set())
+  // Which cards the reader has opened. Folded is the default, and the set
+  // tracks the exceptions rather than the rule: a run puts a wall of headers,
+  // bodies and decode traces on the page, and the list is a table of contents
+  // before it is a transcript. You open what you came for.
+  const [open, setOpen] = useState<ReadonlySet<string>>(new Set())
   const [lens, setLens] = useState<Lens>('all')
   const [onlyFailures, setOnlyFailures] = useState(false)
   // The card just jumped to, marked for a moment so the eye can find where it
@@ -70,10 +74,10 @@ export function TrafficPanel({
       (lens === 'all' || exchange.kind === lens) && (!onlyFailures || failures.has(exchange.id)),
   )
 
-  const allClosed = shown.length > 0 && shown.every((exchange) => closed.has(exchange.id))
+  const allOpen = shown.length > 0 && shown.every((exchange) => open.has(exchange.id))
 
   const toggle = (id: string) =>
-    setClosed((current) => {
+    setOpen((current) => {
       const next = new Set(current)
       if (!next.delete(id)) {
         next.add(id)
@@ -102,11 +106,7 @@ export function TrafficPanel({
     }
     setLens('all')
     setOnlyFailures(false)
-    setClosed((current) => {
-      const next = new Set(current)
-      next.delete(reveal)
-      return next
-    })
+    setOpen((current) => new Set(current).add(reveal))
     setFlash(reveal)
     onRevealed()
 
@@ -135,11 +135,9 @@ export function TrafficPanel({
           {exchanges.length === 0 ? null : (
             <>
               <Button
-                onClick={() =>
-                  setClosed(allClosed ? new Set() : new Set(shown.map((one) => one.id)))
-                }
+                onClick={() => setOpen(allOpen ? new Set() : new Set(shown.map((one) => one.id)))}
               >
-                {allClosed ? 'Expand all' : 'Collapse all'}
+                {allOpen ? 'Collapse all' : 'Expand all'}
               </Button>
               {/*
                 Next to the list it exports, and only once there is something to
@@ -206,7 +204,7 @@ export function TrafficPanel({
                   key={exchange.id}
                   exchange={exchange}
                   expectUnauthorized={expectUnauthorized}
-                  open={!closed.has(exchange.id)}
+                  open={open.has(exchange.id)}
                   flash={flash === exchange.id}
                   onToggle={() => toggle(exchange.id)}
                 />
@@ -214,7 +212,7 @@ export function TrafficPanel({
                 <ProtocolCard
                   key={exchange.id}
                   exchange={exchange}
-                  open={!closed.has(exchange.id)}
+                  open={open.has(exchange.id)}
                   flash={flash === exchange.id}
                   onToggle={() => toggle(exchange.id)}
                 />
@@ -222,7 +220,7 @@ export function TrafficPanel({
                 <HookCard
                   key={exchange.id}
                   exchange={exchange}
-                  open={!closed.has(exchange.id)}
+                  open={open.has(exchange.id)}
                   flash={flash === exchange.id}
                   onToggle={() => toggle(exchange.id)}
                 />
@@ -230,7 +228,7 @@ export function TrafficPanel({
                 <ToolCard
                   key={exchange.id}
                   exchange={exchange}
-                  open={!closed.has(exchange.id)}
+                  open={open.has(exchange.id)}
                   flash={flash === exchange.id}
                   onToggle={() => toggle(exchange.id)}
                 />
