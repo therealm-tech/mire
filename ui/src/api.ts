@@ -654,6 +654,16 @@ export function call(body: CallRequest, signal?: AbortSignal): Promise<CallOutco
 export interface AgentRequest extends CallRequest {
   maxIterations?: number
   /**
+   * Which of the profile's MCP servers this run may reach.
+   *
+   * Left out when every one of them is on, which is what the profile says.
+   * Sending a shorter list narrows the run to those — `[]` included, which is a
+   * loop offering the model no live tool at all. It only ever narrows: a server
+   * the profile does not name is a `422`, because that opt-in belongs to the
+   * file rather than to a tab.
+   */
+  mcpServers?: string[]
+  /**
    * Revision to speak to every MCP server this run touches.
    *
    * Left out for `auto`, which is each server settling its own the way it always

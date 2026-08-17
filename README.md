@@ -189,7 +189,9 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   the servers on the bar above and any refusal they would have caused. A chat is
   one turn: it discovers nothing, lists nothing and calls nothing, so the
   profile's servers are not idle during it — they are not in the run at all, and
-  neither are the sign-ins they would have needed.
+  neither are the sign-ins they would have needed. A server unticked in
+  **Servers** leaves the same way and for the same reason: this run does not
+  reach it, so it needs nothing from you.
 - **Conversation**, for chat profiles. A transcript: your question on the right,
   the answer on the left, the tools the run called in between, and a composer at
   the bottom. `Enter` sends, `Shift`+`Enter` starts a line. There is one button,
@@ -199,8 +201,12 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   ends on turn one anyway — the same one turn a single call would have made.
   **Chat**: one turn, streamed — read chunk by chunk, the text appearing as it
   arrives, the only way to see time to first token. **max turns** is shown as
-  inert on **Chat**, because a stream has no second turn to cap, and
-  **Protocol** goes away entirely, because there is no server for it to be about.
+  inert on **Chat**, because a stream has no second turn to cap, and **Servers**
+  and **Protocol** go away entirely, because there is no server for either of
+  them to be about. **Servers** is a checkbox per server the profile names:
+  untick one and this run does not set it up, does not sign in to it and is not
+  offered its tools — the file still names it, and the run
+  [says so](#switching-one-off-for-a-run) rather than shrinking quietly.
   While a run is in flight, **Stop** drops the request where it stands and
   whatever had arrived stays on the page — a stream cut off after four tokens
   produced four tokens, and that is a finding rather than a mess to clear up.
@@ -227,7 +233,8 @@ with the call and never stored, never logged, never echoed back. A credential
 username, the granted scopes and a countdown.
 
 **The tab remembers a little, and never that.** Which profile you were on, what
-you had half typed, how many turns you allow, which revision you pinned — small
+you had half typed, how many turns you allow, which revision you pinned, which
+MCP servers you switched off — small
 settings whose loss is pure annoyance, kept in the browser's own storage. The
 credential is not among them, and neither is the conversation or the traffic: a
 session's bodies are unbounded, and the first oversized run would start throwing
@@ -982,6 +989,45 @@ replica — comes back as a `404` to a request that carried one. `mire` handshak
 again and replays the call once, so you see the listing rather than the
 plumbing. Twice in a row is reported, because at that point it is not plumbing.
 
+### Switching one off for a run
+
+Which servers a profile *may* reach is the profile's business: `mcp:` is opt-in,
+never implied, because a tool call here really runs somewhere. Which of them
+**this** run reaches is a different question, and it comes up constantly — does
+the model still get there without the search tool, is that server the thing that
+has been failing for ten minutes, what does the loop do when the tool it wants is
+not there. All three used to be a profile edit, a run, and a profile edit back.
+
+The **Servers** row in the composer, above **Protocol**, is one checkbox per
+server the profile names. Untick one and this run does not set it up: nothing is
+discovered, nothing is listed, no credential is fetched, and its tools are not
+offered to the model. `POST /api/agent` takes the same thing:
+
+```json
+{ "profile": "chat", "prompt": "weather in Paris?", "mcpServers": ["files"] }
+```
+
+Leave the field out — the default — and the run reaches every server the profile
+names, which is what the file says. Send a list and it reaches those, `[]`
+included: a loop with nothing set up, offered the profile's own simulated
+`tools:` and nothing else. That empty list is not the same as saying nothing, on
+purpose — "none of them" is an answer, and it should not be spelled the same way
+as "whatever the file says".
+
+**It only ever narrows.** Naming a server the profile does not is a `422`
+(`mcp_server_not_offered`) before anything is sent, not a server this request
+gets to add — the opt-in lives in a file somebody wrote and reviewed, and a
+request body is not where it is granted. So the file stays the authority on what
+a profile may touch, and the checkbox decides what this run actually did.
+
+Switching one off takes its blockers with it. A server whose browser identity
+nobody has signed in to would have refused the first tool call with a `409`; off,
+it is not in the run, so the preflight bar goes green and the sign-in it was
+asking for disappears from the auth panel — the same way both vanish in **Chat**
+mode. What stays is a line naming what was left out, because a run reaching fewer
+servers than its profile declares is a fact you want in front of you rather than
+one to reconstruct from the traffic afterwards.
+
 ### A token that does not fit
 
 `auth:` covers a credential in the ordinary place. For the rest — an API key, a
@@ -1541,7 +1587,10 @@ server up, so **Chat** speaks to none of them — `POST /api/call` and `POST
 /api/call/stream` never discover, list or call a tool, whatever the profile's
 `mcp:` says, and the UI drops their identities and their revision from the page
 while that is the mode. The tool list the model is offered is then the profile's
-own `tools:` and nothing else.
+own `tools:` and nothing else — which is also what a loop reaching
+[no server](#switching-one-off-for-a-run) is offered, and the reason switching
+them all off answers a question a chat cannot: what the *loop* does when the tool
+it wants is not there.
 
 It runs on the [conversation](#having-a-conversation) in the browser, and when it
 stops it appends the answer it finished on. The turns in between — the tool calls

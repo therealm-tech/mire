@@ -482,6 +482,21 @@ pub struct AgentRequest {
     #[validate(range(min = 1, max = 50))]
     pub max_iterations: Option<u32>,
 
+    /// Which of the profile's MCP servers this run may reach.
+    ///
+    /// Omit it — the default — and the run reaches every server the profile
+    /// names, which is what the file says. A list narrows that to the ones named,
+    /// `[]` included: a loop with no server set up offers the model the profile's
+    /// simulated `tools:` and nothing else, which is how you ask what it does
+    /// when the tool it wants is not there, without editing the profile.
+    ///
+    /// It only narrows. A server this profile does not name is a `422`, not a
+    /// server this run gets to add: `mcp:` is opt-in per profile because it is
+    /// the one thing here with effects outside the process, and a request is not
+    /// where that opt-in is granted.
+    #[serde(default)]
+    pub mcp_servers: Option<Vec<String>>,
+
     /// Revision to speak to every MCP server this run touches.
     ///
     /// Omit it — the default — and each server settles its own the way it always
@@ -498,6 +513,7 @@ impl From<AgentRequest> for AgentInput {
         Self {
             call: request.call.into(),
             max_iterations: request.max_iterations,
+            mcp_servers: request.mcp_servers,
             mcp_protocol: request.mcp_protocol,
         }
     }

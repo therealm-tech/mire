@@ -172,6 +172,12 @@ export function App() {
     z.string().nullable(),
     null,
   )
+  // The servers switched off, rather than the ones left on: a profile is a file
+  // somebody edits, and remembering the *on* set would quietly leave a server
+  // added this morning out of every run until somebody noticed. Names are
+  // `mcp.yaml`'s and so global to the tab — switching `dev` off means off, on
+  // whichever profile reaches it.
+  const [mcpOff, setMcpOff] = usePersisted<string[]>('mcpOff', z.array(z.string()), [])
 
   const [signingIn, setSigningIn] = useState<string | null>(null)
   // Carries the provider, because two places can start a login now and an error
@@ -303,6 +309,19 @@ export function App() {
    */
   const usesMcp = mode === 'agent' && (profile?.mcp.length ?? 0) > 0
 
+  /**
+   * The servers this run will actually set up.
+   *
+   * The profile's, minus whatever the composer has switched off — and empty when
+   * the run speaks to none of them at all. Everything that describes the run
+   * reads this rather than `profile.mcp`: the bar above the box, the identities
+   * in the auth panel, and the list that goes out with the request.
+   */
+  const activeMcp = useMemo(
+    () => (usesMcp && profile ? profile.mcp.filter((name) => !mcpOff.includes(name)) : []),
+    [usesMcp, profile, mcpOff],
+  )
+
   /** What the next call would do, and what would stop it. */
   const ready = useMemo(
     () =>
@@ -314,9 +333,23 @@ export function App() {
             servers: mcp.servers,
             token,
             usesMcp,
+            mcpOff,
           })
         : null,
-    [profile, provider, auth, mcp, token, usesMcp],
+    [profile, provider, auth, mcp, token, usesMcp, mcpOff],
+  )
+
+  /** Puts one server in or out of the next run. */
+  const toggleMcp = useCallback(
+    (name: string, on: boolean) => {
+      setMcpOff((current) => {
+        if (on) {
+          return current.filter((entry) => entry !== name)
+        }
+        return current.includes(name) ? current : [...current, name]
+      })
+    },
+    [setMcpOff],
   )
 
   // One kind of blocker is fixed by a field inside the panel rather than by a
@@ -544,6 +577,14 @@ export function App() {
       if (attachments.length > 0) {
         body.uploads = attachments.map((file) => file.id)
       }
+      // Left out while every server is on, for the same reason: the profile
+      // already says which ones, and a copy travelling alongside is a second
+      // thing that can disagree with it. Sent the moment one is switched off —
+      // including as an empty list, which is a run reaching none of them and not
+      // the same as saying nothing.
+      if (activeMcp.length !== profile.mcp.length) {
+        body.mcpServers = activeMcp
+      }
       // Left out entirely on auto: the field's absence is what tells the server
       // to settle the revision itself, and sending a value it worked out anyway
       // would be a second opinion nobody asked for.
@@ -608,7 +649,7 @@ export function App() {
         })
         .finally(settle)
     },
-    [profile, token, attachments, maxIterations, mcpProtocol, begin, settle],
+    [profile, token, attachments, maxIterations, mcpProtocol, activeMcp, begin, settle],
   )
 
   /**
@@ -821,6 +862,7 @@ export function App() {
             <AuthPanel
               auth={auth}
               mcp={mcp}
+              names={activeMcp}
               profile={profile}
               provider={provider}
               token={token}
@@ -845,6 +887,8 @@ export function App() {
               error={callError ? callError.body : null}
               revisions={mcp.revisions}
               mcpProtocol={usesMcp ? mcpProtocol : null}
+              mcpServers={usesMcp ? profile.mcp : []}
+              mcpOff={mcpOff}
               showProtocol={usesMcp}
               attachments={attachments}
               attaching={attaching}
@@ -853,6 +897,7 @@ export function App() {
               onMaxIterations={setMaxIterations}
               onMode={setMode}
               onMcpProtocol={setMcpProtocol}
+              onMcpServer={toggleMcp}
               onAttach={attach}
               onDetach={detach}
               onSend={send}

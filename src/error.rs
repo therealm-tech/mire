@@ -86,6 +86,13 @@ impl From<crate::agent::AgentError> for ApiError {
                 "not_a_chat_profile",
                 error.to_string(),
             ),
+            // Not a `404`: the server is declared and perfectly real, it is this
+            // profile that was never given it. Naming both is the whole fix.
+            crate::agent::AgentError::NotOffered { .. } => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "mcp_server_not_offered",
+                error.to_string(),
+            ),
             crate::agent::AgentError::Turn(exec) => Self::from(exec),
             crate::agent::AgentError::Mcp(mcp) => Self::from(mcp),
         }

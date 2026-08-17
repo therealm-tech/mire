@@ -13,11 +13,14 @@ import { Panel } from './primitives'
  * bar above, which is also what opens this.
  *
  * The second question is only asked when the run would ask it: a chat calls no
- * tool, so its profile's servers are nobody's business until the mode changes.
+ * tool, so its profile's servers are nobody's business until the mode changes —
+ * and neither is one the composer has switched off, which this run reaches
+ * exactly as little as a chat does.
  */
 export function AuthPanel({
   auth,
   mcp,
+  names,
   profile,
   provider,
   token,
@@ -30,6 +33,8 @@ export function AuthPanel({
 }: {
   auth: AuthResponse
   mcp: McpResponse
+  /** The servers this run will set up: the profile's, minus the ones switched off. */
+  names: string[]
   profile: ProfileSummary | undefined
   provider: AuthResponse['providers'][number] | undefined
   token: string
@@ -59,11 +64,11 @@ export function AuthPanel({
           />
         </section>
 
-        {showMcp && profile && profile.mcp.length > 0 ? (
+        {showMcp && names.length > 0 ? (
           <section className="space-y-2 border-line border-t pt-3">
             <h3 className="font-semibold text-muted text-xs">MCP servers</h3>
             <McpAuth
-              names={profile.mcp}
+              names={names}
               servers={mcp.servers}
               providers={auth.providers}
               signingIn={signingIn}
