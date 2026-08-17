@@ -22,6 +22,7 @@
 //! * [`redact`] — credentials, and the guarantee they do not leave the process.
 //! * [`uploads`] — the one thing here that writes to disk, and the rules that
 //!   keep it from writing anywhere it was not pointed at.
+//! * [`vars`] — what a tool call left behind, for the hooks that fire after it.
 //!
 //! # A note on wire naming
 //!
@@ -40,9 +41,11 @@ pub mod exec;
 pub mod issue;
 pub mod mcp;
 pub mod message;
+pub mod pattern;
 pub mod profile;
 pub mod redact;
 pub mod render;
 pub mod script;
 pub mod transport;
 pub mod uploads;
+pub mod vars;

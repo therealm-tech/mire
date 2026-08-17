@@ -150,6 +150,23 @@ servers:
   #     x-api-key: "{{ env.FILES_API_KEY }}"
   #     x-tenant: "{{ env.TENANT | default('dev') }}"
 
+  # --- 7b. A session an earlier tool call opened -----------------------------
+  #
+  # `vars` is what this run's tool calls have captured, per the profile's
+  # `agent.capture:` — see qwen3.yaml. This is how a tool that opens a session
+  # puts that session on every later request to the same server.
+  #
+  # The `| default('')` is **not** decoration here. These headers render on
+  # every request, and the first is the `tools/list` at setup — before any tool
+  # has been called, so before anything has been captured. Without it, the run
+  # dies negotiating. A hook's headers need no such thing: a hook only fires
+  # around a call.
+  #
+  # - name: files-session
+  #   url: https://mcp.internal/mcp
+  #   headers:
+  #     x-session: "{{ vars.session | default('') }}"
+
   # --- 8. Both at once -------------------------------------------------------
   #
   # Templated headers are applied first and the `auth:` provider last, so on a
@@ -266,4 +283,34 @@ servers:
   #         url: https://audit.internal/attachments
   #         files:
   #           - .*\.pdf
+  #
+  #     # A hook addressed with what an earlier call answered. `vars` is filled
+  #     # by the profile's `agent.capture:` — see qwen3.yaml — and is in scope
+  #     # for `url:` and `body:` alike.
+  #     #
+  #     # `url:` is a template only when it contains one, so every URL above is
+  #     # still parsed and checked when this file loads. A variable nobody
+  #     # captured fails the hook rather than rendering away to
+  #     # `/sessions//tool-calls`, which is a different endpoint that may well
+  #     # answer 200.
+  #     # `when_defined:` names variables that must have been captured for the
+  #     # hook to fire at all. Without it, the URL below fails every call made
+  #     # before a session exists; with it, the hook sits those out and starts
+  #     # firing once one does.
+  #     #
+  #     # Not firing is not failing: `on_error` does not apply, nothing is sent,
+  #     # and the tool call is untouched. The skip is still recorded, naming the
+  #     # variable it waited for — a hook that quietly never ran and a hook that
+  #     # was never declared must not look the same in a trace.
+  #     - name: session-audit
+  #       on:
+  #         - after
+  #       when_defined:
+  #         - session
+  #       action:
+  #         kind: http
+  #         url: https://audit.internal/sessions/{{ vars.session }}/tool-calls
+  #         auth: keycloak-workload
+  #         headers:
+  #           x-session: '{{ vars.session }}'
   # ---------------------------------------------------------------------------

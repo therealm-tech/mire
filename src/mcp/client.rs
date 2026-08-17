@@ -47,6 +47,7 @@ use crate::auth::AuthProvider;
 use super::McpCredentials;
 use crate::redact::Redactor;
 use crate::uploads::UploadRef;
+use crate::vars::Vars;
 
 /// Pages of `tools/list` to follow before deciding a server is toying with us.
 const MAX_PAGES: usize = 20;
@@ -116,6 +117,11 @@ pub struct McpClient {
     /// The run's attached files, for hooks that ask for some. Empty off a
     /// registry client: files arrive with a call, not with a server.
     uploads: Arc<[UploadRef]>,
+    /// The run's variables: what its tool calls have captured, and the rules
+    /// that fill them. Per run for the same reason the journals are — a bag
+    /// living on the registry's shared client would be one run reading another
+    /// one's session id.
+    vars: Arc<Vars>,
 }
 
 impl McpClient {
@@ -129,6 +135,7 @@ impl McpClient {
             journal: None,
             hooks: None,
             uploads: Arc::from(Vec::new()),
+            vars: Vars::none(),
         }
     }
 
@@ -143,6 +150,19 @@ impl McpClient {
         Self {
             journal: Some(journal),
             hooks: Some(hooks),
+            ..self.clone()
+        }
+    }
+
+    /// The same client, capturing into the run's variables.
+    ///
+    /// A client without this captures nothing, which is what every caller
+    /// outside the agent loop wants: `GET /api/mcp/{name}/tools` is a
+    /// connectivity check, not a run, and it has no variables to fill.
+    #[must_use]
+    pub fn capturing(&self, vars: Arc<Vars>) -> Self {
+        Self {
+            vars,
             ..self.clone()
         }
     }
@@ -351,7 +371,17 @@ impl McpClient {
         self.fire(HookPhase::Before, tool, arguments, None, credentials)
             .await?;
 
-        let called = self.perform(tool, arguments, credentials).await;
+        let mut called = self.perform(tool, arguments, credentials).await;
+
+        // Captured before the `after` hooks fire, so one of them can name what
+        // this very call produced — a hook reporting on the session the call it
+        // wrapped has just opened is the whole point of a templated URL. A call
+        // that failed captures nothing: there is no result to read.
+        if let Ok(result) = &mut called {
+            result.captured =
+                self.vars
+                    .capture(&tool.name, result.structured.as_ref(), &result.text);
+        }
 
         // The `after` hooks see what happened either way. An audit trail that
         // only records the calls that worked is not one — and a call that failed
@@ -417,6 +447,7 @@ impl McpClient {
             &self.server.hooks,
             &payload,
             &self.uploads,
+            &self.vars.snapshot(),
             credentials,
             |record| self.file_hook(record),
         )
@@ -486,6 +517,7 @@ impl McpClient {
             structured: call.structured_content,
             is_error: call.is_error,
             latency_ms,
+            captured: crate::vars::Captured::new(),
         })
     }
 
@@ -780,11 +812,11 @@ impl McpClient {
         // Rendered here rather than at load, so a rotated token is picked up on
         // the next call.
         let mut scrub = Redactor::new();
-        for (name, value) in self
-            .server
-            .headers
-            .render(&self.server.name, credentials.named())?
-        {
+        for (name, value) in self.server.headers.render(
+            &self.server.name,
+            credentials.named(),
+            &self.vars.snapshot(),
+        )? {
             let mut rendered =
                 HeaderValue::from_str(value.expose()).map_err(|_| McpError::Header {
                     server: self.server.name.clone(),

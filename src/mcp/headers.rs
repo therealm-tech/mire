@@ -5,7 +5,7 @@
 //! scheme nobody else uses — without adding a provider kind per endpoint that
 //! does something slightly its own way.
 //!
-//! Templates see two things. `env` is the process environment. `auth` is the
+//! Templates see three things. `env` is the process environment. `auth` is the
 //! **auth registry**, keyed by provider name, each entry the bare token that
 //! provider would produce — so a credential `mire` already knows how to obtain
 //! (a rotated file, a `client_credentials` exchange, the browser session you are
@@ -16,6 +16,22 @@
 //! headers:
 //!   x-api-key: '{{ auth["keycloak-workload"] }}'
 //! ```
+//!
+//! `vars` is what the run's tool calls have captured, per the profile's
+//! `agent.capture:` — see [`crate::vars`]. It is what lets a tool that opens a
+//! session put that session on every later request:
+//!
+//! ```yaml
+//! headers:
+//!   x-session: "{{ vars.session | default('') }}"
+//! ```
+//!
+//! **The `default(...)` there is not decoration.** A server's headers render on
+//! *every* request it makes, and the first of those is the `tools/list` at
+//! setup — before any tool has been called, and so before anything has been
+//! captured. Without a default, a run whose server header names a variable dies
+//! negotiating, which is a strange way to find out that a session is opened by a
+//! tool. A hook's headers have no such problem: a hook only fires around a call.
 //!
 //! Reach for `auth:` first when the server takes an ordinary bearer token: it is
 //! one word, and it brings the `401`-refresh-and-replay behaviour that a
@@ -46,6 +62,7 @@ use serde::Serialize;
 
 use super::McpError;
 use crate::redact::Secret;
+use crate::vars::Captured;
 
 /// Separate from [`crate::render`]'s environment on purpose: body templates rely
 /// on undefined being falsy (`{% if tools %}`), and a credential must not.
@@ -57,7 +74,7 @@ static ENVIRONMENT: LazyLock<Environment<'static>> = LazyLock::new(|| {
 
 /// What a header template can see.
 #[derive(Debug, Serialize)]
-struct Context {
+struct Context<'a> {
     /// The process environment, read fresh on every render.
     env: BTreeMap<String, String>,
     /// Bare credentials, by auth provider name. Only the providers this server's
@@ -65,16 +82,22 @@ struct Context {
     /// exchange, a refresh) and a failure mode (not signed in), and neither
     /// belongs to a server that never mentioned it.
     auth: BTreeMap<String, String>,
+    /// What the run's tool calls have captured so far. Empty off a run that
+    /// captures nothing, and empty *early in* a run that does — see the module
+    /// docs for why `| default(...)` is the answer there rather than a looser
+    /// undefined.
+    vars: &'a Captured,
 }
 
-impl Context {
-    fn current(auth: &BTreeMap<String, Secret>) -> Self {
+impl<'a> Context<'a> {
+    fn current(auth: &BTreeMap<String, Secret>, vars: &'a Captured) -> Self {
         Self {
             env: std::env::vars().collect(),
             auth: auth
                 .iter()
                 .map(|(name, token)| (name.clone(), token.expose().to_owned()))
                 .collect(),
+            vars,
         }
     }
 }
@@ -146,12 +169,13 @@ impl HeaderTemplates {
         &self,
         server: &str,
         auth: &BTreeMap<String, Secret>,
+        vars: &Captured,
     ) -> Result<Vec<(HeaderName, Secret)>, McpError> {
         if self.entries.is_empty() {
             return Ok(Vec::new());
         }
 
-        let context = Context::current(auth);
+        let context = Context::current(auth, vars);
         let mut rendered = Vec::with_capacity(self.entries.len());
 
         for (name, template) in &self.entries {
@@ -173,8 +197,8 @@ impl HeaderTemplates {
 ///
 /// `MiniJinja` says "undefined value" without saying *which*, which for a header
 /// whose whole job is to carry a token is the one thing you need. The template is
-/// scanned for the lookups it makes — `env` and `auth` both — and the ones that
-/// resolved to nothing are named.
+/// scanned for the lookups it makes — `env`, `auth` and `vars` alike — and the
+/// ones that resolved to nothing are named.
 ///
 /// Only **names** are ever emitted. Echoing the template back would be more
 /// direct and is exactly the wrong thing: a template may hold a literal
@@ -198,6 +222,14 @@ fn explain(error: &minijinja::Error, template: &str, context: &Context) -> Strin
             missing.push(name);
         }
     }
+    // A variable no tool call has captured *yet*. Named like the rest, because
+    // "undefined value" on a header that was supposed to carry a session is the
+    // one message that tells you nothing.
+    for name in lookups(template, "vars") {
+        if !context.vars.contains_key(name) {
+            missing.push(name);
+        }
+    }
 
     match missing.as_slice() {
         [] => message,
@@ -214,7 +246,11 @@ fn explain(error: &minijinja::Error, template: &str, context: &Context) -> Strin
 /// resolve before rendering. A name it misses costs a less specific error, or a
 /// provider that renders as undefined and is then reported as one — never a
 /// silently empty credential.
-fn lookups<'a>(template: &'a str, root: &str) -> Vec<&'a str> {
+///
+/// `pub(super)` so a hook's `url:` and `body:` can name their missing variables
+/// the same way, rather than growing a second scanner that finds slightly
+/// different names.
+pub(super) fn lookups<'a>(template: &'a str, root: &str) -> Vec<&'a str> {
     let mut found = Vec::new();
     let mut rest = template;
     let width = root.len();
@@ -265,7 +301,9 @@ mod tests {
     #[test]
     fn a_literal_header_needs_no_template_at_all() {
         let templates = HeaderTemplates::compile(&declared(&[("x-tenant", "acme")])).unwrap();
-        let rendered = templates.render("files", &BTreeMap::new()).unwrap();
+        let rendered = templates
+            .render("files", &BTreeMap::new(), &Captured::new())
+            .unwrap();
 
         assert_eq!(rendered.len(), 1);
         assert_eq!(rendered[0].0.as_str(), "x-tenant");
@@ -280,7 +318,9 @@ mod tests {
             HeaderTemplates::compile(&declared(&[("authorization", "Bearer {{ env.PATH }}")]))
                 .unwrap();
 
-        let rendered = templates.render("files", &BTreeMap::new()).unwrap();
+        let rendered = templates
+            .render("files", &BTreeMap::new(), &Captured::new())
+            .unwrap();
         let value = rendered[0].1.expose();
         assert!(value.starts_with("Bearer /"), "{value}");
     }
@@ -293,7 +333,9 @@ mod tests {
         )]))
         .unwrap();
 
-        let error = templates.render("files", &BTreeMap::new()).unwrap_err();
+        let error = templates
+            .render("files", &BTreeMap::new(), &Captured::new())
+            .unwrap_err();
         let message = error.to_string();
         // The trap this avoids: `Authorization: Bearer ` is a header that looks
         // present everywhere except at the far end.
@@ -317,6 +359,64 @@ mod tests {
     }
 
     #[test]
+    fn a_header_carries_what_the_run_captured() {
+        let templates =
+            HeaderTemplates::compile(&declared(&[("x-session", "{{ vars.session }}")])).unwrap();
+        let vars = Captured::from([("session".to_owned(), serde_json::json!("abc-123"))]);
+
+        let rendered = templates.render("files", &BTreeMap::new(), &vars).unwrap();
+
+        assert_eq!(rendered[0].1.expose(), "abc-123");
+    }
+
+    #[test]
+    fn a_captured_value_that_is_not_a_string_still_goes_in_a_header() {
+        let templates =
+            HeaderTemplates::compile(&declared(&[("x-attempt", "{{ vars.attempt }}")])).unwrap();
+        let vars = Captured::from([("attempt".to_owned(), serde_json::json!(3))]);
+
+        let rendered = templates.render("files", &BTreeMap::new(), &vars).unwrap();
+
+        assert_eq!(rendered[0].1.expose(), "3");
+    }
+
+    #[test]
+    fn a_variable_no_call_has_captured_yet_is_named_rather_than_sent_empty() {
+        let templates =
+            HeaderTemplates::compile(&declared(&[("x-session", "{{ vars.session }}")])).unwrap();
+
+        let message = templates
+            .render("files", &BTreeMap::new(), &Captured::new())
+            .unwrap_err()
+            .to_string();
+
+        // Named, like a missing `env` or `auth`: "undefined value" on a header
+        // that was meant to carry a session tells nobody anything.
+        assert!(message.contains("session"), "{message}");
+        assert!(message.contains("files"), "{message}");
+    }
+
+    #[test]
+    fn a_header_that_is_optional_until_a_tool_opens_the_session_says_so() {
+        // The escape hatch a *server* header needs: its first render is the
+        // `tools/list` at setup, before any tool has been called at all.
+        let templates = HeaderTemplates::compile(&declared(&[(
+            "x-session",
+            "{{ vars.session | default('') }}",
+        )]))
+        .unwrap();
+
+        let empty = templates
+            .render("files", &BTreeMap::new(), &Captured::new())
+            .unwrap();
+        assert_eq!(empty[0].1.expose(), "");
+
+        let vars = Captured::from([("session".to_owned(), serde_json::json!("abc-123"))]);
+        let later = templates.render("files", &BTreeMap::new(), &vars).unwrap();
+        assert_eq!(later[0].1.expose(), "abc-123");
+    }
+
+    #[test]
     fn an_error_names_variables_and_never_the_template() {
         // A template can hold a literal credential. An error message is exactly
         // where one must not end up.
@@ -327,7 +427,7 @@ mod tests {
         .unwrap();
 
         let message = templates
-            .render("files", &BTreeMap::new())
+            .render("files", &BTreeMap::new(), &Captured::new())
             .unwrap_err()
             .to_string();
         assert!(message.contains("MIRE_MISSING_SUFFIX"), "{message}");
@@ -343,7 +443,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            templates.render("files", &BTreeMap::new()).unwrap()[0]
+            templates
+                .render("files", &BTreeMap::new(), &Captured::new())
+                .unwrap()[0]
                 .1
                 .expose(),
             "dev"
@@ -361,7 +463,7 @@ mod tests {
         assert_eq!(templates.providers().collect::<Vec<_>>(), vec!["workload"]);
 
         let auth = BTreeMap::from([("workload".to_owned(), Secret::new("t0ken"))]);
-        let rendered = templates.render("files", &auth).unwrap();
+        let rendered = templates.render("files", &auth, &Captured::new()).unwrap();
         assert_eq!(rendered[0].0.as_str(), "x-api-key");
         assert_eq!(rendered[0].1.expose(), "t0ken");
     }
@@ -378,7 +480,7 @@ mod tests {
         .unwrap();
 
         let auth = BTreeMap::from([("workload".to_owned(), Secret::new("t0ken"))]);
-        let value = templates.render("files", &auth).unwrap()[0]
+        let value = templates.render("files", &auth, &Captured::new()).unwrap()[0]
             .1
             .expose()
             .to_owned();
@@ -405,7 +507,7 @@ mod tests {
 
         // `anonymous` resolves to no credential, so it never reaches the map.
         let message = templates
-            .render("files", &BTreeMap::new())
+            .render("files", &BTreeMap::new(), &Captured::new())
             .unwrap_err()
             .to_string();
         assert!(message.contains("nobody"), "{message}");
@@ -427,7 +529,9 @@ mod tests {
     #[test]
     fn a_rendered_value_never_prints_itself() {
         let templates = HeaderTemplates::compile(&declared(&[("x-api-key", "hunter2")])).unwrap();
-        let rendered = templates.render("files", &BTreeMap::new()).unwrap();
+        let rendered = templates
+            .render("files", &BTreeMap::new(), &Captured::new())
+            .unwrap();
 
         // The whole point of handing back a `Secret`: this cannot end up in a log
         // through a stray `{:?}`.

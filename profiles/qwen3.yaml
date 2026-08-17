@@ -148,6 +148,24 @@ agent:
   max_iterations: 6
   max_duration_ms: 600000
 
+  # What to keep out of a tool's result, for a hook to address itself with
+  # later. Each rule names the tools it applies to — anchored regexes, like a
+  # hook's `tools:`, empty being every tool — and a JSONPath cascade per
+  # variable, tried in order like a `decode:` field.
+  #
+  # Simulated and live tools capture alike, the paths compile when this file
+  # loads, and every tool card in the trace says what it set. They are then read
+  # as `vars` by a hook's `url:`, `body:` and `headers:`, and by a server's own
+  # `headers:` — see mcp.yaml.
+  #
+  # capture:
+  #   - tools:
+  #       - create_session
+  #     vars:
+  #       session:
+  #         - $.sessionId
+  #         - $.session.id
+
 # The tools are not declared here. They are fetched from the `dev` server at the
 # start of the run and **really called**, which is the difference between
 # checking that the model emits well-formed calls and checking that tool calling

@@ -309,6 +309,13 @@ pub struct ToolResult {
     pub is_error: bool,
     /// Round trip, in milliseconds.
     pub latency_ms: u64,
+    /// What this call put in the run's variables, if the profile asked for any.
+    ///
+    /// Carried on the result rather than left in the bag alone so the trace can
+    /// say which call set what: a variable is a fact about one tool call, and a
+    /// run that only reported the final bag would make the last writer look like
+    /// the only one.
+    pub captured: crate::vars::Captured,
 }
 
 /// Why an MCP exchange could not produce a result.

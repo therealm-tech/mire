@@ -51,11 +51,41 @@
 //!       - delete_file
 //! ```
 //!
+//! # Which calls it has enough to fire on
+//!
+//! `when_defined:` names variables that must have been captured for the hook to
+//! fire at all — plain names, not templates, because this asks whether a value
+//! exists and the place to *use* it is `url:`, `body:` or `headers:`.
+//!
+//! ```yaml
+//!     when_defined:
+//!       - session
+//!     action:
+//!       kind: http
+//!       url: https://audit.internal/sessions/{{ vars.session }}/tool-calls
+//! ```
+//!
+//! It is the graceful counterpart to the loud undefined above, and the pairing
+//! is the point: without it, that URL fails every call made before a session
+//! exists; with it, the hook simply waits and starts firing once one does.
+//!
+//! **Not firing is not failing.** `on_error` does not apply, nothing is sent, no
+//! credential is resolved, and the tool call proceeds untouched. The skip is
+//! recorded all the same, naming the variable it waited for — see
+//! [`HookRecord::skipped`]. A hook that quietly never ran and a hook that was
+//! never declared must not look the same in a trace.
+//!
+//! Names are matched against what the run has captured and nothing else. There
+//! is deliberately no check at load that some profile captures them: `mcp.yaml`
+//! does not know which profiles will use the server, and a name nothing ever
+//! fills shows up as a skip naming it rather than as a startup error about a
+//! file that may be perfectly correct.
+//!
 //! # What it sends
 //!
 //! With no `body:`, the payload is the call itself — phase, server, tool,
 //! arguments, and on the way back the result — as JSON. A `body:` template
-//! replaces it and sees the same fields by name, plus `env`:
+//! replaces it and sees the same fields by name, plus `env` and `vars`:
 //!
 //! ```yaml
 //!     body: '{"who": "{{ env.USER }}", "ran": "{{ tool }}"}'
@@ -64,6 +94,32 @@
 //! `auth` is deliberately **not** in scope there. A credential belongs in a
 //! header, where the redactor is; a body template that can reach the auth
 //! registry is a credential one typo away from a webhook's access log.
+//!
+//! A hook's own `headers:` see `vars` too, beside the `env` and `auth` they
+//! already had — see [`super::headers`]. Unlike a server's, they need no
+//! `| default(...)` to be safe: a hook only renders around a call, so anything
+//! captured before that call is there.
+//!
+//! # Where it sends it
+//!
+//! `url:` is ordinarily just a URL, parsed and checked when `mcp.yaml` loads. It
+//! may also be a template, seeing exactly what `body:` sees — one context, so
+//! there is no second table to remember:
+//!
+//! ```yaml
+//!     url: https://audit.internal/sessions/{{ vars.session }}/tool-calls
+//! ```
+//!
+//! `vars` is what earlier tool calls captured; see [`crate::vars`] for how a
+//! value gets in there. A template that reads something undefined fails the hook
+//! rather than sending the request somewhere with a hole in it, which is the
+//! same rule the headers follow and for the same reason.
+//!
+//! **A templated URL is resolved before the credential is.** `allowed_hosts` is a
+//! statement about where a credential may go, so it has to be checked against
+//! the address the request will actually use, not against the one the file
+//! happened to be written with. A template that renders to a host the provider
+//! does not allow gets the refusal.
 //!
 //! # Attaching the run's files
 //!
@@ -94,7 +150,6 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use minijinja::{Environment, UndefinedBehavior};
-use regex::Regex;
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use reqwest::multipart::{Form, Part};
 use reqwest::{Client, Method};
@@ -110,6 +165,7 @@ use super::{McpCredentials, McpError};
 use crate::auth::AuthProvider;
 use crate::redact::Redactor;
 use crate::uploads::UploadRef;
+use crate::vars::Captured;
 
 /// Body templates render strictly, for the same reason header templates do: a
 /// payload silently missing the field it was supposed to carry is a webhook that
@@ -161,60 +217,12 @@ pub enum OnError {
     Continue,
 }
 
-/// A name-matching pattern: what `mcp.yaml` wrote, and what it compiled to.
+/// A name-matching pattern, shared with the profile's own `tools:` lists.
 ///
-/// Used by `tools:` for tool names and by `files:` for upload names. One type
-/// because it is one rule — the pattern has to match the whole name.
-///
-/// # Why it is anchored
-///
-/// A plain `write_file` still means that one tool — which is what a list of
-/// names meant before it took patterns, and a gate that silently widened to
-/// `overwrite_file_backup` the day patterns landed would be a hole nobody opened
-/// on purpose. The same goes for a `files:` entry naming `report.pdf`: it must
-/// not quietly pick up `report.pdf.bak`. Widening is available by asking for it:
-/// `write_.*`, or `.*` for everything.
-#[derive(Debug, Clone)]
-pub struct NamePattern {
-    /// What `mcp.yaml` wrote. Kept for the descriptor: a UI listing the compiled
-    /// form would be showing anchors nobody typed.
-    source: String,
-    /// The anchored form, which is what actually decides.
-    matcher: Regex,
-}
-
-impl NamePattern {
-    /// Compiles one pattern.
-    ///
-    /// # Errors
-    ///
-    /// A one-line reason quoting the pattern, for the load issue.
-    pub fn compile(pattern: &str) -> Result<Self, String> {
-        Regex::new(&format!("^(?:{pattern})$"))
-            .map(|matcher| Self {
-                source: pattern.to_owned(),
-                matcher,
-            })
-            // Recompiled as written, so the complaint quotes the pattern rather
-            // than the anchors this put around it.
-            .map_err(|_| match Regex::new(pattern) {
-                Err(error) => format!("`{pattern}` is not a regex: {}", why(&error)),
-                Ok(_) => format!("`{pattern}` is not a regex once anchored to a whole name"),
-            })
-    }
-
-    /// The pattern as `mcp.yaml` wrote it.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.source
-    }
-
-    /// Whether it names `candidate`, whole.
-    #[must_use]
-    pub fn matches(&self, candidate: &str) -> bool {
-        self.matcher.is_match(candidate)
-    }
-}
+/// Used here by `tools:` for tool names and by `files:` for upload names. One
+/// type because it is one rule — the pattern has to match the whole name. See
+/// [`crate::pattern`] for why that is not negotiable.
+pub use crate::pattern::NamePattern;
 
 /// One hook, compiled and ready to fire.
 #[derive(Debug, Clone)]
@@ -226,6 +234,12 @@ pub struct Hook {
     /// Tools it applies to, as patterns. Empty — the default — is every tool the
     /// server offers.
     pub tools: Vec<NamePattern>,
+    /// Variables that must have been captured for it to fire at all. Empty —
+    /// the default — is no condition.
+    ///
+    /// Names, not templates: this asks whether a value exists, and the place to
+    /// use it is `url:`, `body:` or `headers:`.
+    pub when_defined: Vec<String>,
     /// What its failure does to the call.
     pub on_error: OnError,
     /// What it actually does.
@@ -234,19 +248,41 @@ pub struct Hook {
 
 impl Hook {
     /// Whether this hook has anything to say about `tool` at `phase`.
+    ///
+    /// Only what the file says — [`waiting_for`](Self::waiting_for) is the half
+    /// that depends on what the run has done so far.
     #[must_use]
     pub fn fires(&self, phase: HookPhase, tool: &str) -> bool {
-        self.phases.contains(&phase)
-            && (self.tools.is_empty() || self.tools.iter().any(|allowed| allowed.matches(tool)))
+        self.phases.contains(&phase) && NamePattern::any_matches(&self.tools, tool)
     }
 
-    /// Where it sends what it sends.
+    /// The first `when_defined:` variable this run has not captured yet.
+    ///
+    /// `Some` means the hook does not fire *this time*, which is a different
+    /// thing from failing: a hook waiting for a session to be opened is a hook
+    /// working as declared, and a run where the session never opens is a run
+    /// where it correctly never fired.
+    ///
+    /// The first rather than all of them, because the answer to "why did my
+    /// hook not fire" is one name, and a list would only be longer.
+    #[must_use]
+    pub fn waiting_for(&self, vars: &Captured) -> Option<&str> {
+        self.when_defined
+            .iter()
+            .find(|name| !vars.contains_key(*name))
+            .map(String::as_str)
+    }
+
+    /// Where it sends what it sends, as `mcp.yaml` wrote it.
     ///
     /// Its own URL, not the server's — which is the whole reason its credentials
     /// are resolved separately: an auth provider's `allowed_hosts` is a statement
     /// about where its credential may go, and a hook goes somewhere else.
+    ///
+    /// A [template](HookUrl::Template) is only an address once a call has been
+    /// made; [`HookUrl::resolve`] is where it becomes one.
     #[must_use]
-    pub fn url(&self) -> &Url {
+    pub const fn url(&self) -> &HookUrl {
         match &self.action {
             HookAction::Http(http) => &http.url,
         }
@@ -285,11 +321,72 @@ pub enum HookAction {
     Http(HttpAction),
 }
 
+/// Where a hook sends what it sends.
+///
+/// Two variants rather than "a template that usually has no placeholders in it",
+/// because the overwhelmingly common case deserves its load-time check: a URL
+/// with a typo in its scheme should be a startup issue naming the hook, not a
+/// string that renders beautifully and fails to parse on the first tool call.
+#[derive(Debug, Clone)]
+pub enum HookUrl {
+    /// A URL, parsed when `mcp.yaml` loaded.
+    Fixed(Url),
+    /// A `MiniJinja` template, compiled when `mcp.yaml` loaded and rendered per
+    /// firing. Only a template when it actually contains one.
+    Template(String),
+}
+
+impl HookUrl {
+    /// The address this hook will use for the call being rendered.
+    ///
+    /// # Errors
+    ///
+    /// The template's own message, or the parse failure of what it produced —
+    /// with the rendered text quoted, since that is the part nobody can see by
+    /// reading the file.
+    fn resolve(&self, rendering: &Rendering<'_>) -> Result<Url, String> {
+        match self {
+            Self::Fixed(url) => Ok(url.clone()),
+            Self::Template(template) => {
+                let rendered = ENVIRONMENT
+                    .render_str(template, rendering)
+                    .map_err(|error| {
+                        format!(
+                            "the url template could not be rendered: {}",
+                            explain(&error, template, rendering)
+                        )
+                    })?;
+                Url::parse(&rendered).map_err(|error| {
+                    format!("the url template produced `{rendered}`, which is not a URL: {error}")
+                })
+            }
+        }
+    }
+
+    /// What `mcp.yaml` wrote, for the trace and the descriptor.
+    #[must_use]
+    pub fn source(&self) -> &str {
+        match self {
+            Self::Fixed(url) => url.as_str(),
+            Self::Template(template) => template,
+        }
+    }
+
+    /// Whether `source` needs rendering at all.
+    ///
+    /// The two delimiters `MiniJinja` acts on. A URL containing neither is a
+    /// URL, and gets parsed as one.
+    #[must_use]
+    pub fn is_template(source: &str) -> bool {
+        source.contains("{{") || source.contains("{%")
+    }
+}
+
 /// An HTTP call, with the same credential machinery an MCP server gets.
 #[derive(Debug, Clone)]
 pub struct HttpAction {
-    /// Where to call.
-    pub url: Url,
+    /// Where to call. A URL, or a template producing one per firing.
+    pub url: HookUrl,
     /// How. `POST` unless told otherwise, because a hook carries a payload.
     pub method: Method,
     /// Auth provider, by registry name. Puts the credential where the provider
@@ -359,6 +456,16 @@ pub struct HookRecord {
     /// which is the difference between "the tool never ran" and "the tool ran and
     /// nobody was told".
     pub stopped_the_call: bool,
+    /// The `when_defined:` variable that was not captured, when that is why
+    /// nothing was sent.
+    ///
+    /// Filed rather than passed over in silence. A hook that did not fire is a
+    /// question somebody will ask sooner or later, and "it was waiting for
+    /// `session`" is the whole answer; a trace that simply omitted it would make
+    /// a declared hook and a hook that never ran look identical. Not an error —
+    /// `error` stays empty and `on_error` does not apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<String>,
 }
 
 /// One attached file, as the trace and the default payload describe it.
@@ -384,19 +491,19 @@ pub struct Attachment {
 /// is one: every critical section is a `push` with no `await` in it.
 pub type HookJournal = Arc<Mutex<Vec<HookRecord>>>;
 
-/// Validates a body template without rendering it.
+/// Validates a template without rendering it.
 ///
-/// Called when `mcp.yaml` loads, so a syntax error names the hook at startup
-/// rather than on the first tool call twenty minutes into a run.
+/// Called when `mcp.yaml` loads, so a syntax error names the hook and the field
+/// at startup rather than on the first tool call twenty minutes into a run.
 ///
 /// # Errors
 ///
 /// The template's own message, for the load issue.
-pub fn check_body(template: &str) -> Result<(), String> {
+pub fn check_template(field: &str, template: &str) -> Result<(), String> {
     ENVIRONMENT
         .template_from_str(template)
         .map(|_| ())
-        .map_err(|error| format!("`body`: {error}"))
+        .map_err(|error| format!("`{field}`: {error}"))
 }
 
 /// Takes everything recorded so far, leaving the journal empty.
@@ -471,12 +578,20 @@ pub struct ToolOutcome {
 }
 
 /// The payload plus what only a template gets to see.
+///
+/// Shared by `url:` and `body:` so the two cannot drift into two vocabularies
+/// for the same call.
 #[derive(Debug, Serialize)]
 struct Rendering<'a> {
     #[serde(flatten)]
     envelope: &'a Envelope<'a>,
     /// The process environment, read fresh on every render.
     env: BTreeMap<String, String>,
+    /// What the run's tool calls have captured so far.
+    ///
+    /// Here and not in the payload, like `env`: a hook that shipped a run's
+    /// whole variable bag to a webhook by default is a decision nobody made.
+    vars: &'a Captured,
     /// The attached files whole — `base64`, `dataUrl`, `text` and the rest, the
     /// same entries a model template gets from the same run.
     ///
@@ -497,6 +612,7 @@ pub(super) async fn fire(
     hooks: &[Hook],
     payload: &Payload<'_>,
     uploads: &[UploadRef],
+    vars: &Captured,
     credentials: &McpCredentials<'_>,
     file: impl Fn(HookRecord),
 ) -> Result<(), McpError> {
@@ -505,7 +621,24 @@ pub(super) async fn fire(
             continue;
         }
 
-        let (mut record, outcome) = run(http, hook, payload, uploads, credentials).await;
+        // Asked for by `when_defined:`, and answered before anything is built:
+        // a hook waiting on a variable pays for no credential, renders no
+        // template, and sends nothing. It is filed all the same — see
+        // [`HookRecord::skipped`] for why a non-event still belongs in a trace.
+        if let Some(missing) = hook.waiting_for(vars) {
+            debug!(
+                server = %payload.server,
+                hook = %hook.name,
+                phase = %payload.phase,
+                tool = %payload.tool,
+                %missing,
+                "hook skipped: the variable it waits for is not captured yet"
+            );
+            file(skipped(hook, payload, missing));
+            continue;
+        }
+
+        let (mut record, outcome) = run(http, hook, payload, uploads, vars, credentials).await;
 
         let Err(message) = outcome else {
             debug!(
@@ -546,12 +679,41 @@ pub(super) async fn fire(
     Ok(())
 }
 
+/// The record for a hook that `when_defined:` held back.
+///
+/// Everything a firing would have said about *which* hook this was, and nothing
+/// about a request: there was none. `url` is what the file says rather than a
+/// rendered address, because rendering it is exactly what did not happen — and
+/// on the hook this is written for, could not have.
+fn skipped(hook: &Hook, payload: &Payload<'_>, missing: &str) -> HookRecord {
+    let HookAction::Http(action) = &hook.action;
+    HookRecord {
+        server: payload.server.to_owned(),
+        hook: hook.name.clone(),
+        phase: payload.phase,
+        tool: payload.tool.to_owned(),
+        action: hook.kind().to_owned(),
+        url: action.url.source().to_owned(),
+        method: action.method.to_string(),
+        headers: BTreeMap::new(),
+        request: String::new(),
+        files: Vec::new(),
+        status: 0,
+        response: String::new(),
+        latency_ms: 0,
+        error: None,
+        stopped_the_call: false,
+        skipped: Some(missing.to_owned()),
+    }
+}
+
 /// One hook, run to completion. Always produces a record.
 async fn run(
     http: &Client,
     hook: &Hook,
     payload: &Payload<'_>,
     uploads: &[UploadRef],
+    vars: &Captured,
     credentials: &McpCredentials<'_>,
 ) -> (HookRecord, Result<(), String>) {
     let HookAction::Http(action) = &hook.action;
@@ -562,7 +724,9 @@ async fn run(
         phase: payload.phase,
         tool: payload.tool.to_owned(),
         action: hook.kind().to_owned(),
-        url: action.url.to_string(),
+        // Replaced below by the address actually used. Until then it is what the
+        // file says, so a hook that dies rendering its URL still says which one.
+        url: action.url.source().to_owned(),
         method: action.method.to_string(),
         headers: BTreeMap::new(),
         request: String::new(),
@@ -572,14 +736,7 @@ async fn run(
         latency_ms: 0,
         error: None,
         stopped_the_call: false,
-    };
-
-    // Resolved here rather than with the server's, and only now: a credential
-    // costs an exchange and can fail, and neither belongs to a hook that did not
-    // fire. Against the *hook's* URL, so `allowed_hosts` means what it says.
-    let resolved = match credentials.for_hook(hook).await {
-        Ok(resolved) => resolved,
-        Err(error) => return (record, Err(error.to_string())),
+        skipped: None,
     };
 
     let attached: Vec<&UploadRef> = select(&action.files, uploads);
@@ -588,8 +745,32 @@ async fn run(
         payload,
         files: &described,
     };
+    let rendering = Rendering {
+        envelope: &envelope,
+        env: std::env::vars().collect(),
+        vars,
+        uploads: &attached,
+    };
 
-    let body = match body(action, &envelope, &attached) {
+    // Before the credential, and this order is not an accident: the provider
+    // decides what to hand over by looking at where it is going, so the address
+    // has to exist first. A template that renders to somewhere `allowed_hosts`
+    // refuses is refused, which is the check doing its job.
+    let url = match action.url.resolve(&rendering) {
+        Ok(url) => url,
+        Err(message) => return (record, Err(message)),
+    };
+    record.url = url.to_string();
+
+    // Resolved here rather than with the server's, and only now: a credential
+    // costs an exchange and can fail, and neither belongs to a hook that did not
+    // fire. Against the *hook's* URL, so `allowed_hosts` means what it says.
+    let resolved = match credentials.for_hook(hook, &url).await {
+        Ok(resolved) => resolved,
+        Err(error) => return (record, Err(error.to_string())),
+    };
+
+    let body = match body(action, &rendering) {
         Ok(body) => body,
         Err(message) => return (record, Err(message)),
     };
@@ -605,26 +786,21 @@ async fn run(
         }
     };
 
-    let (mut headers, scrub) =
-        match authenticate(action, &resolved, payload.server, attachments.is_some()).await {
-            Ok(pair) => pair,
-            Err(message) => return (record, Err(message)),
-        };
+    let (mut headers, scrub) = match authenticate(
+        action,
+        &url,
+        &resolved,
+        payload.server,
+        vars,
+        attachments.is_some(),
+    )
+    .await
+    {
+        Ok(pair) => pair,
+        Err(message) => return (record, Err(message)),
+    };
 
-    // Whatever `content-type` survived has to go before `.multipart()` adds the
-    // real one. `reqwest` *appends* rather than replaces, so leaving one here
-    // would send two — and a server reading the first would be told `json` about
-    // a body that is not. Put back for the record only, boundary included, so
-    // the trace says what actually went out.
-    let mut shown = readable(&headers);
-    if let Some(form) = &attachments {
-        headers.remove(CONTENT_TYPE);
-        shown = readable(&headers);
-        shown.insert(
-            CONTENT_TYPE.as_str().to_owned(),
-            format!("multipart/form-data; boundary={}", form.boundary()),
-        );
-    }
+    let shown = settle_content_type(&mut headers, attachments.as_ref());
 
     // Filled in only now: the auth provider has just added its secret to the
     // redactor, and a record taken a line earlier would carry it in the clear.
@@ -633,7 +809,7 @@ async fn run(
     record.files = described;
 
     let request = http
-        .request(action.method.clone(), action.url.clone())
+        .request(action.method.clone(), url)
         .headers(headers)
         .timeout(action.timeout);
     let request = match attachments {
@@ -730,31 +906,29 @@ fn form(body: String, attached: &[&UploadRef]) -> Result<Form, String> {
 }
 
 /// The body to send: the template's, or the call itself as JSON.
-fn body(
-    action: &HttpAction,
-    envelope: &Envelope<'_>,
-    attached: &[&UploadRef],
-) -> Result<String, String> {
+fn body(action: &HttpAction, rendering: &Rendering<'_>) -> Result<String, String> {
     let Some(template) = &action.body else {
-        return serde_json::to_string(envelope)
+        return serde_json::to_string(rendering.envelope)
             .map_err(|error| format!("the payload could not be serialised: {error}"));
     };
 
-    let rendering = Rendering {
-        envelope,
-        env: std::env::vars().collect(),
-        uploads: attached,
-    };
     ENVIRONMENT
-        .render_str(template, &rendering)
-        .map_err(|error| format!("the body template could not be rendered: {}", root(&error)))
+        .render_str(template, rendering)
+        .map_err(|error| {
+            format!(
+                "the body template could not be rendered: {}",
+                explain(&error, template, rendering)
+            )
+        })
 }
 
 /// The headers to send, and a redactor holding every secret among them.
 async fn authenticate(
     action: &HttpAction,
+    url: &Url,
     credentials: &HookCredentials<'_>,
     server: &str,
+    vars: &Captured,
     multipart: bool,
 ) -> Result<(HeaderMap, Redactor), String> {
     let mut headers = HeaderMap::new();
@@ -771,7 +945,7 @@ async fn authenticate(
     let mut scrub = Redactor::new();
     let rendered = action
         .headers
-        .render(server, credentials.named())
+        .render(server, credentials.named(), vars)
         .map_err(|error| error.to_string())?;
 
     for (name, value) in rendered {
@@ -787,13 +961,35 @@ async fn authenticate(
     // own headers go out in.
     if let Some(provider) = credentials.provider() {
         let from_auth = provider
-            .apply(&mut headers, &action.url, None)
+            .apply(&mut headers, url, None)
             .await
             .map_err(|error| error.to_string())?;
         scrub.merge(&from_auth);
     }
 
     Ok((headers, scrub))
+}
+
+/// Leaves `headers` carrying the right `content-type`, and returns the headers
+/// as the trace should show them.
+///
+/// Whatever `content-type` survived has to go before `.multipart()` adds the
+/// real one. `reqwest` *appends* rather than replaces, so leaving one here would
+/// send two — and a server reading the first would be told `json` about a body
+/// that is not. Put back for the record only, boundary included, so the trace
+/// says what actually went out.
+fn settle_content_type(headers: &mut HeaderMap, form: Option<&Form>) -> BTreeMap<String, String> {
+    let Some(form) = form else {
+        return readable(headers);
+    };
+
+    headers.remove(CONTENT_TYPE);
+    let mut shown = readable(headers);
+    shown.insert(
+        CONTENT_TYPE.as_str().to_owned(),
+        format!("multipart/form-data; boundary={}", form.boundary()),
+    );
+    shown
 }
 
 /// Headers as text, for the record. A value that is not UTF-8 is named rather
@@ -812,22 +1008,36 @@ fn readable(headers: &HeaderMap) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// The one useful line of a regex complaint.
+/// The innermost message, plus the name of whatever was undefined.
 ///
-/// `regex` renders a caret diagram across several lines, which is a fine thing
-/// to read in a terminal and a bad thing to put in a one-line load issue. The
-/// last line is the reason itself.
-fn why(error: &regex::Error) -> String {
-    error
-        .to_string()
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map_or_else(
-            || error.to_string(),
-            |line| line.trim_start_matches("error: ").to_owned(),
-        )
+/// `MiniJinja` says "undefined value" without saying *which*, which on a URL
+/// reading three variables leaves you guessing. The template is scanned for the
+/// lookups it makes — `env` and `vars`, the two roots that can be absent — and
+/// the ones that resolved to nothing are named. Exactly what a header template
+/// already does, and [`super::headers::lookups`] is the same scanner, so the two
+/// cannot find different names for the same template.
+///
+/// Only **names** are ever emitted. Echoing the template back would be more
+/// direct and is exactly the wrong thing: a `body:` may hold a literal
+/// credential, and an error message is a place secrets go to be logged forever.
+fn explain(error: &minijinja::Error, template: &str, rendering: &Rendering<'_>) -> String {
+    let message = root(error);
+
+    let mut missing: Vec<&str> = super::headers::lookups(template, "env")
+        .into_iter()
+        .filter(|name| !rendering.env.contains_key(*name))
+        .collect();
+    missing.extend(
+        super::headers::lookups(template, "vars")
+            .into_iter()
+            .filter(|name| !rendering.vars.contains_key(*name)),
+    );
+
+    match missing.as_slice() {
+        [] => message,
+        [one] => format!("{message} — `{one}` is not set"),
+        many => format!("{message} — none of {many:?} are set"),
+    }
 }
 
 /// `MiniJinja` wraps the useful message; this is the innermost one.
@@ -865,9 +1075,10 @@ mod tests {
                 .iter()
                 .map(|tool| NamePattern::compile(tool).expect("pattern"))
                 .collect(),
+            when_defined: Vec::new(),
             on_error: OnError::Fail,
             action: HookAction::Http(HttpAction {
-                url: "https://audit.internal/events".parse().expect("url"),
+                url: HookUrl::Fixed("https://audit.internal/events".parse().expect("url")),
                 method: Method::POST,
                 auth: None,
                 headers: HeaderTemplates::default(),
@@ -878,7 +1089,15 @@ mod tests {
         }
     }
 
-    /// The body one hook would send, with nothing attached.
+    /// A hook that waits for `waits_for` before firing.
+    fn waiting(name: &str, waits_for: &[&str]) -> Hook {
+        Hook {
+            when_defined: waits_for.iter().map(|v| (*v).to_owned()).collect(),
+            ..hook(name, &[HookPhase::After], &[])
+        }
+    }
+
+    /// The body one hook would send, with nothing attached and nothing captured.
     fn rendered(action: &HttpAction, payload: &Payload<'_>) -> Result<String, String> {
         with_files(action, payload, &[])
     }
@@ -889,12 +1108,38 @@ mod tests {
         payload: &Payload<'_>,
         attached: &[&UploadRef],
     ) -> Result<String, String> {
+        with_vars(action, payload, attached, &Captured::new())
+            .map(|(body, _)| body)
+            .map_err(|(message, _)| message)
+    }
+
+    /// The body and the URL one hook would produce, given what a run captured.
+    ///
+    /// Both at once because they render from one context, and a test that could
+    /// only see one of them could not catch the two drifting apart.
+    fn with_vars(
+        action: &HttpAction,
+        payload: &Payload<'_>,
+        attached: &[&UploadRef],
+        vars: &Captured,
+    ) -> Result<(String, Url), (String, Option<Url>)> {
         let described: Vec<Attachment> = attached.iter().map(|file| describe(file)).collect();
         let envelope = Envelope {
             payload,
             files: &described,
         };
-        body(action, &envelope, attached)
+        let rendering = Rendering {
+            envelope: &envelope,
+            env: std::env::vars().collect(),
+            vars,
+            uploads: attached,
+        };
+        let url = action
+            .url
+            .resolve(&rendering)
+            .map_err(|message| (message, None))?;
+        let body = body(action, &rendering).map_err(|message| (message, Some(url.clone())))?;
+        Ok((body, url))
     }
 
     /// One upload, as a run would have it: bytes already read and encoded.
@@ -970,16 +1215,6 @@ mod tests {
         assert!(hook.fires(HookPhase::Before, "write"));
         assert!(hook.fires(HookPhase::Before, "write_file"));
         assert!(!hook.fires(HookPhase::Before, "write_file_now"));
-    }
-
-    #[test]
-    fn a_pattern_that_is_not_a_regex_says_so_quoting_what_was_written() {
-        let message = NamePattern::compile("write_(").expect_err("unclosed");
-        assert!(message.contains("write_("), "{message}");
-        // One line, and not the caret diagram `regex` would have drawn across
-        // the anchors this pattern never asked for.
-        assert!(!message.contains('\n'), "{message}");
-        assert!(!message.contains("^(?:"), "{message}");
     }
 
     #[test]
@@ -1061,6 +1296,302 @@ mod tests {
 
         let message = rendered(&action, &payload).expect_err("undefined");
         assert!(message.contains("undefined"), "{message}");
+    }
+
+    #[test]
+    fn a_body_template_reads_what_the_run_captured() {
+        let arguments = json!({});
+        let payload = Payload {
+            phase: HookPhase::After,
+            server: "files",
+            tool: "read_file",
+            arguments: &arguments,
+            result: None,
+        };
+        let HookAction::Http(mut action) = hook("audit", &[HookPhase::After], &[]).action;
+        action.body = Some(r#"{"session": "{{ vars.session }}"}"#.to_owned());
+        let vars = Captured::from([("session".to_owned(), json!("abc-123"))]);
+
+        let (body, _) = with_vars(&action, &payload, &[], &vars).expect("render");
+
+        assert_eq!(body, r#"{"session": "abc-123"}"#);
+    }
+
+    #[test]
+    fn a_url_template_is_rendered_from_the_same_variables() {
+        let arguments = json!({});
+        let payload = Payload {
+            phase: HookPhase::After,
+            server: "files",
+            tool: "read_file",
+            arguments: &arguments,
+            result: None,
+        };
+        let HookAction::Http(mut action) = hook("audit", &[HookPhase::After], &[]).action;
+        action.url =
+            HookUrl::Template("https://audit.internal/sessions/{{ vars.session }}".to_owned());
+        let vars = Captured::from([("session".to_owned(), json!("abc-123"))]);
+
+        let (_, url) = with_vars(&action, &payload, &[], &vars).expect("render");
+
+        assert_eq!(url.as_str(), "https://audit.internal/sessions/abc-123");
+    }
+
+    #[test]
+    fn a_url_template_also_sees_the_call_it_fired_around() {
+        // One context for `url:` and `body:`, so anything the payload carries is
+        // addressable — not a second, smaller vocabulary to look up.
+        let arguments = json!({});
+        let payload = Payload {
+            phase: HookPhase::Before,
+            server: "files",
+            tool: "write_file",
+            arguments: &arguments,
+            result: None,
+        };
+        let HookAction::Http(mut action) = hook("audit", &[HookPhase::Before], &[]).action;
+        action.url = HookUrl::Template("https://audit.internal/{{ server }}/{{ tool }}".to_owned());
+
+        let (_, url) = with_vars(&action, &payload, &[], &Captured::new()).expect("render");
+
+        assert_eq!(url.as_str(), "https://audit.internal/files/write_file");
+    }
+
+    #[test]
+    fn a_url_template_reading_a_variable_nobody_captured_is_an_error() {
+        let arguments = json!({});
+        let payload = Payload {
+            phase: HookPhase::After,
+            server: "files",
+            tool: "read_file",
+            arguments: &arguments,
+            result: None,
+        };
+        let HookAction::Http(mut action) = hook("audit", &[HookPhase::After], &[]).action;
+        action.url =
+            HookUrl::Template("https://audit.internal/sessions/{{ vars.session }}".to_owned());
+
+        // Rendering it loosely would send the request to `/sessions/`, which is a
+        // different endpoint that may well answer `200`.
+        let (message, _) =
+            with_vars(&action, &payload, &[], &Captured::new()).expect_err("undefined");
+
+        assert!(message.contains("undefined"), "{message}");
+        assert!(message.contains("url"), "{message}");
+    }
+
+    #[test]
+    fn a_url_template_that_renders_to_something_that_is_not_a_url_says_what_it_produced() {
+        let arguments = json!({});
+        let payload = Payload {
+            phase: HookPhase::After,
+            server: "files",
+            tool: "read_file",
+            arguments: &arguments,
+            result: None,
+        };
+        let HookAction::Http(mut action) = hook("audit", &[HookPhase::After], &[]).action;
+        action.url = HookUrl::Template("{{ vars.wherever }}".to_owned());
+        let vars = Captured::from([("wherever".to_owned(), json!("not a url"))]);
+
+        let (message, _) = with_vars(&action, &payload, &[], &vars).expect_err("not a url");
+
+        // The rendered text, because that is the part nobody can see by reading
+        // the file.
+        assert!(message.contains("not a url"), "{message}");
+    }
+
+    #[test]
+    fn a_fixed_url_is_used_as_written_whatever_the_run_captured() {
+        let arguments = json!({});
+        let payload = Payload {
+            phase: HookPhase::After,
+            server: "files",
+            tool: "read_file",
+            arguments: &arguments,
+            result: None,
+        };
+        let HookAction::Http(action) = hook("audit", &[HookPhase::After], &[]).action;
+        let vars = Captured::from([("session".to_owned(), json!("abc-123"))]);
+
+        let (_, url) = with_vars(&action, &payload, &[], &vars).expect("render");
+
+        assert_eq!(url.as_str(), "https://audit.internal/events");
+    }
+
+    #[test]
+    fn a_url_is_only_a_template_when_it_contains_one() {
+        assert!(!HookUrl::is_template("https://audit.internal/events"));
+        assert!(HookUrl::is_template("https://audit.internal/{{ vars.id }}"));
+        assert!(HookUrl::is_template(
+            "https://audit.internal/{% if vars.id %}x{% endif %}"
+        ));
+    }
+
+    #[test]
+    fn a_hook_with_no_condition_fires_whatever_the_run_captured() {
+        let hook = hook("audit", &[HookPhase::After], &[]);
+
+        assert!(hook.waiting_for(&Captured::new()).is_none());
+    }
+
+    #[test]
+    fn a_hook_waits_for_the_variable_it_names() {
+        let hook = waiting("audit", &["session"]);
+
+        assert_eq!(hook.waiting_for(&Captured::new()), Some("session"));
+
+        let captured = Captured::from([("session".to_owned(), json!("abc-123"))]);
+        assert!(hook.waiting_for(&captured).is_none());
+    }
+
+    #[test]
+    fn every_named_variable_has_to_be_there() {
+        let hook = waiting("audit", &["session", "job"]);
+        let half = Captured::from([("session".to_owned(), json!("abc-123"))]);
+
+        // Named in declaration order, so "why did it not fire" has one answer.
+        assert_eq!(hook.waiting_for(&half), Some("job"));
+
+        let both = Captured::from([
+            ("session".to_owned(), json!("abc-123")),
+            ("job".to_owned(), json!(7)),
+        ]);
+        assert!(hook.waiting_for(&both).is_none());
+    }
+
+    #[test]
+    fn a_variable_captured_as_null_still_counts_as_captured() {
+        // Presence, not truthiness: a path that resolved to `null` resolved, and
+        // second-guessing that here would be a different rule from the one the
+        // capture applied.
+        let hook = waiting("audit", &["session"]);
+        let captured = Captured::from([("session".to_owned(), Value::Null)]);
+
+        assert!(hook.waiting_for(&captured).is_none());
+    }
+
+    #[test]
+    fn waiting_is_decided_apart_from_the_phase_and_the_tool() {
+        // Two questions, two methods: `fires` is what the file says, and this is
+        // what the run has done. A hook can be right about the tool and still
+        // have nothing to address itself with.
+        let hook = waiting("audit", &["session"]);
+
+        assert!(hook.fires(HookPhase::After, "read_file"));
+        assert_eq!(hook.waiting_for(&Captured::new()), Some("session"));
+    }
+
+    #[test]
+    fn a_skipped_hook_is_recorded_as_a_non_event_rather_than_a_failure() {
+        let arguments = json!({});
+        let payload = Payload {
+            phase: HookPhase::After,
+            server: "files",
+            tool: "read_file",
+            arguments: &arguments,
+            result: None,
+        };
+        let hook = waiting("audit", &["session"]);
+
+        let record = skipped(&hook, &payload, "session");
+
+        assert_eq!(record.skipped.as_deref(), Some("session"));
+        // Not a failure, and nothing went out.
+        assert!(record.error.is_none());
+        assert!(!record.stopped_the_call);
+        assert_eq!(record.status, 0);
+        assert!(record.request.is_empty());
+        // Enough to know which hook this was.
+        assert_eq!(record.hook, "audit");
+        assert_eq!(record.tool, "read_file");
+        assert_eq!(record.url, "https://audit.internal/events");
+    }
+
+    #[test]
+    fn an_undefined_variable_is_named_rather_than_left_as_undefined_value() {
+        let arguments = json!({});
+        let payload = Payload {
+            phase: HookPhase::After,
+            server: "files",
+            tool: "read_file",
+            arguments: &arguments,
+            result: None,
+        };
+        let HookAction::Http(mut action) = hook("audit", &[HookPhase::After], &[]).action;
+        action.url = HookUrl::Template(
+            "https://audit.internal/{{ vars.session }}/{{ vars.job }}".to_owned(),
+        );
+
+        let (message, _) =
+            with_vars(&action, &payload, &[], &Captured::new()).expect_err("undefined");
+
+        // "undefined value" on a URL reading two variables leaves you guessing.
+        assert!(message.contains("session"), "{message}");
+        assert!(message.contains("job"), "{message}");
+    }
+
+    #[test]
+    fn a_body_template_names_what_it_could_not_read_either() {
+        let arguments = json!({});
+        let payload = Payload {
+            phase: HookPhase::After,
+            server: "files",
+            tool: "read_file",
+            arguments: &arguments,
+            result: None,
+        };
+        let HookAction::Http(mut action) = hook("audit", &[HookPhase::After], &[]).action;
+        action.body = Some(r#"{"session": "{{ vars.session }}"}"#.to_owned());
+
+        let (message, _) =
+            with_vars(&action, &payload, &[], &Captured::new()).expect_err("undefined");
+
+        assert!(message.contains("session"), "{message}");
+    }
+
+    #[test]
+    fn an_error_names_the_variable_and_never_the_template() {
+        // A `body:` may hold a literal credential. An error message is exactly
+        // where one must not end up — the same rule the headers follow.
+        let arguments = json!({});
+        let payload = Payload {
+            phase: HookPhase::After,
+            server: "files",
+            tool: "read_file",
+            arguments: &arguments,
+            result: None,
+        };
+        let HookAction::Http(mut action) = hook("audit", &[HookPhase::After], &[]).action;
+        action.body = Some(r#"{"key": "hunter2-{{ vars.suffix }}"}"#.to_owned());
+
+        let (message, _) =
+            with_vars(&action, &payload, &[], &Captured::new()).expect_err("undefined");
+
+        assert!(message.contains("suffix"), "{message}");
+        assert!(!message.contains("hunter2"), "{message}");
+    }
+
+    #[test]
+    fn the_default_payload_says_nothing_about_the_variables() {
+        // `vars` is for a template that asked for it. A hook shipping a run's
+        // whole variable bag to a third party by default is a decision nobody
+        // made — the same rule `env` follows.
+        let arguments = json!({});
+        let payload = Payload {
+            phase: HookPhase::After,
+            server: "files",
+            tool: "read_file",
+            arguments: &arguments,
+            result: None,
+        };
+        let HookAction::Http(action) = hook("audit", &[HookPhase::After], &[]).action;
+        let vars = Captured::from([("session".to_owned(), json!("abc-123"))]);
+
+        let (body, _) = with_vars(&action, &payload, &[], &vars).expect("render");
+
+        assert!(!body.contains("abc-123"), "{body}");
+        assert!(!body.contains("vars"), "{body}");
     }
 
     #[test]

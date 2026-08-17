@@ -20,7 +20,7 @@ use url::Url;
 
 use super::client::{McpClient, McpServer};
 use super::headers::HeaderTemplates;
-use super::hook::{Hook, HookAction, HookPhase, HttpAction, NamePattern, OnError};
+use super::hook::{Hook, HookAction, HookPhase, HookUrl, HttpAction, NamePattern, OnError};
 use crate::issue::LoadIssue;
 
 /// File declaring the MCP servers, in the profiles directory.
@@ -75,6 +75,10 @@ pub struct HookDescriptor {
     /// Tools it applies to, as the patterns `mcp.yaml` wrote. Empty means every
     /// tool.
     pub tools: Vec<String>,
+    /// Variables it waits for before firing at all. Empty means it fires
+    /// whatever the run has captured.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub when_defined: Vec<String>,
     /// What its failure does to the call.
     pub on_error: OnError,
     /// The action's kind: `http`.
@@ -288,6 +292,14 @@ struct HookConfig {
     /// the default — is every tool.
     #[serde(default)]
     tools: Vec<String>,
+    /// Variables that must have been captured for it to fire. Empty — the
+    /// default — is no condition.
+    ///
+    /// Plain names, deliberately: this asks whether a value exists, and a
+    /// pattern here would invite `.*`, which is "fire once anything at all has
+    /// been captured" and means nothing.
+    #[serde(default)]
+    when_defined: Vec<String>,
     /// What its failure does to the call. `fail` by default.
     #[serde(default)]
     on_error: OnError,
@@ -304,7 +316,9 @@ enum ActionConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HttpConfig {
-    url: Url,
+    /// A URL, or a `MiniJinja` template producing one. Read as text so a
+    /// template is not rejected as a bad URL before anybody looks at it.
+    url: String,
     /// `POST` by default, because a hook carries a payload.
     #[serde(default)]
     method: Option<String>,
@@ -353,8 +367,22 @@ fn compile_hooks(server: &str, declared: &[HookConfig]) -> Result<Vec<Hook>, Str
         let headers =
             HeaderTemplates::compile(&http.headers).map_err(|why| format!("{label}: {why}"))?;
         if let Some(body) = &http.body {
-            crate::mcp::hook::check_body(body).map_err(|why| format!("{label}: {why}"))?;
+            crate::mcp::hook::check_template("body", body)
+                .map_err(|why| format!("{label}: {why}"))?;
         }
+        // A plain URL is parsed now — a typo in a scheme belongs to startup, not
+        // to the first tool call. A template can only be syntax-checked here;
+        // what it produces is a URL or a hook failure, per firing.
+        let url = if HookUrl::is_template(&http.url) {
+            crate::mcp::hook::check_template("url", &http.url)
+                .map_err(|why| format!("{label}: {why}"))?;
+            HookUrl::Template(http.url.clone())
+        } else {
+            HookUrl::Fixed(
+                Url::parse(&http.url)
+                    .map_err(|why| format!("{label}: `url`: `{}` is not a URL: {why}", http.url))?,
+            )
+        };
         // Compiled here rather than matched as text on every call: a pattern that
         // does not parse is a hook covering nothing, and finding that out on the
         // first `tools/call` is finding it out too late to matter.
@@ -375,9 +403,10 @@ fn compile_hooks(server: &str, declared: &[HookConfig]) -> Result<Vec<Hook>, Str
             name: config.name.clone(),
             phases,
             tools,
+            when_defined: config.when_defined.clone(),
             on_error: config.on_error,
             action: HookAction::Http(HttpAction {
-                url: http.url.clone(),
+                url,
                 method,
                 auth: http.auth.clone(),
                 headers,
@@ -400,9 +429,12 @@ fn describe(hook: &Hook) -> HookDescriptor {
         // The patterns as written. The compiled form carries anchors this added,
         // and a UI showing those would be quoting something nobody typed.
         tools: hook.tools.iter().map(|p| p.as_str().to_owned()).collect(),
+        when_defined: hook.when_defined.clone(),
         on_error: hook.on_error,
         action: hook.kind().to_owned(),
-        url: http.url.to_string(),
+        // As written, template and all: a UI showing a rendered URL would be
+        // showing one firing of many, and this listing belongs to none of them.
+        url: http.url.source().to_owned(),
         auth: http.auth.clone(),
         headers: http.headers.names().map(str::to_owned).collect(),
         files: http.files.iter().map(|p| p.as_str().to_owned()).collect(),
@@ -532,7 +564,7 @@ servers:
         // A hook is loud by default: it is something you asked for.
         assert_eq!(hook.on_error, OnError::Fail);
         assert_eq!(hook.auth(), Some("workload"));
-        assert_eq!(hook.url().as_str(), "https://audit.internal/events");
+        assert_eq!(hook.url().source(), "https://audit.internal/events");
 
         let HookAction::Http(http) = &hook.action;
         assert_eq!(http.method, Method::POST);
@@ -580,6 +612,92 @@ servers:
         // The server goes with it rather than loading half its hooks: a gate that
         // silently did not load is worse than one that refused to.
         assert!(registry.get("files").is_none());
+    }
+
+    #[test]
+    fn a_url_holding_a_template_is_kept_as_one() {
+        let dir = write(
+            "hook-url-template",
+            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      - name: audit\n        on: [after]\n        action:\n          kind: http\n          url: https://audit.internal/{{ vars.session }}\n",
+        );
+        let registry = McpRegistry::load(&dir, &Client::new());
+
+        assert!(registry.issues().is_empty(), "{:?}", registry.issues());
+        let hook = &registry.get("files").unwrap().server().hooks[0];
+        assert!(matches!(hook.url(), HookUrl::Template(_)));
+        // As written, template and all: what it renders to belongs to a firing.
+        assert_eq!(
+            hook.url().source(),
+            "https://audit.internal/{{ vars.session }}"
+        );
+    }
+
+    #[test]
+    fn a_hook_loads_the_variables_it_waits_for() {
+        let dir = write(
+            "hook-when-defined",
+            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      - name: audit\n        \
+             on: [after]\n        when_defined: [session, job]\n        action:\n          kind: http\n          \
+             url: https://audit.internal/events\n",
+        );
+        let registry = McpRegistry::load(&dir, &Client::new());
+
+        assert!(registry.issues().is_empty(), "{:?}", registry.issues());
+        let hook = &registry.get("files").unwrap().server().hooks[0];
+        assert_eq!(hook.when_defined, vec!["session", "job"]);
+
+        // And it is advertised, because "what is this about to do" has to cover
+        // a hook that will sit out most of a run.
+        let advertised = &registry.descriptors()[0].hooks[0];
+        assert_eq!(advertised.when_defined, vec!["session", "job"]);
+    }
+
+    #[test]
+    fn a_hook_that_waits_for_nothing_is_the_ordinary_case() {
+        let dir = write("hook-no-condition", WITH_HOOK);
+        let registry = McpRegistry::load(&dir, &Client::new());
+
+        let hook = &registry.get("files").unwrap().server().hooks[0];
+        assert!(hook.when_defined.is_empty());
+    }
+
+    #[test]
+    fn a_url_that_is_not_a_url_and_not_a_template_is_caught_at_startup() {
+        let dir = write(
+            "hook-url-bad",
+            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      - name: audit\n        on: [after]\n        action:\n          kind: http\n          url: audit.internal/events\n",
+        );
+        let registry = McpRegistry::load(&dir, &Client::new());
+
+        // Reading `url:` as text to allow templates must not cost the plain case
+        // its startup check.
+        assert_eq!(registry.issues().len(), 1);
+        assert!(
+            registry.issues()[0].message.contains("audit"),
+            "{:?}",
+            registry.issues()
+        );
+        assert!(
+            registry.issues()[0].message.contains("`url`"),
+            "{:?}",
+            registry.issues()
+        );
+    }
+
+    #[test]
+    fn a_url_template_that_does_not_parse_is_caught_at_startup() {
+        let dir = write(
+            "hook-url-template-bad",
+            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      - name: audit\n        on: [after]\n        action:\n          kind: http\n          url: https://audit.internal/{{ vars.session\n",
+        );
+        let registry = McpRegistry::load(&dir, &Client::new());
+
+        assert_eq!(registry.issues().len(), 1);
+        assert!(
+            registry.issues()[0].message.contains("`url`"),
+            "{:?}",
+            registry.issues()
+        );
     }
 
     #[test]

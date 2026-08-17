@@ -27,6 +27,8 @@
 
 use std::collections::BTreeMap;
 
+use url::Url;
+
 use crate::auth::{Auth, AuthProvider, registry::AuthRegistry};
 use crate::redact::Secret;
 
@@ -97,6 +99,10 @@ impl<'a> McpCredentials<'a> {
     ///   about where its credential may be sent, and a hook sends it somewhere
     ///   else. Resolving it against the MCP server's URL would check the wrong
     ///   host and hand the credential to a URL the rule was written to exclude.
+    ///   `target` is the address the request will *actually* use — already
+    ///   rendered, for a hook whose `url:` is a template — for exactly the same
+    ///   reason: checking the unrendered form would check a host that does not
+    ///   exist.
     /// * **Only when it fires.** A credential costs an exchange and can fail. A
     ///   `tools/list` that never calls a tool, or a call to a tool this hook does
     ///   not cover, has no business paying for either.
@@ -104,13 +110,16 @@ impl<'a> McpCredentials<'a> {
     /// # Errors
     ///
     /// [`McpError::Auth`], as [`Self::resolve`].
-    pub(super) async fn for_hook(&self, hook: &Hook) -> Result<HookCredentials<'a>, McpError> {
+    pub(super) async fn for_hook(
+        &self,
+        hook: &Hook,
+        target: &Url,
+    ) -> Result<HookCredentials<'a>, McpError> {
         let provider = match hook.auth() {
             None => None,
             Some(name) => Some(look_up(self.registry, name)?),
         };
 
-        let target = hook.url();
         let mut named = BTreeMap::new();
         for name in hook.header_providers() {
             let entry = look_up(self.registry, name)?;
