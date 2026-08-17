@@ -35,10 +35,23 @@
 //!
 //! `structuredContent` when the MCP server sent one, and the result text parsed
 //! as JSON otherwise. A tool answering something that is not JSON captures
-//! nothing — there is no path into prose — and that is not an error: a profile
-//! may perfectly well capture from one tool of several.
+//! nothing — there is no path into prose.
 //!
-//! Nothing here is silent, though. Every call reports what it set in its
+//! # When nothing is captured
+//!
+//! Not an error: the run carries on, and a hook naming the variable says so
+//! itself. It is a warning, though, on both counts — a result no path could be
+//! read out of, and a cascade that resolved none of its paths, the second
+//! naming the paths it tried. A rule that covers this tool has said this tool
+//! produces this variable, so a rule that comes back empty is a statement that
+//! did not hold, and the alternative is finding out three turns later from a
+//! URL with a hole in it.
+//!
+//! A rule with no `tools:` covers every tool, so it warns on every call that
+//! does not carry the variable. That is the rule saying something untrue about
+//! most of the run rather than the log being noisy — name the tools.
+//!
+//! Every call also reports what it set in its
 //! [`ToolInvocation`](crate::agent::ToolInvocation), so a `vars` that turns out
 //! empty is a fact you can read in the trace rather than a mystery in a
 //! rendered URL.
@@ -64,10 +77,10 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::decode::paths::resolve_one;
-use crate::profile::CaptureRule;
+use crate::profile::{CaptureRule, JsonPathExpr};
 
 /// Variables by name, in the order a template will see them.
 pub type Captured = BTreeMap<String, Value>;
@@ -133,10 +146,10 @@ impl Vars {
             .cloned()
             .or_else(|| serde_json::from_str::<Value>(text).ok())
         else {
-            debug!(
+            warn!(
                 %tool,
                 result = %head(text),
-                "the result is not JSON, so there is nothing for a path to select"
+                "capture: the result is not JSON, so there is nothing for a path to select"
             );
             return captured;
         };
@@ -146,6 +159,13 @@ impl Vars {
                 if let Some((path, value)) = resolve_one(&document, cascade) {
                     debug!(%tool, var = %name, path = %path.source(), "captured");
                     captured.insert(name.clone(), value.clone());
+                } else {
+                    warn!(
+                        %tool,
+                        var = %name,
+                        tried = %tried(cascade),
+                        "capture: no path resolved, so the variable stays unset"
+                    );
                 }
             }
         }
@@ -155,6 +175,15 @@ impl Vars {
         }
         captured
     }
+}
+
+/// The paths a cascade tried, as written in the profile.
+fn tried(cascade: &[JsonPathExpr]) -> String {
+    cascade
+        .iter()
+        .map(JsonPathExpr::source)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The head of a result, short enough for a log line.

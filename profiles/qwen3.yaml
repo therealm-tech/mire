@@ -158,6 +158,12 @@ agent:
   # as `vars` by a hook's `url:`, `body:` and `headers:`, and by a server's own
   # `headers:` — see mcp.yaml.
   #
+  # A rule that covers a tool and captures nothing from it warns, naming the
+  # paths it tried: the rule has said that tool produces that variable, and the
+  # alternative is finding out three turns later from a rendered URL. Which is
+  # also why `tools:` is worth naming — an empty one covers every tool, so it
+  # warns on every call that does not carry the variable.
+  #
   # capture:
   #   - tools:
   #       - create_session
