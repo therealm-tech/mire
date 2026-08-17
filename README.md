@@ -1320,8 +1320,20 @@ Three rules, each of them a decision rather than an accident:
   A `before` hook sees what earlier calls captured, since that is all there is.
 - **What gets read is `structuredContent` when the server sent one, and the
   result text parsed as JSON otherwise.** A tool answering prose captures
-  nothing: there is no path into it. That is not an error — a profile may
-  perfectly well capture from one tool of several.
+  nothing: there is no path into it. That is not an error — the run carries on —
+  but it is a warning, and so is a cascade that resolved none of its paths:
+
+  ```text
+  WARN capture: no path resolved, so the variable stays unset
+       tool=create_session var=session tried=$.sessionId, $.session.id
+  WARN capture: the result is not JSON, so there is nothing for a path to select
+       tool=create_session result=`session opened, id 7`
+  ```
+
+  A rule that covers a tool has said that tool produces that variable, so a rule
+  that comes back empty is a statement that did not hold. Which is the reason to
+  name `tools:` rather than leave it empty: an empty one covers every tool, so it
+  warns on every call that does not carry the variable.
 
 Nothing about it is silent. Every tool card in the trace carries `captured`, what
 *that* call set:
