@@ -3453,6 +3453,198 @@ async fn a_single_turn_never_speaks_to_the_profiles_mcp_servers() {
     );
 }
 
+/// A stock tool, so a second server has something of its own to offer.
+fn stock_tool() -> Value {
+    json!([{
+        "name": "get_stock",
+        "description": "Last price for a ticker",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"ticker": {"type": "string"}},
+            "required": ["ticker"],
+        },
+    }])
+}
+
+/// A model that answers on turn one, asking for nothing.
+async fn model_answering_plainly(endpoint: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"content": "pong"}, "finish_reason": "stop"}],
+        })))
+        .mount(endpoint)
+        .await;
+}
+
+/// The names offered to the model on turn one, in the request that went out.
+fn tools_offered(turn: &Value) -> Vec<String> {
+    let sent: Value = serde_json::from_str(turn["call"]["request"]["body"].as_str().unwrap())
+        .expect("the rendered body");
+    sent["tools"]
+        .as_array()
+        .expect("the tools array")
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap_or_default().into())
+        .collect()
+}
+
+/// One run reaching fewer servers than its profile names.
+///
+/// The file still names both — which servers a profile *may* reach is the
+/// profile's decision, and no request edits it. What a run gets to say is which
+/// of them this one does, so that "does the model still get there without the
+/// weather tool?" and "is that server what has been failing for ten minutes?"
+/// stop being a profile edit, a restart and a profile edit back.
+///
+/// The one left out is not idle: it is never discovered, never listed, and its
+/// tools never reach the model.
+#[tokio::test]
+async fn a_run_reaches_only_the_servers_it_names() {
+    let weather = mcp_server(weather_tool(), vec![]).await;
+    let stocks = mcp_server(stock_tool(), vec![]).await;
+    let endpoint = MockServer::start().await;
+    model_answering_plainly(&endpoint).await;
+
+    let harness = Harness::start(&[
+        (
+            "mcp.yaml",
+            format!(
+                "servers:\n  - name: weather\n    url: {}/mcp\n  - name: stocks\n    url: {}/mcp\n",
+                weather.uri(),
+                stocks.uri()
+            ),
+        ),
+        (
+            "chat.yaml",
+            // The profile names `weather`; `stocks` is appended to the same list.
+            format!(
+                "{}  - stocks\n",
+                mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri()))
+            ),
+        ),
+    ])
+    .await;
+
+    let (status, events) = harness
+        .agent(json!({"profile": "chat", "prompt": "ping", "mcpServers": ["stocks"]}))
+        .await;
+    assert_eq!(status, 200, "{events:?}");
+
+    let turns: Vec<_> = events.iter().filter(|(name, _)| name == "turn").collect();
+    assert_eq!(tools_offered(&turns[0].1), vec!["get_stock".to_owned()]);
+
+    assert!(
+        !stocks
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty(),
+        "the server this run asked for was never spoken to"
+    );
+    assert!(
+        weather
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty(),
+        "a server left out of the run was spoken to anyway"
+    );
+}
+
+/// Every server off, which is a list of none rather than a silence.
+///
+/// The loop still runs — this is the question "what does it do when the tool is
+/// not there?", and the answer is the model's, on the profile's own simulated
+/// `tools:` and nothing else.
+#[tokio::test]
+async fn a_run_can_name_no_server_at_all() {
+    let mcp = mcp_server(weather_tool(), vec![]).await;
+    let endpoint = MockServer::start().await;
+    model_answering_plainly(&endpoint).await;
+
+    let harness = Harness::start(&[
+        (
+            "mcp.yaml",
+            format!("servers:\n  - name: weather\n    url: {}/mcp\n", mcp.uri()),
+        ),
+        (
+            "chat.yaml",
+            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+        ),
+    ])
+    .await;
+
+    let (status, events) = harness
+        .agent(json!({"profile": "chat", "prompt": "ping", "mcpServers": []}))
+        .await;
+    assert_eq!(status, 200, "{events:?}");
+
+    // No setup event either: there was nothing to set up, and an empty one would
+    // claim a listing that never happened.
+    assert!(
+        !events.iter().any(|(name, _)| name == "setup"),
+        "{events:?}"
+    );
+    let turns: Vec<_> = events.iter().filter(|(name, _)| name == "turn").collect();
+    assert!(tools_offered(&turns[0].1).is_empty());
+    assert!(
+        mcp.received_requests().await.unwrap_or_default().is_empty(),
+        "a run that named no server spoke to one"
+    );
+}
+
+/// A run may narrow what the profile offers. It may not widen it.
+///
+/// `mcp:` is opt-in per profile because it is the one thing here with effects
+/// outside the process, and that opt-in lives in a file somebody wrote — not in
+/// a request body. Naming a server the profile does not is a `422` before
+/// anything is sent, rather than a tool call nobody authorised.
+#[tokio::test]
+async fn a_run_cannot_reach_a_server_its_profile_does_not_name() {
+    let mcp = mcp_server(weather_tool(), vec![]).await;
+    let other = mcp_server(stock_tool(), vec![]).await;
+    let endpoint = MockServer::start().await;
+    model_answering_plainly(&endpoint).await;
+
+    let harness = Harness::start(&[
+        (
+            "mcp.yaml",
+            format!(
+                "servers:\n  - name: weather\n    url: {}/mcp\n  - name: stocks\n    url: {}/mcp\n",
+                mcp.uri(),
+                other.uri()
+            ),
+        ),
+        (
+            "chat.yaml",
+            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+        ),
+    ])
+    .await;
+
+    let (status, body) = harness
+        .post(
+            "/api/agent",
+            json!({"profile": "chat", "prompt": "ping", "mcpServers": ["stocks"]}),
+        )
+        .await;
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["code"], "mcp_server_not_offered");
+    // Both names, because either half alone leaves you guessing which is wrong.
+    assert!(body["message"].as_str().unwrap().contains("stocks"));
+    assert!(body["message"].as_str().unwrap().contains("chat"));
+
+    assert!(
+        other
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty(),
+        "a server no profile offered was spoken to"
+    );
+}
+
 #[tokio::test]
 async fn the_required_headers_are_mirrored_from_the_body() {
     let mcp = mcp_server(

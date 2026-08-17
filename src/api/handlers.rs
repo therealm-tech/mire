@@ -688,7 +688,10 @@ pub async fn agent(
     // deserves a status code rather than a stream that opens and fails.
     // Whether a declared server is *reachable* is a runtime matter, and comes
     // back as a `failed` event like any other upstream failure.
-    for server in &profile.mcp {
+    //
+    // Only the ones this run asked for, which is also what makes switching a
+    // broken server off a way to get the rest of the profile running.
+    for server in &agent::selected_servers(&profile, request.mcp_servers.as_deref())? {
         if state.runner.config().snapshot().mcp.get(server).is_none() {
             return Err(McpError::UnknownServer(server.clone()).into());
         }

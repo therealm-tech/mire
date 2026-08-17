@@ -68,6 +68,7 @@ export function preflight({
   servers,
   token,
   usesMcp,
+  mcpOff = [],
 }: {
   profile: ProfileSummary
   /** The resolved model identity, `undefined` when the profile names one that is not declared. */
@@ -76,6 +77,16 @@ export function preflight({
   servers: McpDescriptor[]
   /** What has been typed into this tab, for a provider that has to be asked. */
   token: string
+  /**
+   * Servers switched off for the next run, which this run does not set up.
+   *
+   * They are out of the picture exactly as the whole set is on a chat: no
+   * discovery, no listing, no sign-in — so nothing about them can block a call
+   * they are not part of. It is still said out loud, in a note: a profile
+   * reaching fewer servers than its file declares is a fact about the run, and
+   * finding out by reading the traffic afterwards is finding out too late.
+   */
+  mcpOff?: string[]
   /**
    * Whether this run will speak to the profile's servers at all.
    *
@@ -88,8 +99,10 @@ export function preflight({
 }): Preflight {
   const blockers: Blocker[] = []
   const notes: string[] = []
-  // Named by the file, but only set up by a run that can call one.
-  const declared = usesMcp ? profile.mcp : []
+  // Named by the file, but only set up by a run that can call one — and only
+  // the ones this run has left switched on.
+  const declared = usesMcp ? profile.mcp.filter((name) => !mcpOff.includes(name)) : []
+  const off = usesMcp ? profile.mcp.filter((name) => mcpOff.includes(name)) : []
 
   if (provider === undefined) {
     blockers.push({
@@ -138,6 +151,14 @@ export function preflight({
         })
       }
     }
+  }
+
+  if (off.length > 0) {
+    notes.push(
+      `Switched off for this run: ${off.join(', ')} — not set up, and ${
+        off.length === 1 ? 'its tools are' : 'their tools are'
+      } not offered to the model.`,
+    )
   }
 
   if (!profile.hasDecode) {

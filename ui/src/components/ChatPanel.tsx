@@ -11,6 +11,7 @@ import {
 import { Failure } from './Failure'
 import { Markdown } from './Markdown'
 import { McpProtocol } from './McpProtocol'
+import { McpServers } from './McpServers'
 import { Badge, Button, INPUT_CLASSES, Panel } from './primitives'
 
 /**
@@ -58,6 +59,8 @@ export function ChatPanel({
   error,
   revisions,
   mcpProtocol,
+  mcpServers,
+  mcpOff,
   showProtocol,
   attachments,
   attaching,
@@ -66,6 +69,7 @@ export function ChatPanel({
   onMaxIterations,
   onMode,
   onMcpProtocol,
+  onMcpServer,
   onAttach,
   onDetach,
   onSend,
@@ -87,6 +91,10 @@ export function ChatPanel({
   error: { code: string; message: string; detail?: unknown } | null
   revisions: string[]
   mcpProtocol: string | null
+  /** Every MCP server the profile names. */
+  mcpServers: string[]
+  /** The ones switched off for the next run. */
+  mcpOff: string[]
   /** Only a run that will speak to a server has a revision to speak to it in. */
   showProtocol: boolean
   /** Files already written to `mire`'s upload directory. */
@@ -98,6 +106,7 @@ export function ChatPanel({
   onMaxIterations: (value: number) => void
   onMode: (value: RunMode) => void
   onMcpProtocol: (revision: string | null) => void
+  onMcpServer: (name: string, on: boolean) => void
   onAttach: (files: File[]) => void
   onDetach: (id: string) => void
   onSend: () => void
@@ -192,6 +201,8 @@ export function ChatPanel({
           mode={mode}
           revisions={revisions}
           mcpProtocol={mcpProtocol}
+          mcpServers={mcpServers}
+          mcpOff={mcpOff}
           showProtocol={showProtocol}
           attachments={attachments}
           attaching={attaching}
@@ -200,6 +211,7 @@ export function ChatPanel({
           onMaxIterations={onMaxIterations}
           onMode={onMode}
           onMcpProtocol={onMcpProtocol}
+          onMcpServer={onMcpServer}
           onAttach={onAttach}
           onDetach={onDetach}
           onSend={onSend}
@@ -512,6 +524,8 @@ function Composer({
   mode,
   revisions,
   mcpProtocol,
+  mcpServers,
+  mcpOff,
   showProtocol,
   attachments,
   attaching,
@@ -520,6 +534,7 @@ function Composer({
   onMaxIterations,
   onMode,
   onMcpProtocol,
+  onMcpServer,
   onAttach,
   onDetach,
   onSend,
@@ -532,6 +547,8 @@ function Composer({
   mode: RunMode
   revisions: string[]
   mcpProtocol: string | null
+  mcpServers: string[]
+  mcpOff: string[]
   showProtocol: boolean
   attachments: UploadedFile[]
   attaching: boolean
@@ -540,6 +557,7 @@ function Composer({
   onMaxIterations: (value: number) => void
   onMode: (value: RunMode) => void
   onMcpProtocol: (revision: string | null) => void
+  onMcpServer: (name: string, on: boolean) => void
   onAttach: (files: File[]) => void
   onDetach: (id: string) => void
   onSend: () => void
@@ -706,12 +724,20 @@ function Composer({
         run never opens a connection to — there is no run for it to be about.
       */}
       {showProtocol ? (
-        <McpProtocol
-          revisions={revisions}
-          selected={mcpProtocol}
-          disabled={busy}
-          onSelect={onMcpProtocol}
-        />
+        <div className="space-y-2">
+          {/*
+            Above the revision, because it decides whether there is a server for
+            a revision to be spoken to at all — and because "which of these am I
+            reaching?" is the coarser question of the two.
+          */}
+          <McpServers names={mcpServers} off={mcpOff} disabled={busy} onToggle={onMcpServer} />
+          <McpProtocol
+            revisions={revisions}
+            selected={mcpProtocol}
+            disabled={busy}
+            onSelect={onMcpProtocol}
+          />
+        </div>
       ) : null}
     </div>
   )

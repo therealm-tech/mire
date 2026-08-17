@@ -28,6 +28,7 @@ function run(overrides: {
   token?: string
   /** Agent mode unless a test says otherwise: a chat sets no server up. */
   usesMcp?: boolean
+  mcpOff?: string[]
 }) {
   const provider =
     'provider' in overrides && overrides.provider === undefined
@@ -41,6 +42,7 @@ function run(overrides: {
     servers: overrides.servers ?? [],
     token: overrides.token ?? '',
     usesMcp: overrides.usesMcp ?? true,
+    mcpOff: overrides.mcpOff ?? [],
   })
 }
 
@@ -151,6 +153,50 @@ describe('preflight', () => {
     const chat = run({ ...overrides, usesMcp: false })
     expect(chat.blockers).toEqual([])
     expect(chat.servers).toEqual([])
+  })
+
+  it('drops a server switched off, and says so rather than quietly shrinking', () => {
+    const human: AuthDescriptor = {
+      name: 'me',
+      kind: 'oidc_browser',
+      needsValue: false,
+      needsLogin: true,
+      allowedHosts: [],
+    }
+    const overrides = {
+      profile: { mcp: ['named', 'ghost'] },
+      providers: [PROVIDER, human],
+      servers: [
+        { name: 'named', url: 'https://a', auth: 'me', tools: [], headers: [], usesAuth: [] },
+      ] as McpDescriptor[],
+    }
+
+    // `ghost` is undeclared and `named` wants a session: two refusals, both of
+    // them about servers this run would set up.
+    expect(run(overrides).blockers).toHaveLength(2)
+
+    // Switched off, and with it the refusal it was causing — the same way a chat
+    // drops them, because this run reaches it exactly as little.
+    const narrowed = run({ ...overrides, mcpOff: ['ghost'] })
+    expect(narrowed.servers).toEqual(['named'])
+    expect(narrowed.blockers).toHaveLength(1)
+    expect(narrowed.blockers[0]?.signIn).toBe('me')
+    expect(narrowed.notes[0]).toContain('ghost')
+
+    // All of them off: nothing to set up, nothing to refuse it, and the note is
+    // what keeps that from looking like a profile with no servers at all.
+    const none = run({ ...overrides, mcpOff: ['ghost', 'named'] })
+    expect(none.servers).toEqual([])
+    expect(none.blockers).toEqual([])
+    expect(none.notes[0]).toContain('named')
+  })
+
+  it('says nothing about servers switched off on a run that reaches none anyway', () => {
+    // Chat mode already leaves every server out, so a note listing the ones
+    // somebody unticked would be reporting a distinction this run does not have.
+    const chat = run({ profile: { mcp: ['named'] }, mcpOff: ['named'], usesMcp: false })
+    expect(chat.servers).toEqual([])
+    expect(chat.notes).toEqual([])
   })
 
   it('counts a missing decode block as a note rather than a refusal', () => {

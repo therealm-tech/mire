@@ -578,6 +578,76 @@ describe('App', () => {
     expect(sent[1]).not.toHaveProperty('mcpProtocol')
   })
 
+  it('takes a server out of the run when it is switched off, and puts it back', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    // Nothing to switch off on a profile that names no server.
+    await screen.findByRole('button', { name: /^chat/ })
+    expect(screen.queryByRole('checkbox', { name: 'dev' })).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /guarded/ }))
+    await agentMode(user)
+
+    // Every server the profile names, all on: the file's word, unedited.
+    expect(
+      within(screen.getByRole('group', { name: 'Servers' }))
+        .getAllByRole('checkbox')
+        .map((box) => (box as HTMLInputElement).checked),
+    ).toEqual([true, true, true])
+    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('3 MCP servers')
+
+    // `dev` off: out of the bar, out of the auth panel — and with it the `409`
+    // its unsigned-in provider was promising, because this run never asks.
+    await user.click(screen.getByRole('checkbox', { name: 'dev' }))
+    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('2 MCP servers')
+    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent(
+      /Switched off for this run: dev/,
+    )
+    expect(screen.queryByTestId('mcp-dev')).not.toBeInTheDocument()
+    expect(screen.getByTestId('mcp-keyed')).toBeInTheDocument()
+    expect(screen.queryByText(/answer 409 until/)).not.toBeInTheDocument()
+
+    // And back, because a switch that only goes one way is a trap.
+    await user.click(screen.getByRole('checkbox', { name: 'dev' }))
+    expect(screen.getByTestId('mcp-dev')).toBeInTheDocument()
+    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('3 MCP servers')
+  })
+
+  it('names the servers on the wire only once one is off', async () => {
+    const { fetchMock, sent } = recordingApi(['pong', 'pong', 'pong'])
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: /guarded/ }))
+    await agentMode(user)
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(sent).toHaveLength(1))
+
+    // All on: the profile already says which, and a copy alongside it is a
+    // second thing that can disagree with the file.
+    expect(sent[0]).not.toHaveProperty('mcpServers')
+
+    await user.click(screen.getByRole('checkbox', { name: 'ghost' }))
+    await user.type(screen.getByRole('textbox', { name: /message/i }), 'again')
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(sent).toHaveLength(2))
+
+    expect(sent[1]?.mcpServers).toEqual(['dev', 'keyed'])
+
+    // Every one off is a list of none, not a silence: saying nothing would be
+    // asking for all three.
+    await user.click(screen.getByRole('checkbox', { name: 'dev' }))
+    await user.click(screen.getByRole('checkbox', { name: 'keyed' }))
+    await user.type(screen.getByRole('textbox', { name: /message/i }), 'and again')
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(sent).toHaveLength(3))
+
+    expect(sent[2]?.mcpServers).toEqual([])
+  })
+
   it('switches to the embedding input when an embedding profile is selected', async () => {
     const user = userEvent.setup()
     render(<App />)
