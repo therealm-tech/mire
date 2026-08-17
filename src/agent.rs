@@ -21,6 +21,7 @@
 //! predicate could never be evaluated even once, and that is what gets reported.
 
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use jsonschema::Validator;
@@ -33,10 +34,14 @@ use tracing::{debug, info, warn};
 use crate::config::Config;
 use crate::decode::Decoded;
 use crate::exec::{CallInput, CallOutcome, ExecError, Runner};
-use crate::mcp::{McpClient, McpCredentials, McpError, McpExchange, McpJournal, McpTool, Revision};
+use crate::mcp::{
+    HookJournal, HookRecord, McpClient, McpCredentials, McpError, McpExchange, McpJournal, McpTool,
+    Revision,
+};
 use crate::message::{Message, Role, ToolCall};
 use crate::profile::{AgentSpec, Profile, ProfileKind, StopWhen, ToolResponse, ToolSpec};
 use crate::script::ScriptError;
+use crate::uploads::UploadRef;
 
 /// Turns allowed when the profile says nothing.
 const DEFAULT_MAX_ITERATIONS: u32 = 10;
@@ -186,6 +191,13 @@ pub struct Turn {
     /// place a `401` from the server or a lost session is visible at all.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp: Vec<McpExchange>,
+    /// Every hook that fired around the tools above.
+    ///
+    /// Its own list rather than an entry in `mcp`: a hook talks to a third party
+    /// over plain HTTP, and filing a webhook's `POST` among the JSON-RPC methods
+    /// would make the MCP traffic unreadable to make one number go up.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hooks: Vec<HookRecord>,
     /// Continue, or stop and why.
     pub decision: Decision,
 }
@@ -331,17 +343,17 @@ pub async fn run(
 
         // Stop before spending a turn answering tools nobody will read.
         if let Some(reason) = should_stop(&spec.stop_when, &completion) {
-            let turn = Turn {
+            let turn = record(
                 index,
-                call: Box::new(outcome),
-                tools: Vec::new(),
-                mcp: crate::mcp::drain(&tools.journal),
-                decision: Decision::Stop {
+                outcome,
+                Vec::new(),
+                &tools,
+                Decision::Stop {
                     stop: StopOutcome::Stopped {
                         reason: reason.clone(),
                     },
                 },
-            };
+            );
             on_update(AgentUpdate::Turn(&turn));
             turns.push(turn);
             break StopOutcome::Stopped { reason };
@@ -358,15 +370,7 @@ pub async fn run(
         let invocations = invoke_tools(&tools, &completion.tool_calls, index).await;
         let decision = decide(repeated.as_ref(), invocations.len(), index);
 
-        let turn = Turn {
-            index,
-            call: Box::new(outcome),
-            tools: invocations,
-            // Drained after the tools ran, so it holds exactly what this turn put
-            // on a wire and the next turn starts from nothing.
-            mcp: crate::mcp::drain(&tools.journal),
-            decision,
-        };
+        let turn = record(index, outcome, invocations, &tools, decision);
         on_update(AgentUpdate::Turn(&turn));
 
         if let Some(tool) = repeated {
@@ -399,6 +403,27 @@ pub async fn run(
         stop,
         duration_ms: elapsed_ms(started),
     })
+}
+
+/// One turn, with everything it put on a wire attached.
+///
+/// The journals are drained *here*, after the tools have run, so a turn holds
+/// exactly what it produced and the next one starts from nothing.
+fn record(
+    index: u32,
+    call: CallOutcome,
+    invocations: Vec<ToolInvocation>,
+    tools: &Tools,
+    decision: Decision,
+) -> Turn {
+    Turn {
+        index,
+        call: Box::new(call),
+        tools: invocations,
+        mcp: crate::mcp::drain(&tools.journal),
+        hooks: crate::mcp::hook::drain(&tools.hooks),
+        decision,
+    }
 }
 
 /// What to do after a turn that asked for tools.
@@ -494,6 +519,8 @@ struct Tools {
     clients: BTreeMap<String, McpClient>,
     /// This run's MCP traffic, drained into each turn as it completes.
     journal: McpJournal,
+    /// Where the hooks that fired are collected, drained per turn beside it.
+    hooks: HookJournal,
 }
 
 impl Tools {
@@ -538,6 +565,8 @@ async fn prepare(runner: &Runner, input: &mut AgentInput) -> Result<Prepared, Ag
     // Recorded from the first probe: a run that cannot get past `initialize` has
     // no turns to hang the reason off, and the `?` below is where it ends.
     let journal: McpJournal = McpJournal::default();
+    let hooks: HookJournal = HookJournal::default();
+    let attachments: Arc<[UploadRef]> = Arc::from(input.call.uploads.clone());
 
     let mut live = Vec::new();
     let mut clients = BTreeMap::new();
@@ -549,7 +578,11 @@ async fn prepare(runner: &Runner, input: &mut AgentInput) -> Result<Prepared, Ag
             .get(server)
             .ok_or_else(|| McpError::UnknownServer(server.clone()))?
             .speaking(input.mcp_protocol)
-            .recording(journal.clone());
+            .recording(journal.clone(), hooks.clone())
+            // The same files the template gets, for a hook that asked for some.
+            // Shared rather than copied per server: a run's uploads are one set
+            // of bytes however many servers it ends up talking to.
+            .carrying(Arc::clone(&attachments));
         let credentials = McpCredentials::resolve(&config.registry, client.server()).await?;
         let listed = client.list_tools(&credentials).await?;
         info!(profile = %profile.name, %server, tools = listed.len(), "MCP tools offered");
@@ -583,6 +616,7 @@ async fn prepare(runner: &Runner, input: &mut AgentInput) -> Result<Prepared, Ag
             config,
             clients,
             journal,
+            hooks,
         },
         profile,
         spec,
@@ -1019,6 +1053,7 @@ tools:
             config: std::sync::Arc::new(Config::default()),
             clients: BTreeMap::new(),
             journal: McpJournal::default(),
+            hooks: HookJournal::default(),
             profile,
         }
     }

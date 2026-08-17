@@ -129,6 +129,10 @@ impl From<crate::mcp::McpError> for ApiError {
             McpError::Header { .. } => {
                 Self::new(StatusCode::BAD_REQUEST, "mcp_header_error", message)
             }
+            // Its own code, because the culprit is neither the model nor the MCP
+            // server: something the hook points at said no, or could not be
+            // reached, and that is a third address to go and look at.
+            McpError::Hook { .. } => Self::new(StatusCode::BAD_GATEWAY, "mcp_hook_failed", message),
         }
     }
 }

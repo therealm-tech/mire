@@ -3,11 +3,13 @@ import type { DecodeTrace, StreamView, ToolInvocation } from '../api'
 import {
   type Exchange,
   failed,
+  type HookExchange,
   type ModelExchange,
   type ProtocolExchange,
   statusTone,
   type ToolExchange,
 } from '../conversation'
+import { formatBytes } from './ChatPanel'
 import { JsonTree } from './JsonTree'
 import { Badge, Button, Code, CopyButton, Panel } from './primitives'
 
@@ -25,13 +27,14 @@ import { Badge, Button, Code, CopyButton, Panel } from './primitives'
  * only ever shows the latest turn cannot make one.
  */
 /** Which half of the traffic you are reading. */
-type Lens = 'all' | 'model' | 'tool' | 'protocol'
+type Lens = 'all' | 'model' | 'tool' | 'protocol' | 'hook'
 
 const LENSES: { key: Lens; label: string }[] = [
   { key: 'all', label: 'All' },
   { key: 'model', label: 'Model' },
   { key: 'tool', label: 'Tools' },
   { key: 'protocol', label: 'Protocol' },
+  { key: 'hook', label: 'Hooks' },
 ]
 
 export function TrafficPanel({
@@ -209,6 +212,14 @@ export function TrafficPanel({
                 />
               ) : exchange.kind === 'protocol' ? (
                 <ProtocolCard
+                  key={exchange.id}
+                  exchange={exchange}
+                  open={!closed.has(exchange.id)}
+                  flash={flash === exchange.id}
+                  onToggle={() => toggle(exchange.id)}
+                />
+              ) : exchange.kind === 'hook' ? (
+                <HookCard
                   key={exchange.id}
                   exchange={exchange}
                   open={!closed.has(exchange.id)}
@@ -594,6 +605,99 @@ function ProtocolCard({
         ) : null}
 
         {mcp.response.length > 0 ? <Body text={mcp.response} /> : null}
+      </Section>
+    </Card>
+  )
+}
+
+/**
+ * One hook firing around a tool call.
+ *
+ * A card of its own rather than a line on the tool's, because it is traffic to a
+ * third address. When a gate refuses a call, the tool card says the call did not
+ * happen; only this says who decided that, what they were told, and what they
+ * answered — which is the difference between a broken server and a policy doing
+ * exactly its job.
+ */
+function HookCard({
+  exchange,
+  open,
+  flash,
+  onToggle,
+}: {
+  exchange: HookExchange
+  open: boolean
+  flash: boolean
+  onToggle: () => void
+}) {
+  const hook = exchange.record
+  // Not `statusTone`: a hook is something you asked for, so nothing it answers
+  // is ever the expected refusal an anonymous call is looking for.
+  const tone = hook.error || hook.status === 0 || hook.status >= 400 ? 'bad' : 'good'
+
+  return (
+    <Card
+      id={exchange.id}
+      label={`${turnLabel(exchange.turn, 'Hook')} · ${hook.hook} (${hook.phase})`}
+      summary={`${hook.server} · ${hook.tool} · ${hook.url}`}
+      open={open}
+      flash={flash}
+      onToggle={onToggle}
+      badges={
+        <>
+          <Badge tone="neutral">hook</Badge>
+          <Badge tone="neutral">{hook.phase}</Badge>
+          {hook.status === 0 ? (
+            <Badge tone="bad">never answered</Badge>
+          ) : (
+            <Badge tone={tone}>{hook.status}</Badge>
+          )}
+          <span className="text-faint text-xs">{hook.latencyMs} ms</span>
+          {hook.stoppedTheCall ? <Badge tone="bad">stopped the call</Badge> : null}
+        </>
+      }
+    >
+      <Section title="Request">
+        <p className="break-all font-mono text-xs">
+          <span className="font-semibold">{hook.method}</span> {hook.url}
+        </p>
+        <ul className="space-y-0.5 break-all font-mono text-[11px] text-muted">
+          {Object.entries(hook.headers).map(([name, value]) => (
+            <li key={name}>
+              {name}: {value}
+            </li>
+          ))}
+        </ul>
+        {hook.request.length > 0 ? <Body text={hook.request} /> : null}
+
+        {hook.files.length > 0 ? (
+          <ul className="space-y-0.5 text-xs">
+            {hook.files.map((file) => (
+              <li key={file.id} className="flex flex-wrap items-baseline gap-2">
+                <Badge tone="neutral">file</Badge>
+                <span className="font-mono">{file.name}</span>
+                <span className="text-faint">
+                  {file.contentType} · {formatBytes(file.size)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </Section>
+
+      <Section title="Response">
+        {hook.error ? (
+          <p className="flex flex-wrap items-baseline gap-2 text-xs">
+            <Badge tone="bad">{hook.stoppedTheCall ? 'refused' : 'failed, stepped over'}</Badge>
+            <span className="text-muted">{hook.error}</span>
+          </p>
+        ) : null}
+
+        {hook.response.length > 0 ? (
+          <Body text={hook.response} />
+        ) : (
+          <p className="text-muted text-sm">Nothing, which a hook is entitled to answer.</p>
+        )}
       </Section>
     </Card>
   )

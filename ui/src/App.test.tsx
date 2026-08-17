@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from './App'
+import type { HookRecord } from './api'
 import { describeStop, statusTone } from './conversation'
 
 const PROFILES = {
@@ -975,6 +976,9 @@ function turnFixture() {
       },
     ],
     mcp: [mcpExchange('tools/call', '{"jsonrpc":"2.0","id":1,"result":{"temp":21}}')],
+    // Typed for the same reason `schemaErrors` is: most turns fire no hook, and
+    // the one variant that does has to be assignable to this.
+    hooks: [] as HookRecord[],
     decision: { decision: 'continue', tools: 1 },
   }
 }
@@ -1068,6 +1072,87 @@ describe('traffic', () => {
     // Two of those, plus the handshake, the listing and the `tools/call` under
     // the tool: five wires touched, five cards.
     expect(within(panel('Traffic')).getByText('5 exchanges')).toBeInTheDocument()
+  })
+
+  it('gives a hook its own card, and says when one stopped the call', async () => {
+    const turn = turnFixture()
+    turn.hooks = [
+      {
+        server: 'weather',
+        hook: 'gate',
+        phase: 'before',
+        tool: 'get_weather',
+        action: 'http',
+        url: 'https://policy.internal/decide',
+        method: 'POST',
+        headers: { 'x-api-key': '***' },
+        request: '{"phase":"before","tool":"get_weather"}',
+        files: [],
+        status: 403,
+        response: 'get_weather is not allowed here',
+        latencyMs: 8,
+        error: 'answered 403 Forbidden: get_weather is not allowed here',
+        stoppedTheCall: true,
+      },
+    ]
+    vi.stubGlobal('fetch', toolRunApi([turn]))
+    const user = userEvent.setup()
+    render(<App />)
+
+    await agentMode(user)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    // Its own card, not a line on the tool's: the tool card says the call did
+    // not happen, and only this says who decided that.
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Turn 1 · gate \(before\)/ })).toBeInTheDocument()
+    })
+    const hook = within(card(/Turn 1 · gate \(before\)/))
+    expect(hook.getByText('stopped the call')).toBeInTheDocument()
+    expect(hook.getByText('403')).toBeInTheDocument()
+    // Twice over: the reason it failed, and the body it answered with.
+    expect(hook.getAllByText(/not allowed here/)).toHaveLength(2)
+    // The header travels by name; its value does not.
+    expect(hook.getByText(/x-api-key: \*\*\*/)).toBeInTheDocument()
+  })
+
+  it('names the files a hook attached, and shows none of their bytes', async () => {
+    const turn = turnFixture()
+    turn.hooks = [
+      {
+        server: 'weather',
+        hook: 'audit',
+        phase: 'after',
+        tool: 'get_weather',
+        action: 'http',
+        url: 'https://audit.internal/tool-calls',
+        method: 'POST',
+        headers: { 'content-type': 'multipart/form-data; boundary=abc' },
+        // The `payload` part alone: the bytes went out beside it, as parts.
+        request: '{"phase":"after","tool":"get_weather"}',
+        files: [
+          { id: 'aB3dE5gH7jK9', name: 'report.pdf', size: 2048, contentType: 'application/pdf' },
+        ],
+        status: 200,
+        response: 'ok',
+        latencyMs: 12,
+        stoppedTheCall: false,
+      },
+    ]
+    vi.stubGlobal('fetch', toolRunApi([turn]))
+    const user = userEvent.setup()
+    render(<App />)
+
+    await agentMode(user)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Turn 1 · audit \(after\)/ })).toBeInTheDocument()
+    })
+    const hook = within(card(/Turn 1 · audit \(after\)/))
+    expect(hook.getByText('report.pdf')).toBeInTheDocument()
+    // Sized the way every other file chip in this UI is sized.
+    expect(hook.getByText(/application\/pdf · 2\.0 kB/)).toBeInTheDocument()
   })
 
   it('records what was said to the MCP server before the loop began', async () => {

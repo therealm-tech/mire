@@ -1062,6 +1062,174 @@ Annotations (`readOnlyHint`, `destructiveHint`) are reported, never enforced:
 they are a server's claim about itself, and this tool is in the business of
 checking claims rather than trusting them.
 
+### Hooks: something that happens around a tool call
+
+Calling a live tool is the one thing `mire` does that has effects outside this
+process, which makes it the one thing somebody else usually wants to know about
+— an audit trail, a policy service, a webhook that pages whoever owns the server
+being poked. `hooks:` on a server declares that, fired `before` the call goes
+out, `after` it comes back, or both:
+
+```yaml
+servers:
+  - name: files
+    url: https://mcp.internal/mcp
+    hooks:
+      - name: audit
+        on:
+          - before
+          - after
+        action:
+          kind: http
+          url: https://audit.internal/tool-calls
+          auth: keycloak-workload
+```
+
+`kind: http` is the only action so far. It is tagged anyway, because a `kind:`
+added after the fact is a breaking change to every file that already exists.
+
+With no `body:`, the payload is the call itself:
+
+```json
+{
+  "phase": "after",
+  "server": "files",
+  "tool": "write_file",
+  "arguments": { "path": "/tmp/notes", "content": "…" },
+  "result": { "text": "written", "isError": false, "latencyMs": 34 }
+}
+```
+
+`result` appears on the way back only, and it appears even when the call failed
+— with `error` naming what went wrong instead. An audit trail that only records
+the calls that worked is not one.
+
+A `body:` template replaces the payload and sees the same fields by name, plus
+`env`:
+
+```yaml
+        action:
+          kind: http
+          url: https://chat.internal/webhook
+          body: '{"text": "{{ tool }} on {{ server }} by {{ env.USER }}"}'
+```
+
+Undefined is an error there, exactly as it is in a header template, and the
+template is compiled when `mcp.yaml` loads — so a typo names the hook at startup
+rather than twenty minutes into a run. `auth` is deliberately **not** in scope:
+a credential belongs in a header, where the redactor is.
+
+**A hook can stop a call.** `on_error: fail` — the default — means a hook that
+could not be run, or whose endpoint answered outside `2xx`, fails the tool call
+it belongs to. On a `before` hook that is a policy gate for free: the
+`tools/call` never goes out, and the model is told why so it has a chance to
+recover. On an `after` hook it is a report rather than an undo — the tool has
+already run, and nothing here can take that back.
+
+```yaml
+      - name: gate
+        on:
+          - before
+        tools:
+          - write_file
+          - delete_file
+        on_error: fail
+        action:
+          kind: http
+          url: https://policy.internal/decide
+```
+
+`on_error: continue` records the failure and gets out of the way, which is what
+you want from an audit sink you would rather not have gating your runs. The
+default is the loud one on purpose: a hook is something you asked for, and a
+harness that quietly skipped it would be answering a question you did not ask.
+
+`tools:` narrows a hook to the calls it cares about. Each entry is a regex
+matched against the **whole** tool name, so a plain `write_file` still means that
+one tool and nothing else:
+
+```yaml
+        tools:
+          - write_.*
+          - delete_file
+```
+
+Anchoring is the conservative half of the choice. A gate written as `write_file`
+must not quietly grow to cover `overwrite_file_backup` because the matcher got
+cleverer, so widening is something you ask for — `write_.*`, or `.*` for
+everything. Empty — the default — is every tool. Patterns compile when
+`mcp.yaml` loads, like the body template: a `tools:` entry that is not a regex
+names its hook at startup rather than covering nothing in silence.
+
+**It can carry the run's files.** `files:` names uploads the way `tools:` names
+tools, and what it names goes out for real: the request becomes a
+`multipart/form-data` with the body demoted to a `payload` part and one `file`
+part per attachment, filename and media type included.
+
+```yaml
+        action:
+          kind: http
+          url: https://audit.internal/tool-calls
+          files:
+            - .*\.pdf
+```
+
+Empty — the default — attaches **nothing**, which is the opposite of what an
+empty `tools:` means. The asymmetry is on purpose: a hook covering every tool is
+merely wide, while a hook shipping every file somebody attached to a third
+address is a leak. `.*` asks for all of them, out loud.
+
+The same files reach a `body:` template as `uploads`, whole — `base64`,
+`dataUrl`, `text`, the entries a model template gets from the same run — so a
+webhook wanting the bytes inline can have them:
+
+```yaml
+          body: '{"file": "{{ uploads[0].base64 }}"}'
+```
+
+The default payload describes them instead, by `id`, `name`, `size` and
+`contentType`. The bytes are already going out as parts, and putting them in the
+body as well would send every file twice. The trace makes the same choice: it
+names what was attached and carries none of it, because 25 MB of base64 in a
+panel costs everything and tells nobody anything.
+
+**It authenticates like everything else.** `auth:` names a provider and the
+credential goes where that provider says; `headers:` takes the same MiniJinja
+templates a server's own headers take, `{{ auth["…"] }}` included. Two details
+are the hook's own:
+
+- The credential is resolved against the **hook's** URL, not the server's, so a
+  provider's `allowed_hosts` means what it says. A rule written to keep a token
+  off the public internet is not satisfied by the MCP server being internal.
+- It is resolved **only when the hook fires**. A `tools/list`, or a call to a
+  tool this hook does not cover, never pays for a token exchange it has no use
+  for.
+
+Every firing lands in the trace, next to the JSON-RPC rather than inside it: a
+hook talks to a third address over plain HTTP, and filing a webhook's `POST`
+among the MCP methods would make both unreadable. Each turn carries a `hooks`
+array, the **Hooks** lens in the traffic panel shows nothing else, and a record
+that failed says whether that is also why the tool never ran:
+
+```json
+{
+  "hook": "gate",
+  "phase": "before",
+  "tool": "write_file",
+  "url": "https://policy.internal/decide",
+  "status": 403,
+  "error": "answered 403 Forbidden: write_file is not allowed here",
+  "stoppedTheCall": true
+}
+```
+
+Credentials are masked there exactly as they are everywhere else, and only the
+header *names* appear in `GET /api/mcp`.
+
+Other knobs: `method:` (`POST` by default, because a hook carries a payload) and
+`timeout_ms:` (10 s, shorter than a tool's — a slow audit sink must not look like
+a slow tool).
+
 ## Streaming, and the number everybody actually wants
 
 A non-streamed call answers one question about latency: how long the whole thing
@@ -1261,7 +1429,8 @@ has MCP servers, a `turn` event per turn as it happens, then one `done` carrying
 the whole trace. Each turn holds the rendered request, the masked headers, the
 `curl` equivalent, the raw response, the decode trace and the tool results — the
 same shape `POST /api/call` returns — plus `mcp`, every JSON-RPC round trip that
-turn made, request and response, credentials already masked.
+turn made, request and response, credentials already masked, and `hooks`,
+everything that fired around those tool calls.
 
 `setup` carries the same shape for what happened before the loop: discovery, the
 handshake, `tools/list`. It arrives first because it happened first, and a run

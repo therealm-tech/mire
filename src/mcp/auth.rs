@@ -30,17 +30,22 @@ use std::collections::BTreeMap;
 use crate::auth::{Auth, AuthProvider, registry::AuthRegistry};
 use crate::redact::Secret;
 
+use super::hook::Hook;
 use super::{McpError, McpServer};
 
 /// Everything one MCP request needs to authenticate.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct McpCredentials<'a> {
+    registry: &'a AuthRegistry,
     provider: Option<&'a Auth>,
     named: BTreeMap<String, Secret>,
 }
 
 impl<'a> McpCredentials<'a> {
     /// Resolves the server's own provider and whatever its templates name.
+    ///
+    /// A hook's credentials are deliberately **not** resolved here — see
+    /// [`Self::for_hook`].
     ///
     /// # Errors
     ///
@@ -64,7 +69,11 @@ impl<'a> McpCredentials<'a> {
             }
         }
 
-        Ok(Self { provider, named })
+        Ok(Self {
+            registry,
+            provider,
+            named,
+        })
     }
 
     /// The server's `auth:` provider, if it declares one.
@@ -74,6 +83,61 @@ impl<'a> McpCredentials<'a> {
     }
 
     /// Bare credentials by provider name, for the header templates.
+    #[must_use]
+    pub fn named(&self) -> &BTreeMap<String, Secret> {
+        &self.named
+    }
+
+    /// Resolves what one hook needs, at the moment it fires.
+    ///
+    /// Two things separate this from the server's own resolution, and both are
+    /// the reason it is a second pass rather than a bigger first one:
+    ///
+    /// * **Against the hook's URL.** A provider's `allowed_hosts` is a statement
+    ///   about where its credential may be sent, and a hook sends it somewhere
+    ///   else. Resolving it against the MCP server's URL would check the wrong
+    ///   host and hand the credential to a URL the rule was written to exclude.
+    /// * **Only when it fires.** A credential costs an exchange and can fail. A
+    ///   `tools/list` that never calls a tool, or a call to a tool this hook does
+    ///   not cover, has no business paying for either.
+    ///
+    /// # Errors
+    ///
+    /// [`McpError::Auth`], as [`Self::resolve`].
+    pub(super) async fn for_hook(&self, hook: &Hook) -> Result<HookCredentials<'a>, McpError> {
+        let provider = match hook.auth() {
+            None => None,
+            Some(name) => Some(look_up(self.registry, name)?),
+        };
+
+        let target = hook.url();
+        let mut named = BTreeMap::new();
+        for name in hook.header_providers() {
+            let entry = look_up(self.registry, name)?;
+            if let Some(token) = entry.credential(target, None).await? {
+                named.insert(name.to_owned(), token);
+            }
+        }
+
+        Ok(HookCredentials { provider, named })
+    }
+}
+
+/// What one hook needs to authenticate, resolved against its own URL.
+#[derive(Debug)]
+pub struct HookCredentials<'a> {
+    provider: Option<&'a Auth>,
+    named: BTreeMap<String, Secret>,
+}
+
+impl<'a> HookCredentials<'a> {
+    /// The hook's `auth:` provider, if it names one.
+    #[must_use]
+    pub fn provider(&self) -> Option<&'a Auth> {
+        self.provider
+    }
+
+    /// Bare credentials by provider name, for its header templates.
     #[must_use]
     pub fn named(&self) -> &BTreeMap<String, Secret> {
         &self.named
@@ -115,6 +179,7 @@ mod tests {
             headers: crate::mcp::HeaderTemplates::compile(&declared).expect("compile"),
             timeout: std::time::Duration::from_secs(5),
             protocol_version: None,
+            hooks: Vec::new(),
         }
     }
 

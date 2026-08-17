@@ -34,6 +34,7 @@
 pub mod auth;
 pub mod client;
 pub mod headers;
+pub mod hook;
 pub mod negotiate;
 pub mod registry;
 
@@ -49,6 +50,10 @@ use serde_json::Value;
 pub use auth::McpCredentials;
 pub use client::{McpClient, McpServer};
 pub use headers::HeaderTemplates;
+pub use hook::{
+    Attachment, Hook, HookAction, HookJournal, HookPhase, HookRecord, HttpAction, NamePattern,
+    OnError,
+};
 pub use negotiate::Session;
 pub use registry::McpRegistry;
 
@@ -401,6 +406,24 @@ pub enum McpError {
         /// The header that could not be built.
         header: String,
         /// Why, with the template's own words rather than any value.
+        message: String,
+    },
+
+    /// A hook failed, and its `on_error` says that is the call's problem too.
+    ///
+    /// On [`HookPhase::Before`] the `tools/call` never went out; on
+    /// [`HookPhase::After`] it did, and nothing here can take that back — the
+    /// message says which, because "the tool never ran" and "the tool ran and
+    /// nobody was told" are different facts.
+    #[error("MCP server `{server}`: {phase} hook `{hook}` failed: {message}")]
+    Hook {
+        /// Registry name of the server the hook is declared on.
+        server: String,
+        /// The hook's own name.
+        hook: String,
+        /// Which side of the call it fired on.
+        phase: HookPhase,
+        /// What went wrong, scrubbed of credentials.
         message: String,
     },
 

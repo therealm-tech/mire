@@ -3635,6 +3635,476 @@ async fn a_credential_sent_to_an_mcp_server_never_comes_back_in_the_journal() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// MCP — hooks around a tool call
+// ---------------------------------------------------------------------------
+
+/// A hook endpoint that answers `status` at `/hook`.
+async fn hook_endpoint(status: u16, body: &str) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/hook"))
+        .respond_with(ResponseTemplate::new(status).set_body_string(body))
+        .mount(&server)
+        .await;
+    server
+}
+
+/// `mcp.yaml` for a server whose tool call is wrapped in one hook.
+fn mcp_with_hook(mcp: &MockServer, hook: &str, phases: &str, extra: &str) -> String {
+    format!(
+        "servers:\n  - name: weather\n    url: {}/mcp\n    hooks:\n      - name: audit\n        \
+         on: {phases}\n        action:\n          kind: http\n          url: {hook}/hook\n{extra}",
+        mcp.uri()
+    )
+}
+
+#[tokio::test]
+async fn a_hook_fires_on_both_sides_of_a_tool_call_and_says_what_it_sent() {
+    let mcp = mcp_server(
+        weather_tool(),
+        vec![json!({
+            "resultType": "complete",
+            "content": [{"type": "text", "text": "21 and clear"}],
+            "isError": false,
+        })],
+    )
+    .await;
+    let hook = hook_endpoint(204, "").await;
+    let endpoint = MockServer::start().await;
+    model_using_a_tool(&endpoint).await;
+
+    let harness = Harness::start(&[
+        (
+            "mcp.yaml",
+            mcp_with_hook(&mcp, &hook.uri(), "[before, after]", ""),
+        ),
+        (
+            "chat.yaml",
+            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+        ),
+    ])
+    .await;
+
+    let (status, events) = harness
+        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .await;
+    assert_eq!(status, 200);
+
+    // Two firings, in the order the names promise.
+    let turn = &events.iter().find(|(name, _)| name == "turn").unwrap().1;
+    let hooks = turn["hooks"].as_array().expect("the hooks that fired");
+    assert_eq!(hooks.len(), 2, "{hooks:#?}");
+    assert_eq!(hooks[0]["phase"], "before");
+    assert_eq!(hooks[1]["phase"], "after");
+    for record in hooks {
+        assert_eq!(record["hook"], "audit");
+        assert_eq!(record["server"], "weather");
+        assert_eq!(record["tool"], "get_weather");
+        assert_eq!(record["action"], "http");
+        assert_eq!(record["method"], "POST");
+        assert_eq!(record["status"], 204);
+        assert_eq!(record["stoppedTheCall"], false);
+        assert!(record["error"].is_null());
+    }
+
+    // And what actually went out: the call itself, arguments included, with the
+    // result appearing only on the way back.
+    let sent = hook.received_requests().await.expect("hook requests");
+    assert_eq!(sent.len(), 2);
+    let before: Value = serde_json::from_slice(&sent[0].body).expect("before payload");
+    assert_eq!(before["phase"], "before");
+    assert_eq!(before["tool"], "get_weather");
+    assert_eq!(before["arguments"]["city"], "Paris");
+    assert!(before.get("result").is_none());
+
+    let after: Value = serde_json::from_slice(&sent[1].body).expect("after payload");
+    assert_eq!(after["phase"], "after");
+    assert_eq!(after["result"]["text"], "21 and clear");
+    assert_eq!(after["result"]["isError"], false);
+    assert!(after["result"]["latencyMs"].is_number());
+}
+
+#[tokio::test]
+async fn a_before_hook_that_says_no_stops_the_call_from_happening_at_all() {
+    let mcp = mcp_server(weather_tool(), vec![json!({"resultType": "complete"})]).await;
+    let hook = hook_endpoint(403, "policy: get_weather is not allowed here").await;
+    let endpoint = MockServer::start().await;
+    model_using_a_tool(&endpoint).await;
+
+    let harness = Harness::start(&[
+        ("mcp.yaml", mcp_with_hook(&mcp, &hook.uri(), "[before]", "")),
+        (
+            "chat.yaml",
+            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+        ),
+    ])
+    .await;
+
+    let (status, events) = harness
+        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .await;
+    assert_eq!(status, 200);
+
+    // The model still gets told, because recovering from it is the thing agent
+    // mode exists to watch — but the server was never asked.
+    let turn = &events.iter().find(|(name, _)| name == "turn").unwrap().1;
+    let tool = &turn["tools"][0];
+    let message = tool["error"].as_str().expect("the hook's refusal");
+    assert!(message.contains("audit"), "{message}");
+    assert!(message.contains("403"), "{message}");
+    assert!(message.contains("not allowed here"), "{message}");
+
+    assert_eq!(turn["hooks"][0]["stoppedTheCall"], true);
+
+    let calls = mcp
+        .received_requests()
+        .await
+        .expect("mcp requests")
+        .into_iter()
+        .filter(|request| {
+            request
+                .headers
+                .get("mcp-method")
+                .is_some_and(|value| value == "tools/call")
+        })
+        .count();
+    assert_eq!(
+        calls, 0,
+        "a gate that said no must not have let the call out"
+    );
+}
+
+#[tokio::test]
+async fn a_hook_told_to_step_aside_records_its_failure_and_lets_the_tool_answer() {
+    let mcp = mcp_server(
+        weather_tool(),
+        vec![json!({
+            "resultType": "complete",
+            "content": [{"type": "text", "text": "21 and clear"}],
+        })],
+    )
+    .await;
+    let hook = hook_endpoint(500, "the audit sink is having a day").await;
+    let endpoint = MockServer::start().await;
+    model_using_a_tool(&endpoint).await;
+
+    let harness = Harness::start(&[
+        (
+            "mcp.yaml",
+            mcp_with_hook(
+                &mcp,
+                &hook.uri(),
+                "[before]",
+                "        on_error: continue\n",
+            ),
+        ),
+        (
+            "chat.yaml",
+            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+        ),
+    ])
+    .await;
+
+    let (status, events) = harness
+        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .await;
+    assert_eq!(status, 200);
+
+    let turn = &events.iter().find(|(name, _)| name == "turn").unwrap().1;
+    let tool = &turn["tools"][0];
+    assert!(tool["error"].is_null(), "{tool:#?}");
+    assert!(tool["result"].as_str().unwrap().contains("21 and clear"));
+
+    // Stepped over, not swallowed: the failure is still in the record.
+    let record = &turn["hooks"][0];
+    assert_eq!(record["status"], 500);
+    assert_eq!(record["stoppedTheCall"], false);
+    assert!(
+        record["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("having a day"))
+    );
+}
+
+#[tokio::test]
+async fn a_hook_authenticates_with_the_registry_and_never_echoes_the_credential() {
+    let mcp = mcp_server(
+        weather_tool(),
+        vec![json!({"resultType": "complete", "content": [{"type": "text", "text": "21"}]})],
+    )
+    .await;
+    let hook = hook_endpoint(200, "ok").await;
+    let endpoint = MockServer::start().await;
+    model_using_a_tool(&endpoint).await;
+
+    // `PATH` stands in for a credential variable, as elsewhere in this file.
+    let secret = std::env::var("PATH").expect("PATH");
+
+    let harness = Harness::start(&[
+        (
+            "auth.yaml",
+            "providers:\n  - name: workload\n    kind: token\n    value:\n      env: PATH\n"
+                .to_owned(),
+        ),
+        (
+            "mcp.yaml",
+            mcp_with_hook(
+                &mcp,
+                &hook.uri(),
+                "[before]",
+                "          auth: workload\n          headers:\n            \
+                 x-api-key: 'k-{{ auth[\"workload\"] }}'\n",
+            ),
+        ),
+        (
+            "chat.yaml",
+            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+        ),
+    ])
+    .await;
+
+    let (status, events) = harness
+        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .await;
+    assert_eq!(status, 200);
+
+    // Both routes really carried it: the provider's own place, and the header
+    // the template put it in.
+    let sent = hook.received_requests().await.expect("hook requests");
+    assert_eq!(sent.len(), 1);
+    let authorization = sent[0].headers.get("authorization").expect("bearer");
+    assert_eq!(authorization, &format!("Bearer {secret}"));
+    let api_key = sent[0].headers.get("x-api-key").expect("api key");
+    assert_eq!(api_key, &format!("k-{secret}"));
+
+    // And none of it comes back. A transcript is durable.
+    let whole = serde_json::to_string(&events).expect("serialise");
+    assert!(
+        !whole.contains(&secret),
+        "a hook's credential must never echo back"
+    );
+    assert!(
+        whole.contains("x-api-key"),
+        "the header itself is still reported — only its value is not"
+    );
+}
+
+#[tokio::test]
+async fn a_hook_body_template_replaces_the_default_payload() {
+    let mcp = mcp_server(
+        weather_tool(),
+        vec![json!({"resultType": "complete", "content": [{"type": "text", "text": "21"}]})],
+    )
+    .await;
+    let hook = hook_endpoint(200, "ok").await;
+    let endpoint = MockServer::start().await;
+    model_using_a_tool(&endpoint).await;
+
+    let harness = Harness::start(&[
+        (
+            "mcp.yaml",
+            mcp_with_hook(
+                &mcp,
+                &hook.uri(),
+                "[before]",
+                "          body: '{\"text\": \"{{ tool }} wants {{ arguments.city }}\"}'\n",
+            ),
+        ),
+        (
+            "chat.yaml",
+            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+        ),
+    ])
+    .await;
+
+    let (status, _) = harness
+        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .await;
+    assert_eq!(status, 200);
+
+    let sent = hook.received_requests().await.expect("hook requests");
+    let body: Value = serde_json::from_slice(&sent[0].body).expect("payload");
+    assert_eq!(body["text"], "get_weather wants Paris");
+}
+
+/// A hook can attach the run's uploaded files, and does so as a real upload.
+///
+/// The whole point of `files:`: the endpoint gets a `multipart/form-data` with
+/// the payload beside the bytes, so an audit sink can archive the attachment
+/// rather than be told one existed. The trace, meanwhile, must describe the file
+/// and not repeat it.
+#[tokio::test]
+async fn a_hook_attaches_the_uploads_it_names_as_multipart_parts() {
+    let mcp = mcp_server(
+        weather_tool(),
+        vec![json!({"resultType": "complete", "content": [{"type": "text", "text": "21"}]})],
+    )
+    .await;
+    let hook = hook_endpoint(200, "ok").await;
+    let endpoint = MockServer::start().await;
+    model_using_a_tool(&endpoint).await;
+
+    let harness = Harness::start(&[
+        (
+            "mcp.yaml",
+            mcp_with_hook(
+                &mcp,
+                &hook.uri(),
+                "[before]",
+                "          files:\n            - .*\\.txt\n",
+            ),
+        ),
+        (
+            "chat.yaml",
+            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+        ),
+    ])
+    .await;
+
+    let (status, attached) = harness.upload("notes.txt", b"ping").await;
+    assert_eq!(status, 200);
+    let (status, ignored) = harness.upload("skip.bin", b"\x00\x01").await;
+    assert_eq!(status, 200);
+
+    let (status, events) = harness
+        .agent(json!({
+            "profile": "chat",
+            "prompt": "weather in Paris?",
+            "uploads": [
+                attached["id"].as_str().expect("id"),
+                ignored["id"].as_str().expect("id"),
+            ],
+        }))
+        .await;
+    assert_eq!(status, 200);
+
+    // What actually went out: one request, multipart, carrying both the payload
+    // and the file the pattern named.
+    let sent = hook.received_requests().await.expect("hook requests");
+    assert_eq!(sent.len(), 1);
+    let content_type = sent[0]
+        .headers
+        .get("content-type")
+        .expect("content-type")
+        .to_str()
+        .expect("text");
+    assert!(
+        content_type.starts_with("multipart/form-data; boundary="),
+        "{content_type}"
+    );
+
+    let body = String::from_utf8_lossy(&sent[0].body);
+    assert!(body.contains(r#"name="payload""#), "{body}");
+    assert!(body.contains(r#""tool":"get_weather""#), "{body}");
+    assert!(body.contains(r#"name="file""#), "{body}");
+    assert!(body.contains(r#"filename="notes.txt""#), "{body}");
+    // The bytes themselves, not a description of them.
+    assert!(body.contains("ping"), "{body}");
+    // And the upload the pattern did not name stayed home.
+    assert!(!body.contains("skip.bin"), "{body}");
+
+    // The trace names the file and its size, and carries none of its bytes.
+    let turn = &events.iter().find(|(name, _)| name == "turn").unwrap().1;
+    let record = &turn["hooks"][0];
+    assert_eq!(record["files"][0]["name"], "notes.txt");
+    assert_eq!(record["files"][0]["size"], 4);
+    assert_eq!(record["files"][0]["contentType"], "text/plain");
+    let request = record["request"].as_str().expect("the payload part");
+    assert!(request.contains(r#""tool":"get_weather""#), "{request}");
+    assert!(!request.contains("ping"), "{request}");
+}
+
+/// A `tools:` entry is a regex, and it has to match the whole name.
+///
+/// Both halves in one run: `get_.*` covers the tool that is about to be called,
+/// and `weather` — a substring of `get_weather`, and an exact name under nobody's
+/// rules — does not. The second is the one worth a test: a matcher that widened
+/// a gate by itself would be a hole nobody opened.
+#[tokio::test]
+async fn a_tool_pattern_covers_what_it_matches_and_not_what_it_merely_contains() {
+    let mcp = mcp_server(
+        weather_tool(),
+        vec![json!({"resultType": "complete", "content": [{"type": "text", "text": "21"}]})],
+    )
+    .await;
+    let hook = hook_endpoint(200, "ok").await;
+    let endpoint = MockServer::start().await;
+    model_using_a_tool(&endpoint).await;
+
+    let harness = Harness::start(&[
+        (
+            "mcp.yaml",
+            mcp_with_hook(
+                &mcp,
+                &hook.uri(),
+                "[before]",
+                "        tools:\n          - get_.*\n          - weather\n",
+            ),
+        ),
+        (
+            "chat.yaml",
+            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+        ),
+    ])
+    .await;
+
+    let (status, events) = harness
+        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .await;
+    assert_eq!(status, 200);
+
+    // Once, not twice: `get_.*` matched and `weather` did not, and a tool covered
+    // by two patterns is still one hook firing anyway.
+    let turn = &events.iter().find(|(name, _)| name == "turn").unwrap().1;
+    let hooks = turn["hooks"].as_array().expect("the hooks that fired");
+    assert_eq!(hooks.len(), 1, "{hooks:#?}");
+    assert_eq!(hooks[0]["tool"], "get_weather");
+    assert_eq!(hook.received_requests().await.expect("requests").len(), 1);
+}
+
+#[tokio::test]
+async fn a_hook_scoped_to_one_tool_leaves_the_others_alone() {
+    let mcp = mcp_server(
+        weather_tool(),
+        vec![json!({"resultType": "complete", "content": [{"type": "text", "text": "21"}]})],
+    )
+    .await;
+    let hook = hook_endpoint(200, "ok").await;
+    let endpoint = MockServer::start().await;
+    model_using_a_tool(&endpoint).await;
+
+    let harness = Harness::start(&[
+        (
+            "mcp.yaml",
+            mcp_with_hook(
+                &mcp,
+                &hook.uri(),
+                "[before, after]",
+                "        tools:\n          - delete_everything\n",
+            ),
+        ),
+        (
+            "chat.yaml",
+            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+        ),
+    ])
+    .await;
+
+    let (status, events) = harness
+        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .await;
+    assert_eq!(status, 200);
+
+    assert!(
+        hook.received_requests().await.expect("requests").is_empty(),
+        "a hook that named another tool has nothing to say about this one"
+    );
+    let turn = &events.iter().find(|(name, _)| name == "turn").unwrap().1;
+    assert!(turn["hooks"].as_array().is_none_or(Vec::is_empty));
+    assert!(turn["tools"][0]["error"].is_null());
+}
+
 #[tokio::test]
 async fn a_server_that_answers_a_stream_is_read_the_same_way() {
     let mcp = MockServer::start().await;
