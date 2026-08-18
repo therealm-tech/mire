@@ -1,5 +1,5 @@
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
-import type { DecodeTrace, StreamView, ToolInvocation } from '../api'
+import type { DecodeTrace, HookRecord, StreamView, ToolInvocation } from '../api'
 import {
   type Exchange,
   failed,
@@ -702,23 +702,75 @@ function HookCard({
 
       <Section title="Response">
         {hook.error ? (
-          <p className="flex flex-wrap items-baseline gap-2 text-xs">
-            <Badge tone="bad">{hook.stoppedTheCall ? 'refused' : 'failed, stepped over'}</Badge>
-            <span className="text-muted">{hook.error}</span>
-          </p>
+          <>
+            <p className="flex flex-wrap items-baseline gap-2 text-xs">
+              <Badge tone="bad">{hook.stoppedTheCall ? 'refused' : 'failed, stepped over'}</Badge>
+              <span className="text-muted">{hook.error}</span>
+            </p>
+            <p className="text-muted text-sm">
+              <Consequence hook={hook} />
+            </p>
+          </>
         ) : null}
 
         {hook.response.length > 0 ? <Body text={hook.response} /> : null}
         {hook.response.length > 0 ? null : (
-          <p className="text-muted text-sm">
-            {skipped === undefined
-              ? 'Nothing, which a hook is entitled to answer.'
-              : 'Nothing, because nobody was asked.'}
-          </p>
+          <p className="text-muted text-sm">{nothingCameBack(hook)}</p>
         )}
       </Section>
     </Card>
   )
+}
+
+/**
+ * What a hook's failure cost the tool call it fired on.
+ *
+ * The error above says what went wrong at the hook's own address; this says what
+ * it did to the run, which is the half a reader has to act on. The three cases
+ * really are three different events: a gate that stopped a call before it went
+ * out, a report on a call that already ran and cannot be taken back, and a
+ * failure the file asked to be stepped over.
+ */
+function Consequence({ hook }: { hook: HookRecord }) {
+  if (!hook.stoppedTheCall) {
+    return (
+      <>
+        The tool call was unaffected: this hook is{' '}
+        <span className="font-mono">on_error: continue</span>, so the failure is recorded and
+        nothing else.
+      </>
+    )
+  }
+  return hook.phase === 'before' ? (
+    <>
+      The tool call never went out: this hook is <span className="font-mono">on_error: fail</span>{' '}
+      and fires before the call, so the failure is the refusal.
+    </>
+  ) : (
+    <>
+      The tool call had already gone out and its result stands —{' '}
+      <span className="font-mono">on_error: fail</span> after the call reports the failure, it
+      cannot undo one.
+    </>
+  )
+}
+
+/**
+ * The empty-response line, which has three reasons to be empty and one used to
+ * cover all of them.
+ *
+ * "Nothing, which a hook is entitled to answer" is true of a `204` and a lie
+ * about a request that never got an answer at all — and it was printed under the
+ * error saying so, which is exactly where a reader stops trusting the panel.
+ */
+function nothingCameBack(hook: HookRecord): string {
+  if (hook.skipped !== undefined) {
+    return 'Nothing, because nobody was asked.'
+  }
+  if (hook.status === 0) {
+    return 'Nothing came back: the request never reached an answer, so there is no body to read.'
+  }
+  return 'Nothing, which a hook is entitled to answer.'
 }
 
 /**

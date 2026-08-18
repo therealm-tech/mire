@@ -1323,6 +1323,48 @@ describe('traffic', () => {
     expect(hook.getByText(/x-api-key: \*\*\*/)).toBeInTheDocument()
   })
 
+  it('says why a hook never got an answer, and what that cost the call', async () => {
+    const turn = turnFixture()
+    // `status: 0` with `stoppedTheCall: false` is the `on_error: continue` case
+    // the panel used to describe as a hook answering nothing, under an error
+    // saying the request never arrived.
+    turn.hooks = [
+      {
+        server: 'sandbox',
+        hook: 'audit',
+        phase: 'after',
+        tool: 'run_code',
+        action: 'http',
+        url: 'http://sandbox-mcp.sandbox-api:8080/v1/inputs',
+        method: 'POST',
+        headers: {},
+        request: '{"phase":"after","tool":"run_code"}',
+        files: [],
+        status: 0,
+        response: '',
+        latencyMs: 12,
+        error:
+          'could not reach the endpoint: dns error: failed to lookup address information: nodename nor servname provided',
+        stoppedTheCall: false,
+      },
+    ]
+    vi.stubGlobal('fetch', toolRunApi([turn]))
+    const user = userEvent.setup()
+    render(<App />)
+
+    await agentMode(user)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    const hook = within(await openCard(user, /Turn 1 · audit \(after\)/))
+    expect(hook.getByText('failed, stepped over')).toBeInTheDocument()
+    // The cause, which is the whole reason the URL alone was not enough.
+    expect(hook.getByText(/failed to lookup address information/)).toBeInTheDocument()
+    expect(hook.getByText(/The tool call was unaffected/)).toBeInTheDocument()
+    expect(hook.getByText(/never reached an answer/)).toBeInTheDocument()
+    // A request nobody answered is not a hook electing to say nothing.
+    expect(hook.queryByText(/entitled to answer/)).not.toBeInTheDocument()
+  })
+
   it('names the files a hook attached, and shows none of their bytes', async () => {
     const turn = turnFixture()
     turn.hooks = [

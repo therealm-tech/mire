@@ -256,8 +256,77 @@ fn classify(error: reqwest::Error, timeout: Duration) -> TransportError {
             after_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
         }
     } else {
-        TransportError::Send(Box::new(error))
+        TransportError::Send {
+            message: explain(&error),
+            source: Box::new(error),
+        }
     }
+}
+
+/// Why a request never produced a response, in words somebody can act on.
+///
+/// `reqwest` stops its own `Display` at `error sending request for url (…)`. The
+/// half that says *why* — a name that does not resolve, a refused connection, a
+/// certificate nobody here signed — is in the source chain, and nothing renders
+/// that by default. Printed next to the URL it repeats, that message tells the
+/// reader precisely what they were already looking at.
+///
+/// So: a first clause naming the kind of failure, then the causes it was hiding.
+/// One place, because every outbound call in this process — a profile's request,
+/// an MCP server, a hook, a token exchange — fails the same way and a reader
+/// should not have to learn two vocabularies for it.
+#[must_use]
+pub fn explain(error: &reqwest::Error) -> String {
+    // `is_timeout` and `is_connect` both walk the chain, so the order here is
+    // only about which word is the more useful one: a connect that ran out of
+    // time is a timeout first.
+    let lead = if error.is_timeout() {
+        "no answer within the timeout"
+    } else if error.is_connect() {
+        "could not reach the endpoint"
+    } else if error.is_redirect() {
+        "too many redirects"
+    } else if error.is_body() || error.is_decode() {
+        "the answer could not be read"
+    } else if error.is_builder() {
+        "the request could not be built"
+    } else {
+        "the request could not be sent"
+    };
+
+    match causes(error).as_slice() {
+        [] => lead.to_owned(),
+        causes => format!("{lead}: {}", causes.join(": ")),
+    }
+}
+
+/// The source chain, outermost first, minus everything it repeats.
+///
+/// `hyper` nests each cause inside the next one's text — `tcp connect error:
+/// dns error: …` — so walking the chain naively says the same thing three times
+/// and buries the sentence that matters. A cause the previous one already
+/// contains is dropped, and so is `client error (Connect)`, which is `hyper`
+/// restating the kind [`explain`] has just named in plain words.
+///
+/// `&dyn Error` because that is what [`std::error::Error::source`] hands back;
+/// there is no static shape to a chain of anonymous boxed errors.
+fn causes(error: &dyn std::error::Error) -> Vec<String> {
+    let mut kept: Vec<String> = Vec::new();
+    let mut next = error.source();
+
+    while let Some(cause) = next {
+        next = cause.source();
+        let text = cause.to_string();
+        if text.is_empty() || text.starts_with("client error (") {
+            continue;
+        }
+        if kept.last().is_some_and(|last| last.contains(&text)) {
+            continue;
+        }
+        kept.push(text);
+    }
+
+    kept
 }
 
 /// Why an exchange did not produce a response.
@@ -293,6 +362,116 @@ pub enum TransportError {
     },
 
     /// Connection, TLS or protocol failure.
-    #[error("request failed: {0}")]
-    Send(#[source] Box<reqwest::Error>),
+    ///
+    /// The message is [`explain`]'s, not `reqwest`'s: the cause chain is the
+    /// only part of a failed connection anybody can act on.
+    #[error("{message}")]
+    Send {
+        /// What went wrong, causes included.
+        message: String,
+        /// The failure as `reqwest` reported it.
+        #[source]
+        source: Box<reqwest::Error>,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+    use std::fmt;
+
+    use super::*;
+
+    /// A link in a chain that nests its cause's text, the way `hyper` does.
+    #[derive(Debug)]
+    struct Link {
+        text: String,
+        source: Option<Box<Link>>,
+    }
+
+    impl Link {
+        fn new(text: &str, source: Option<Link>) -> Self {
+            Self {
+                text: text.to_owned(),
+                source: source.map(Box::new),
+            }
+        }
+    }
+
+    impl fmt::Display for Link {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str(&self.text)
+        }
+    }
+
+    impl Error for Link {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            self.source
+                .as_deref()
+                .map(|link| link as &(dyn Error + 'static))
+        }
+    }
+
+    #[test]
+    fn a_cause_the_one_above_already_said_is_not_said_twice() {
+        // What a refused connection actually looks like: three links, one fact.
+        let chain = Link::new(
+            "error sending request",
+            Some(Link::new(
+                "client error (Connect)",
+                Some(Link::new(
+                    "tcp connect error: Connection refused (os error 61)",
+                    Some(Link::new("Connection refused (os error 61)", None)),
+                )),
+            )),
+        );
+
+        assert_eq!(
+            causes(&chain),
+            vec!["tcp connect error: Connection refused (os error 61)"]
+        );
+    }
+
+    #[test]
+    fn a_name_that_does_not_resolve_keeps_the_sentence_that_says_so() {
+        let chain = Link::new(
+            "error sending request",
+            Some(Link::new(
+                "client error (Connect)",
+                Some(Link::new(
+                    "dns error: failed to lookup address information: nodename nor servname provided",
+                    None,
+                )),
+            )),
+        );
+
+        let joined = causes(&chain).join(": ");
+        assert!(
+            joined.contains("failed to lookup address information"),
+            "{joined}"
+        );
+        assert!(!joined.contains("client error"), "{joined}");
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_says_more_than_the_url_did() {
+        // Port 1 on the loopback: nothing listens there, and the refusal is
+        // immediate, so this asserts on a real `reqwest` error without a server.
+        let client = Client::new();
+        let error = client
+            .get("http://127.0.0.1:1/")
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .expect_err("nothing listens on port 1");
+
+        let message = explain(&error);
+        assert!(
+            message.starts_with("could not reach the endpoint"),
+            "{message}"
+        );
+        // The point of the whole exercise: the reason, not just the address.
+        assert!(message.contains("connect error"), "{message}");
+        assert!(!message.contains("error sending request"), "{message}");
+    }
 }
