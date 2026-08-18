@@ -1337,6 +1337,37 @@ describe('traffic', () => {
     expect(tool.getByText('21')).toBeInTheDocument()
     // Whether it really ran is the first thing the card says.
     expect(tool.getByText(/called for real/)).toBeInTheDocument()
+    // And nothing was captured, so there is no section claiming otherwise.
+    expect(tool.queryByText('Captured')).not.toBeInTheDocument()
+  })
+
+  it('says what a call captured, and what the variable is worth', async () => {
+    const turn = turnFixture()
+    // The same run, with a capture rule that matched: the tool answered a
+    // session, and a hook later in the run will render it into an address. What
+    // that address comes out as is only explicable if this value is readable.
+    const capturing = {
+      ...turn,
+      tools: turn.tools.map((tool) => ({ ...tool, captured: { session: 'abc-123' } })),
+    }
+    vi.stubGlobal('fetch', toolRunApi([capturing]))
+    const user = userEvent.setup()
+    render(<App />)
+
+    await agentMode(user)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Turn 1 · get_weather/ })).toBeInTheDocument()
+    })
+
+    // The transcript names the variable without being opened at all.
+    expect(within(panel('Conversation')).getByText('session')).toBeInTheDocument()
+
+    // The card is where it is worth something.
+    const tool = within(await openCard(user, /Turn 1 · get_weather/))
+    expect(tool.getByText('Captured')).toBeInTheDocument()
+    expect(tool.getByText('session')).toBeInTheDocument()
+    expect(tool.getByText('"abc-123"')).toBeInTheDocument()
   })
 
   it('lands folded, and unfolds every exchange and back', async () => {

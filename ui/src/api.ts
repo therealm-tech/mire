@@ -323,6 +323,12 @@ const toolInvocationSchema = z.object({
   schemaErrors: z.array(z.string()),
   result: z.string(),
   error: z.string().optional(),
+  /**
+   * What this call put in the run's variables, per the profile's
+   * `agent.capture`. Omitted on the wire when a call captured nothing, which is
+   * every call in every profile that declares no rule.
+   */
+  captured: z.record(z.string(), z.unknown()).default({}),
 })
 
 /**

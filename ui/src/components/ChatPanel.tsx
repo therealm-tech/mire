@@ -341,6 +341,10 @@ function Activity({ item, onReveal }: { item: ActivityItem; onReveal: (id: strin
     <ul className="space-y-1 border-line border-l-2 pl-3">
       {item.tools.map((exchange) => {
         const tool = exchange.invocation
+        // Names, not values: a captured value is a session id on a good day and
+        // a paragraph on a bad one, and this row is a summary. What it is worth
+        // is one click away, on the card the name beside it opens.
+        const captured = Object.keys(tool.captured)
         return (
           <li key={exchange.id} className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-xs">
             {item.call === null ? (
@@ -378,6 +382,11 @@ function Activity({ item, onReveal }: { item: ActivityItem; onReveal: (id: strin
             {tool.error ? <Badge tone="bad">tool failed</Badge> : null}
             {tool.reportedError ? <Badge tone="warn">the tool reported a problem</Badge> : null}
             {tool.schemaErrors.length > 0 ? <Badge tone="warn">schema</Badge> : null}
+            {captured.length > 0 ? (
+              <span className="text-muted">
+                captured <span className="font-mono">{captured.join(', ')}</span>
+              </span>
+            ) : null}
           </li>
         )
       })}

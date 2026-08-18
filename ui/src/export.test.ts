@@ -53,6 +53,9 @@ describe('runExport', () => {
           reportedError: false,
           schemaErrors: [],
           result: '{"temp": 21}',
+          // Out with the rest of it: what a call captured is the part a reader
+          // needs to explain the address a hook went to two turns later.
+          captured: { session: 'abc-123' },
         },
       },
     ] as Exchange[]
