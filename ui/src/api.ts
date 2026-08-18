@@ -429,9 +429,10 @@ export const hookRecordSchema = z.object({
   /** Whether this failure is what stopped the tool call. */
   stoppedTheCall: z.boolean(),
   /**
-   * The `when_defined:` variable that was not set, when that is why nothing was
-   * sent. Not a failure: `on_error` does not apply, and the tool call went ahead
-   * untouched. Absent on every hook that did fire.
+   * The `if:` condition that came back false, when that is why nothing was sent.
+   * Not a failure: `on_error` does not apply, and the tool call went ahead
+   * untouched. Absent on every hook that did fire — and on one whose condition
+   * could not be evaluated at all, which fills `error` instead.
    */
   skipped: z.string().optional(),
 })

@@ -322,10 +322,10 @@ export function failed(exchange: Exchange, expectUnauthorized: boolean): boolean
     }
     case 'hook': {
       const hook = exchange.record
-      // A hook that sat a call out did not fail: `when_defined:` said "not yet",
-      // nothing was sent, and the tool call went ahead untouched. Its `status: 0`
-      // means "never sent", not "never answered", and a filter that pulled it in
-      // would say a run went wrong every time a session is opened partway.
+      // A hook that sat a call out did not fail: `if:` said no, nothing was
+      // sent, and the tool call went ahead untouched. Its `status: 0` means
+      // "never sent", not "never answered", and a filter that pulled it in would
+      // say a run went wrong every time a session is opened partway.
       if (hook.skipped !== undefined) {
         return false
       }

@@ -4308,7 +4308,7 @@ async fn a_server_header_picks_up_a_session_a_tool_opened_on_an_earlier_turn() {
 }
 
 #[tokio::test]
-async fn a_hook_waits_for_its_variable_then_fires_once_a_call_has_captured_one() {
+async fn a_hook_sits_out_the_calls_its_condition_refuses_then_fires_once_it_holds() {
     let mcp = mcp_server(
         weather_tool(),
         vec![
@@ -4342,7 +4342,7 @@ async fn a_hook_waits_for_its_variable_then_fires_once_a_call_has_captured_one()
             "mcp.yaml",
             format!(
                 "servers:\n  - name: weather\n    url: {}/mcp\n    hooks:\n      - name: audit\n        \
-                 on:\n          - after\n        when_defined:\n          - session\n        actions:\n          \
+                 on:\n          - after\n        if: '{{{{ vars.session is defined }}}}'\n        actions:\n          \
                  - http:\n              url: {}/sessions/{{{{ vars.session }}}}/audit\n",
                 mcp.uri(),
                 hook.uri()
@@ -4367,11 +4367,11 @@ async fn a_hook_waits_for_its_variable_then_fires_once_a_call_has_captured_one()
         .collect();
     assert!(turns.len() >= 2, "{turns:#?}");
 
-    // Turn one: nothing captured, so the hook sits it out — recorded, naming
-    // what it waited for, and emphatically not a failure.
+    // Turn one: nothing captured, so the condition is false and the hook sits it
+    // out — recorded, quoting what it was asked, and emphatically not a failure.
     let first = turns[0]["hooks"].as_array().expect("the hooks of turn one");
     assert_eq!(first.len(), 1, "{first:#?}");
-    assert_eq!(first[0]["skipped"], "session");
+    assert_eq!(first[0]["skipped"], "{{ vars.session is defined }}");
     assert_eq!(first[0]["status"], 0);
     assert_eq!(first[0]["stoppedTheCall"], false);
     assert!(first[0]["error"].is_null(), "{:#?}", first[0]);

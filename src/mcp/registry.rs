@@ -21,7 +21,8 @@ use url::Url;
 use super::client::{McpClient, McpServer};
 use super::headers::HeaderTemplates;
 use super::hook::{
-    Hook, HookAction, HookBody, HookPhase, HookUrl, HttpAction, NamePattern, OnError, PartSpec,
+    Hook, HookAction, HookBody, HookCondition, HookPhase, HookUrl, HttpAction, NamePattern,
+    OnError, PartSpec,
 };
 use crate::issue::LoadIssue;
 
@@ -77,10 +78,10 @@ pub struct HookDescriptor {
     /// Tools it applies to, as the patterns `mcp.yaml` wrote. Empty means every
     /// tool.
     pub tools: Vec<String>,
-    /// Variables it waits for before firing at all. Empty means it fires
-    /// whatever the run has captured.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub when_defined: Vec<String>,
+    /// The `if:` condition it is fired under, as `mcp.yaml` wrote it. Absent
+    /// means it fires on every call it covers.
+    #[serde(rename = "if", skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
     /// What its failure does to the call.
     pub on_error: OnError,
     /// What it does when it fires, in order.
@@ -311,14 +312,13 @@ struct HookConfig {
     /// the default — is every tool.
     #[serde(default)]
     tools: Vec<String>,
-    /// Variables that must have been captured for it to fire. Empty — the
-    /// default — is no condition.
+    /// What has to hold for it to fire, as a `MiniJinja` expression. Absent —
+    /// the default — is no condition.
     ///
-    /// Plain names, deliberately: this asks whether a value exists, and a
-    /// pattern here would invite `.*`, which is "fire once anything at all has
-    /// been captured" and means nothing.
-    #[serde(default)]
-    when_defined: Vec<String>,
+    /// Spelled `if:` in the file, which is a keyword here; the field carries the
+    /// longer name and serde does the translating.
+    #[serde(default, rename = "if")]
+    condition: Option<String>,
     /// What its failure does to the call. `fail` by default.
     #[serde(default)]
     on_error: OnError,
@@ -434,11 +434,21 @@ fn compile_hooks(server: &str, declared: &[HookConfig]) -> Result<Vec<Hook>, Str
             actions.push(HookAction::Http(compile_http(&label, &declared.http)?));
         }
 
+        // Compiled here for the same reason `tools:` is: a condition that does
+        // not parse is a hook that fires on nothing or on everything, and the
+        // first `tools/call` is too late to find that out.
+        let condition = config
+            .condition
+            .as_deref()
+            .map(HookCondition::compile)
+            .transpose()
+            .map_err(|why| format!("{label}: `if` {why}"))?;
+
         hooks.push(Hook {
             name: config.name.clone(),
             phases,
             tools,
-            when_defined: config.when_defined.clone(),
+            condition,
             on_error: config.on_error,
             actions,
         });
@@ -552,7 +562,7 @@ fn describe(hook: &Hook) -> HookDescriptor {
         // The patterns as written. The compiled form carries anchors this added,
         // and a UI showing those would be quoting something nobody typed.
         tools: hook.tools.iter().map(|p| p.as_str().to_owned()).collect(),
-        when_defined: hook.when_defined.clone(),
+        condition: hook.condition.as_ref().map(|c| c.source().to_owned()),
         on_error: hook.on_error,
         actions: hook.actions.iter().map(describe_action).collect(),
     }
@@ -851,33 +861,98 @@ servers:
         );
     }
 
-    #[test]
-    fn a_hook_loads_the_variables_it_waits_for() {
-        let dir = write(
-            "hook-when-defined",
+    /// An `mcp.yaml` whose one hook is fired under `condition`.
+    fn one_condition(condition: &str) -> String {
+        format!(
             "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      - name: audit\n        \
-             on:\n          - after\n        when_defined:\n          - session\n          - job\n        actions:\n          - http:\n              \
-             url: https://audit.internal/events\n",
+             on:\n          - after\n        if: '{condition}'\n        actions:\n          - http:\n              \
+             url: https://audit.internal/events\n"
+        )
+    }
+
+    #[test]
+    fn a_hook_loads_the_condition_it_fires_under() {
+        let dir = write(
+            "hook-if",
+            &one_condition("{{ vars.session is defined and vars.job is defined }}"),
         );
         let registry = McpRegistry::load(&dir, &Client::new());
 
         assert!(registry.issues().is_empty(), "{:?}", registry.issues());
         let hook = &registry.get("files").unwrap().server().hooks[0];
-        assert_eq!(hook.when_defined, vec!["session", "job"]);
+        assert_eq!(
+            hook.condition.as_ref().map(HookCondition::source),
+            Some("{{ vars.session is defined and vars.job is defined }}")
+        );
 
-        // And it is advertised, because "what is this about to do" has to cover
-        // a hook that will sit out most of a run.
+        // And it is advertised, as written, because "what is this about to do"
+        // has to cover a hook that will sit out most of a run.
         let advertised = &registry.descriptors()[0].hooks[0];
-        assert_eq!(advertised.when_defined, vec!["session", "job"]);
+        assert_eq!(
+            advertised.condition.as_deref(),
+            Some("{{ vars.session is defined and vars.job is defined }}")
+        );
     }
 
     #[test]
-    fn a_hook_that_waits_for_nothing_is_the_ordinary_case() {
+    fn a_condition_may_be_written_without_the_delimiters() {
+        let dir = write("hook-if-bare", &one_condition("vars.session is defined"));
+        let registry = McpRegistry::load(&dir, &Client::new());
+
+        assert!(registry.issues().is_empty(), "{:?}", registry.issues());
+        let hook = &registry.get("files").unwrap().server().hooks[0];
+        // Kept as written, because that is what the trace will quote back.
+        assert_eq!(
+            hook.condition.as_ref().map(HookCondition::source),
+            Some("vars.session is defined")
+        );
+    }
+
+    #[test]
+    fn a_condition_that_does_not_parse_is_caught_at_startup() {
+        let dir = write("hook-if-bad", &one_condition("{{ vars.session is }}"));
+        let registry = McpRegistry::load(&dir, &Client::new());
+
+        // Compiled at load, like `tools:` — a condition nobody can evaluate is a
+        // hook that fires on nothing, and the first tool call is too late.
+        assert_eq!(registry.issues().len(), 1);
+        assert!(
+            registry.issues()[0].message.contains("`if`"),
+            "{:?}",
+            registry.issues()
+        );
+        assert!(
+            registry.issues()[0].message.contains("audit"),
+            "{:?}",
+            registry.issues()
+        );
+    }
+
+    #[test]
+    fn a_condition_that_is_a_template_rather_than_an_expression_is_refused() {
+        let dir = write(
+            "hook-if-template",
+            &one_condition("{% if vars.session %}yes{% endif %}"),
+        );
+        let registry = McpRegistry::load(&dir, &Client::new());
+
+        // It would render to `yes` or to the empty string, and only one of those
+        // is falsy by accident. Refused rather than quietly accepted.
+        assert_eq!(registry.issues().len(), 1);
+        assert!(
+            registry.issues()[0].message.contains("`if`"),
+            "{:?}",
+            registry.issues()
+        );
+    }
+
+    #[test]
+    fn a_hook_with_no_condition_is_the_ordinary_case() {
         let dir = write("hook-no-condition", WITH_HOOK);
         let registry = McpRegistry::load(&dir, &Client::new());
 
         let hook = &registry.get("files").unwrap().server().hooks[0];
-        assert!(hook.when_defined.is_empty());
+        assert!(hook.condition.is_none());
     }
 
     #[test]

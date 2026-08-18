@@ -458,9 +458,9 @@ function ToolRow({
  * the same as not being told.
  *
  * `did not fire` is a first-class outcome here rather than a failure dressed up
- * as one. A hook waiting on `when_defined:` is doing exactly what it was asked
- * to, and the row says what it is waiting for, because that is the whole answer
- * to the question it raises.
+ * as one. A hook whose `if:` came back false is doing exactly what it was asked
+ * to, and the row quotes the condition, because that is the whole answer to the
+ * question it raises.
  */
 function HookRow({
   exchange,
@@ -488,8 +488,8 @@ function HookRow({
         </span>
       ) : (
         <span className="text-muted">
-          sat out <span className="font-mono">{hook.tool}</span>, waiting for{' '}
-          <span className="font-mono">{hook.skipped}</span>
+          sat out <span className="font-mono">{hook.tool}</span>:{' '}
+          <span className="font-mono">{hook.skipped}</span> was false
         </span>
       )}
       {/* The reason travels with the badge: a row that says a call was refused
