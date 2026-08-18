@@ -8,6 +8,7 @@
 //! # Layout
 //!
 //! * [`profile`] — the YAML files, read-only.
+//! * [`prompt`] — the questions worth keeping, read-only like the profiles.
 //! * [`config`] — the configuration directory, watched and hot-reloaded as one
 //!   atomic snapshot (profiles *and* auth registry together).
 //! * [`auth`] — the auth registry, orthogonal to the profiles so one model can be
@@ -43,6 +44,7 @@ pub mod mcp;
 pub mod message;
 pub mod pattern;
 pub mod profile;
+pub mod prompt;
 pub mod redact;
 pub mod render;
 pub mod script;

@@ -1,4 +1,6 @@
+import type { PromptsResponse } from '../api'
 import { Button, Field, INPUT_CLASSES, Panel } from './primitives'
+import { SavedPrompts } from './SavedPrompts'
 
 /**
  * The input side of an embedding profile.
@@ -9,6 +11,7 @@ import { Button, Field, INPUT_CLASSES, Panel } from './primitives'
  */
 export function EmbeddingRequest({
   input,
+  prompts,
   repeat,
   includeVectors,
   busy,
@@ -19,6 +22,8 @@ export function EmbeddingRequest({
   onStop,
 }: {
   input: string
+  /** The same library the composer offers: a saved text is a text either box takes. */
+  prompts: PromptsResponse
   repeat: number
   includeVectors: boolean
   busy: boolean
@@ -31,6 +36,13 @@ export function EmbeddingRequest({
   return (
     <Panel title="Input">
       <div className="space-y-3">
+        <SavedPrompts
+          prompts={prompts.prompts}
+          issues={prompts.issues}
+          disabled={busy}
+          onPick={onInput}
+        />
+
         <Field label="One text per line">
           <textarea
             value={input}

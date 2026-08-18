@@ -18,6 +18,7 @@ use crate::issue::LoadIssue;
 use crate::message::Message;
 use crate::profile::loader::ProfileSet;
 use crate::profile::{Profile, ProfileKind};
+use crate::prompt::{Prompt, PromptRegistry};
 use crate::redact::Secret;
 
 /// One profile, as listed.
@@ -73,6 +74,26 @@ impl From<&ProfileSet> for ProfilesResponse {
         Self {
             profiles: set.iter().map(|profile| profile.as_ref().into()).collect(),
             issues: set.issues().to_vec(),
+        }
+    }
+}
+
+/// Every prompt the UI can drop in the box.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptsResponse {
+    /// Declared prompts, in the order `prompts.yaml` writes them — a library is
+    /// a list somebody arranged, so it is not re-sorted on the way out.
+    pub prompts: Vec<Prompt>,
+    /// Entries of `prompts.yaml` that did not load.
+    pub issues: Vec<LoadIssue>,
+}
+
+impl From<&PromptRegistry> for PromptsResponse {
+    fn from(registry: &PromptRegistry) -> Self {
+        Self {
+            prompts: registry.prompts().to_vec(),
+            issues: registry.issues().to_vec(),
         }
     }
 }

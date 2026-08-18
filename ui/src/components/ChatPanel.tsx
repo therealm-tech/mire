@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { z } from 'zod'
-import type { Message, UploadedFile } from '../api'
+import type { Message, PromptsResponse, UploadedFile } from '../api'
 import {
   type ActivityItem,
   type ChatItem,
@@ -15,6 +15,7 @@ import { Markdown } from './Markdown'
 import { McpProtocol } from './McpProtocol'
 import { McpServers } from './McpServers'
 import { Badge, Button, INPUT_CLASSES, Panel } from './primitives'
+import { SavedPrompts } from './SavedPrompts'
 
 /**
  * How **Send** sends what is in the box.
@@ -56,6 +57,7 @@ export function ChatPanel({
   busy,
   stopped,
   prompt,
+  prompts,
   maxIterations,
   mode,
   error,
@@ -87,6 +89,8 @@ export function ChatPanel({
   /** The last run was called off rather than finished. */
   stopped: boolean
   prompt: string
+  /** The library `prompts.yaml` declares, offered above the box. */
+  prompts: PromptsResponse
   maxIterations: number
   /** How **Send** sends: the loop on every turn, or one turn read chunk by chunk. */
   mode: RunMode
@@ -197,6 +201,7 @@ export function ChatPanel({
 
         <Composer
           prompt={prompt}
+          prompts={prompts}
           turns={turns}
           busy={busy}
           maxIterations={maxIterations}
@@ -617,6 +622,7 @@ export function formatBytes(bytes: number): string {
 
 function Composer({
   prompt,
+  prompts,
   turns,
   busy,
   maxIterations,
@@ -640,6 +646,7 @@ function Composer({
   onStop,
 }: {
   prompt: string
+  prompts: PromptsResponse
   turns: number
   busy: boolean
   maxIterations: number
@@ -678,6 +685,17 @@ function Composer({
 
   return (
     <div className="space-y-2 border-line border-t pt-3">
+      {/*
+        Above the box rather than beside **Send**: it fills the box, so it
+        belongs on the same side of it as the thing it fills.
+      */}
+      <SavedPrompts
+        prompts={prompts.prompts}
+        issues={prompts.issues}
+        disabled={busy}
+        onPick={onPrompt}
+      />
+
       <textarea
         value={prompt}
         aria-label="Message"

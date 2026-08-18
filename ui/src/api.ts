@@ -44,6 +44,23 @@ export const profilesResponseSchema = z.object({
   issues: z.array(loadIssueSchema),
 })
 
+/**
+ * One saved prompt, as `prompts.yaml` declares it.
+ *
+ * A name and its text, and nothing else: what a message becomes on the wire is
+ * still the profile's template's decision, so a prompt has nothing to say about
+ * where it goes.
+ */
+export const promptSchema = z.object({
+  name: z.string(),
+  text: z.string(),
+})
+
+export const promptsResponseSchema = z.object({
+  prompts: z.array(promptSchema),
+  issues: z.array(loadIssueSchema),
+})
+
 /** A live browser login. Never carries a token — that stays on the server. */
 export const sessionViewSchema = z.object({
   subject: z.string().optional(),
@@ -475,6 +492,8 @@ export type LoadIssue = z.infer<typeof loadIssueSchema>
 export type ProfileKind = z.infer<typeof profileKindSchema>
 export type ProfileSummary = z.infer<typeof profileSummarySchema>
 export type ProfilesResponse = z.infer<typeof profilesResponseSchema>
+export type Prompt = z.infer<typeof promptSchema>
+export type PromptsResponse = z.infer<typeof promptsResponseSchema>
 export type AuthDescriptor = z.infer<typeof authDescriptorSchema>
 export type AuthResponse = z.infer<typeof authResponseSchema>
 export type McpDescriptor = z.infer<typeof mcpDescriptorSchema>
@@ -581,6 +600,10 @@ async function request<T>(path: string, schema: z.ZodType<T>, init?: RequestInit
 
 export function fetchProfiles(): Promise<ProfilesResponse> {
   return request('api/profiles', profilesResponseSchema)
+}
+
+export function fetchPrompts(): Promise<PromptsResponse> {
+  return request('api/prompts', promptsResponseSchema)
 }
 
 export function fetchAuth(): Promise<AuthResponse> {

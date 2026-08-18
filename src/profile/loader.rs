@@ -21,7 +21,11 @@ pub const AUTH_REGISTRY_FILE: &str = "auth.yaml";
 /// A registry that got read as a profile would come back as a load issue about a
 /// field nobody wrote — confusing, and it would happen the first time anyone
 /// added `mcp.yaml`.
-const RESERVED: [&str; 2] = [AUTH_REGISTRY_FILE, crate::mcp::registry::MCP_REGISTRY_FILE];
+const RESERVED: [&str; 3] = [
+    AUTH_REGISTRY_FILE,
+    crate::mcp::registry::MCP_REGISTRY_FILE,
+    crate::prompt::PROMPT_REGISTRY_FILE,
+];
 
 /// Everything loaded from the profiles directory: what parsed, and what did not.
 #[derive(Debug, Clone, Default)]
@@ -150,6 +154,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("auth.yaml"), "providers: []\n").unwrap();
         std::fs::write(dir.join("mcp.yaml"), "servers: []\n").unwrap();
+        std::fs::write(dir.join("prompts.yaml"), "prompts: []\n").unwrap();
 
         let set = load_dir(&dir).unwrap();
         assert!(set.is_empty());

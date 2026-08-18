@@ -1,0 +1,48 @@
+# Saved prompts, offered above the box in the UI.
+#
+# The other half of a reproducible test. A profile says how to reach an endpoint;
+# these say what to send it — the question that makes it call the tool, the one
+# that makes it refuse, the paragraph that reproduces the bug. Typing those from
+# memory each time is how a comparison quietly stops being one.
+#
+# A prompt is a name and its text, and nothing else. Where it goes is the
+# profile's business, and what it becomes on the wire is the template's: picking
+# one here fills the box and stops there, so the same text can be replayed
+# against every endpoint in this directory without saying anything about them.
+#
+# Read-only, like everything else here. This file is the source of truth, your
+# editor writes it, and `mire` picks the change up without a restart. A bad entry
+# is reported in the UI and skipped; the rest still work.
+---
+prompts:
+  # The smallest signal there is. If this comes back, the endpoint answers.
+  - name: ping
+    text: ping
+
+  # Does tool calling work? `qwen3` declares `get_weather`, both simulated and —
+  # through `mcp.yaml` — for real, so this is the question that tells the two
+  # apart in the transcript.
+  - name: call a tool
+    text: What is the weather in Lyon right now?
+
+  # Long enough to watch arriving. On **Chat** this is where time to first token
+  # stops being a number and starts being something you can see.
+  - name: stream something
+    text: |
+      Explain, in about three hundred words, why a checksum is not a signature.
+      Use headings and a short list, so the markdown rendering has something to
+      chew on.
+
+  # Multi-line text arrives whole. For an embedding profile the box is one text
+  # per line, so this is two of them.
+  - name: two texts
+    text: |
+      the cat sat on the mat
+      le chat était assis sur le tapis
+
+  # Does anything actually enforce the shape you asked for? A refusal here is a
+  # finding, not a failure.
+  - name: strict json
+    text: |
+      Answer with a JSON object and nothing else — no prose, no fences.
+      Keys: "city" (string), "temperature_c" (number), "measured_at" (RFC 3339).

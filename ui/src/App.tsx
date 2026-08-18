@@ -12,10 +12,12 @@ import {
   fetchAuth,
   fetchMcp,
   fetchProfiles,
+  fetchPrompts,
   logout,
   type McpResponse,
   type Message,
   type ProfilesResponse,
+  type PromptsResponse,
   runAgent,
   startLogin,
   streamCall,
@@ -144,6 +146,7 @@ export function App() {
   const [profiles, setProfiles] = useState<ProfilesResponse | null>(null)
   const [auth, setAuth] = useState<AuthResponse | null>(null)
   const [mcp, setMcp] = useState<McpResponse | null>(null)
+  const [prompts, setPrompts] = useState<PromptsResponse | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
 
   // Remembered across a reload, all of it small and none of it secret — see
@@ -259,11 +262,12 @@ export function App() {
   }, [])
 
   useEffect(() => {
-    Promise.all([fetchProfiles(), fetchAuth(), fetchMcp()])
-      .then(([loadedProfiles, loadedAuth, loadedMcp]) => {
+    Promise.all([fetchProfiles(), fetchAuth(), fetchMcp(), fetchPrompts()])
+      .then(([loadedProfiles, loadedAuth, loadedMcp, loadedPrompts]) => {
         setProfiles(loadedProfiles)
         setAuth(loadedAuth)
         setMcp(loadedMcp)
+        setPrompts(loadedPrompts)
         // A remembered name is only good while the file behind it still is:
         // profiles are a directory somebody edits, and coming back to a
         // selection that no longer exists would be an empty page with no
@@ -276,6 +280,7 @@ export function App() {
           profiles: loadedProfiles.profiles.length,
           providers: loadedAuth.providers.length,
           servers: loadedMcp.servers.length,
+          prompts: loadedPrompts.prompts.length,
         })
       })
       .catch((error: unknown) => {
@@ -776,7 +781,7 @@ export function App() {
     )
   }
 
-  if (!profiles || !auth || !mcp) {
+  if (!profiles || !auth || !mcp || !prompts) {
     return (
       <main className="p-6">
         <Spinner label="Loading configuration…" />
@@ -882,6 +887,7 @@ export function App() {
               busy={busy}
               stopped={stopped}
               prompt={prompt}
+              prompts={prompts}
               maxIterations={maxIterations}
               mode={mode}
               error={callError ? callError.body : null}
@@ -912,6 +918,7 @@ export function App() {
             <>
               <EmbeddingRequest
                 input={input}
+                prompts={prompts}
                 repeat={repeat}
                 includeVectors={includeVectors}
                 busy={busy}
