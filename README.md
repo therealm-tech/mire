@@ -1775,11 +1775,14 @@ quotes it back at us in an error message.
 
 ### CI and releases
 
-`pre-commit` **is** the CI gate. The `quality` workflow installs the tools the
-hooks expect and runs `pre-commit run --all-files` — nothing is checked in CI
-that a local run does not check, and nothing is checked twice. A second job runs
-Trivy over the repository. Whatever is deliberately waived lives in
-`.trivyignore.yaml`, in one place, with the reasoning attached.
+`pre-commit` **is** the lint gate. The `quality` workflow installs the tools the
+hooks expect and runs `pre-commit run --all-files` — nothing is linted in CI
+that a local run does not lint, and nothing is linted twice. The hooks stop
+short of the test suites: `cargo test` and `vitest` are two jobs of their own in
+the same workflow, so a commit stays fast and the suites still gate every push
+and every pull request. A fourth job runs Trivy over the repository. Whatever
+is deliberately waived lives in `.trivyignore.yaml`, in one place, with the
+reasoning attached.
 
 Tagging `vX.Y.Z` releases. The tag must match the `version` in `Cargo.toml` — the
 release fails on the mismatch rather than publishing a binary that lies about
