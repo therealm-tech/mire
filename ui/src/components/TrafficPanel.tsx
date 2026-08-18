@@ -702,13 +702,20 @@ function HookCard({
 }
 
 /**
- * One tool invocation, in the same three parts.
+ * One tool invocation, in the same three parts — four, when it captured.
  *
  * The arguments the model produced are the request, the schema check is the
  * decode — the only reading anyone does of them — and what the tool handed back
  * is the response. Whether it really ran is the first thing the card says,
  * because a simulated result that looks plausible is the easiest way to believe
  * an integration works when nothing has been wired up.
+ *
+ * **Captured** is the fourth part, and only shows up when `agent.capture` pulled
+ * something out of that answer. It is the one part that is not a wire: it is
+ * what a later hook's URL, header or body will render, and reading it here is
+ * the difference between a rendered address you can explain and one you cannot.
+ * A rule that matched nothing captures nothing, so the section is simply absent
+ * — which is the same answer, and the log says which path was tried.
  */
 function ToolCard({
   exchange,
@@ -722,6 +729,7 @@ function ToolCard({
   onToggle: () => void
 }) {
   const tool: ToolInvocation = exchange.invocation
+  const captured = Object.entries(tool.captured)
 
   return (
     <Card
@@ -788,6 +796,23 @@ function ToolCard({
         {/* Often not JSON at all — a tool is entitled to answer prose. */}
         <Body text={tool.result} />
       </Section>
+
+      {captured.length > 0 ? (
+        <Section title="Captured">
+          {/* Name, then value, laid out the way the tree lays out a field —
+              because that is what it is: a field of the answer above, under the
+              name a template will call it by. */}
+          <ul className="overflow-x-auto font-mono text-xs">
+            {captured.map(([name, value]) => (
+              <li key={name} className="py-px">
+                <span className="text-muted">{name}</span>
+                <span className="text-faint">: </span>
+                <JsonTree value={value} />
+              </li>
+            ))}
+          </ul>
+        </Section>
+      ) : null}
     </Card>
   )
 }

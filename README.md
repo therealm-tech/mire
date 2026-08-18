@@ -274,8 +274,8 @@ Four things follow, each of which is a decision:
   between and their results stay out of it: replaying them into the next request
   without their results is how you get a `400` from an endpoint that was working
   fine. They still appear in the transcript, where they happened, as a line
-  naming the tool and whether it really ran — the full exchange is in
-  **Traffic**. A tool call that *does* land in the history — from a streamed
+  naming the tool, whether it really ran, and any variable it captured — the
+  full exchange, and what that variable is worth, is in **Traffic**. A tool call that *does* land in the history — from a streamed
   send, which does not loop, or from a run that stopped on one — is flagged on
   its bubble, because most endpoints refuse the next turn until it has a result.
 - **Nothing waits for the endpoint.** The question appears the moment you press
@@ -400,6 +400,7 @@ Three kinds of card, each showing what went out and what came back:
 | **Request** | Method, URL, masked headers, body, *Copy as curl* | The JSON-RPC that went out, with its headers and the revision it went out on | The arguments the model produced |
 | **Decode** | Which configured path matched which field, which missed, and everything that was tried | — | Whether those arguments match the schema the tool was declared with |
 | **Response** | Status, latency, decoded content and tool calls, whatever the endpoint said went wrong, stream counters, the body, the raw JSON as a tree | Status, latency, and the JSON-RPC that came back | What the tool handed back, and whether it reported a problem |
+| **Captured** | — | — | Every variable [`agent.capture`](#keeping-something-a-tool-call-answered) pulled out of that answer, by name and by worth — only when a rule matched |
 
 **The transcript points at the cards.** A tool row in the conversation is a
 summary of one of these, so it takes you to it: the tool's name opens its own
@@ -1393,8 +1394,11 @@ Nothing about it is silent. Every tool card in the trace carries `captured`, wha
 ```
 
 so a rule that quietly matched nothing is a fact you read there rather than a
-mystery in a rendered URL. A variable a template names and nobody captured fails
-loudly, and the message **names the variable** — `undefined value — `session` is
+mystery in a rendered URL. The UI reads it out: the tool's row in the transcript
+names what that call captured, and the tool's card in **Traffic** carries a
+**Captured** section with the value each name is worth — the same value the hook
+that fired after it rendered. A variable a template names and nobody captured
+fails loudly, and the message **names the variable** — `undefined value — `session` is
 not set`, the way a header template already reports a missing `env` or `auth` —
 rather than rendering away to `/sessions//tool-calls`, which is a different
 endpoint that may well answer `200`. The bag lasts one run, is shared by every
