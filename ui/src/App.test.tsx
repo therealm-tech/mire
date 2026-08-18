@@ -2004,7 +2004,7 @@ describe('conversation', () => {
     expect(sent).toHaveLength(1)
   })
 
-  it('asks the last answer again without it, and offers that on no other turn', async () => {
+  it('asks the last answer again without it', async () => {
     const { fetchMock, sent } = recordingApi(['first answer', 'second answer'])
     vi.stubGlobal('fetch', fetchMock)
 
@@ -2016,10 +2016,6 @@ describe('conversation', () => {
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(1))
 
-    // Only the answer, which is the last turn — the question underneath it has
-    // an answer after it, and re-running from there would drop one silently.
-    expect(screen.queryByRole('button', { name: 'Retry turn 1' })).not.toBeInTheDocument()
-
     // Asking again without the answer is the far more interesting question:
     // does it still say that if it never said it the first time?
     await user.click(await screen.findByRole('button', { name: 'Retry turn 2' }))
@@ -2030,6 +2026,77 @@ describe('conversation', () => {
       expect(within(panel('Conversation')).getByText('second answer')).toBeInTheDocument()
     })
     expect(within(panel('Conversation')).queryByText('first answer')).not.toBeInTheDocument()
+  })
+
+  it('asks a turn that already worked again, and drops what followed it', async () => {
+    const { fetchMock, sent } = recordingApi(['first answer', 'second answer', 'third answer'])
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await type(user, 'one')
+    await agentMode(user)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(sent).toHaveLength(1))
+
+    await type(user, 'two')
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(sent).toHaveLength(2))
+    expect(sent[1]?.messages).toEqual([
+      { role: 'user', content: 'one' },
+      { role: 'assistant', content: 'first answer' },
+      { role: 'user', content: 'two' },
+    ])
+
+    // The first answer landed fine, which used to be the reason it could never
+    // be asked again. It is the run worth repeating: same question, nothing of
+    // what came after it on the wire.
+    const again = screen.getByRole('button', { name: 'Retry turn 2' })
+    // And it says what it costs before it is pressed, rather than after.
+    expect(again).toHaveAttribute('title', expect.stringContaining('The 2 turns after it go.'))
+
+    await user.click(again)
+    await waitFor(() => expect(sent).toHaveLength(3))
+    expect(sent[2]?.messages).toEqual([{ role: 'user', content: 'one' }])
+
+    const conversation = within(panel('Conversation'))
+    await waitFor(() => expect(conversation.getByText('third answer')).toBeInTheDocument())
+    // The follow-up and its answer are gone with the branch, and the question
+    // being re-asked is still there exactly once.
+    expect(conversation.queryByText('two')).not.toBeInTheDocument()
+    expect(conversation.queryByText('second answer')).not.toBeInTheDocument()
+    expect(conversation.queryByText('first answer')).not.toBeInTheDocument()
+    expect(conversation.getAllByText('one')).toHaveLength(1)
+  })
+
+  it('drops the tool calls of the answer it replaces, and keeps them on the wire', async () => {
+    vi.stubGlobal('fetch', toolRunApi())
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await type(user, 'weather?')
+    await agentMode(user)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    const conversation = within(panel('Conversation'))
+    await waitFor(() => {
+      expect(conversation.getByRole('button', { name: 'get_weather' })).toBeInTheDocument()
+    })
+
+    await user.click(conversation.getByRole('button', { name: 'Retry turn 2' }))
+
+    // The run happens again, so the row is back — once. The rows belonging to
+    // the answer being replaced left with it, rather than stacking above the new
+    // ones and reading as a tool that was called twice.
+    await waitFor(() => {
+      expect(conversation.getAllByRole('button', { name: 'get_weather' })).toHaveLength(1)
+    })
+
+    // Nothing was actually lost: both runs really did go out, and the traffic
+    // below is the record of what this tab has done, not of what it still shows.
+    expect(screen.getAllByRole('button', { name: /Turn 1 · get_weather/ })).toHaveLength(2)
   })
 
   it('sends the last question again when the call it made failed', async () => {
@@ -2114,7 +2181,7 @@ describe('conversation', () => {
     // is what keeps a browser from putting a run of chrome in the selection.
     expect(conversation.getByText('you').parentElement?.className).toContain('select-none')
     expect(
-      conversation.getByRole('button', { name: /^Retry turn/ }).closest('div')?.className,
+      conversation.getByRole('button', { name: 'Retry turn 1' }).closest('div')?.className,
     ).toContain('select-none')
 
     // And the thing being copied stays copyable, which is the other half of it.
