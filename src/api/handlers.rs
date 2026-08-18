@@ -17,7 +17,7 @@ use super::AppState;
 use super::dto::{
     AgentEvent, AgentRequest, AuthPath, AuthResponse, CallRequest, CallbackQuery, LoginRequest,
     LoginResponse, LogoutResponse, McpPath, McpResponse, McpToolsResponse, ProfilePath,
-    ProfilesResponse, StreamEvent, UploadResponse,
+    ProfilesResponse, PromptsResponse, StreamEvent, UploadResponse,
 };
 use super::sse::EventStream;
 use super::ui;
@@ -38,6 +38,11 @@ pub async fn healthz() -> &'static str {
 /// Every profile, and every file that failed to load.
 pub async fn list_profiles(State(state): State<AppState>) -> Json<ProfilesResponse> {
     Json((&state.runner.config().snapshot().profiles).into())
+}
+
+/// Every saved prompt, and every entry that failed to load.
+pub async fn list_prompts(State(state): State<AppState>) -> Json<PromptsResponse> {
+    Json((&state.runner.config().snapshot().prompts).into())
 }
 
 /// One profile, as declared.

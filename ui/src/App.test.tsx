@@ -114,6 +114,26 @@ const MCP = {
   issues: [],
 }
 
+/**
+ * What `prompts.yaml` declares. One that loads and one entry that did not, so
+ * the picker and the complaint next to it are both exercised by the default
+ * fixture rather than by a special-case mock.
+ */
+const PROMPTS = {
+  prompts: [
+    { name: 'smallest signal', text: 'ping' },
+    { name: 'two lines', text: 'one\ntwo' },
+  ],
+  issues: [
+    {
+      file: '/tmp/prompts.yaml',
+      message: 'prompt `hollow`: text: a prompt with no text puts nothing in the box',
+      line: null,
+      column: null,
+    },
+  ],
+}
+
 function completion(status: number) {
   return {
     profile: 'chat',
@@ -317,6 +337,9 @@ function recordingApi(answers: string[]) {
     if (url.endsWith('api/mcp')) {
       return Promise.resolve(Response.json(MCP))
     }
+    if (url.endsWith('api/prompts')) {
+      return Promise.resolve(Response.json(PROMPTS))
+    }
     if (url.endsWith('api/agent')) {
       sent.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
       const answer = answers[turn] ?? 'pong'
@@ -344,7 +367,10 @@ async function openAuth(user: ReturnType<typeof userEvent.setup>) {
 }
 
 beforeEach(() => {
-  vi.stubGlobal('fetch', mockApi({ 'api/profiles': PROFILES, 'api/auth': AUTH, 'api/mcp': MCP }))
+  vi.stubGlobal(
+    'fetch',
+    mockApi({ 'api/profiles': PROFILES, 'api/auth': AUTH, 'api/mcp': MCP, 'api/prompts': PROMPTS }),
+  )
 })
 
 afterEach(() => {
@@ -409,6 +435,7 @@ describe('App', () => {
         'api/profiles': PROFILES,
         'api/auth': AUTH,
         'api/mcp': MCP,
+        'api/prompts': PROMPTS,
         'api/agent': agentStream([answerTurn(401, null)]),
       }),
     )
@@ -733,6 +760,9 @@ describe('agent mode', () => {
         if (url.endsWith('api/mcp')) {
           return Promise.resolve(Response.json(MCP))
         }
+        if (url.endsWith('api/prompts')) {
+          return Promise.resolve(Response.json(PROMPTS))
+        }
         if (url.endsWith('api/agent')) {
           return Promise.resolve(sse(agentStream([answerTurn(200)])))
         }
@@ -775,6 +805,9 @@ describe('agent mode', () => {
         }
         if (url.endsWith('api/mcp')) {
           return Promise.resolve(Response.json(MCP))
+        }
+        if (url.endsWith('api/prompts')) {
+          return Promise.resolve(Response.json(PROMPTS))
         }
         if (url.endsWith('api/agent')) {
           return Promise.resolve(sse(agentStream([answerTurn(200)])))
@@ -837,6 +870,7 @@ describe('agent mode', () => {
         'api/profiles': PROFILES,
         'api/auth': AUTH,
         'api/mcp': MCP,
+        'api/prompts': PROMPTS,
         'api/call/stream': stream,
       }),
     )
@@ -890,6 +924,7 @@ describe('agent mode', () => {
         'api/profiles': PROFILES,
         'api/auth': AUTH,
         'api/mcp': MCP,
+        'api/prompts': PROMPTS,
         'api/call/stream': stream,
       }),
     )
@@ -1066,6 +1101,7 @@ describe('agent mode', () => {
         'api/profiles': PROFILES,
         'api/auth': AUTH,
         'api/mcp': MCP,
+        'api/prompts': PROMPTS,
         'api/agent': [
           'event: turn',
           `data: ${JSON.stringify({ event: 'turn', ...refused })}`,
@@ -1125,6 +1161,7 @@ describe('agent mode', () => {
         'api/profiles': PROFILES,
         'api/auth': AUTH,
         'api/mcp': MCP,
+        'api/prompts': PROMPTS,
         'api/agent': [
           'event: turn',
           `data: ${JSON.stringify({ event: 'turn', ...swallowed })}`,
@@ -1251,6 +1288,7 @@ function toolRunApi(turns: ReturnType<typeof turnFixture>[] = [turnFixture()]) {
     'api/profiles': PROFILES,
     'api/auth': AUTH,
     'api/mcp': MCP,
+    'api/prompts': PROMPTS,
     'api/agent': stream,
   })
 }
@@ -1562,6 +1600,7 @@ describe('traffic', () => {
         'api/profiles': PROFILES,
         'api/auth': AUTH,
         'api/mcp': MCP,
+        'api/prompts': PROMPTS,
         'api/agent': agentStream([answerTurn(200)]),
       }),
     )
@@ -1641,6 +1680,8 @@ describe('browser login', () => {
             state: 'abc',
           }
           signedIn = true
+        } else if (url.endsWith('api/prompts')) {
+          return Promise.resolve(Response.json(PROMPTS))
         } else if (url.endsWith('api/mcp')) {
           payload = MCP
         } else if (url.endsWith('api/auth')) {
@@ -1707,6 +1748,8 @@ describe('browser login', () => {
             redirectUri: 'x',
             state: 's',
           }
+        } else if (url.endsWith('api/prompts')) {
+          return Promise.resolve(Response.json(PROMPTS))
         } else if (url.endsWith('api/mcp')) {
           payload = MCP
         } else if (url.endsWith('api/auth')) {
@@ -1757,6 +1800,8 @@ describe('browser login', () => {
             state: 's',
           }
           signedIn = true
+        } else if (url.endsWith('api/prompts')) {
+          return Promise.resolve(Response.json(PROMPTS))
         } else if (url.endsWith('api/mcp')) {
           payload = MCP
         } else if (url.endsWith('api/auth')) {
@@ -1806,6 +1851,8 @@ describe('browser login', () => {
         if (url.endsWith('/logout')) {
           signedIn = false
           payload = { signedOut: true }
+        } else if (url.endsWith('api/prompts')) {
+          return Promise.resolve(Response.json(PROMPTS))
         } else if (url.endsWith('api/mcp')) {
           payload = MCP
         } else if (url.endsWith('api/auth')) {
@@ -1847,6 +1894,8 @@ describe('browser login', () => {
           logouts.push(url)
           signedIn = false
           payload = { signedOut: true }
+        } else if (url.endsWith('api/prompts')) {
+          return Promise.resolve(Response.json(PROMPTS))
         } else if (url.endsWith('api/mcp')) {
           payload = MCP
         } else if (url.endsWith('api/auth')) {
@@ -2107,6 +2156,7 @@ describe('conversation', () => {
         const url = String(input)
         if (url.endsWith('api/profiles')) return Promise.resolve(Response.json(PROFILES))
         if (url.endsWith('api/auth')) return Promise.resolve(Response.json(AUTH))
+        if (url.endsWith('api/prompts')) return Promise.resolve(Response.json(PROMPTS))
         if (url.endsWith('api/mcp')) return Promise.resolve(Response.json(MCP))
         sent.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
         // Fails the first time, answers the second: exactly the case Retry is
@@ -2241,6 +2291,8 @@ describe('preflight', () => {
             redirectUri: 'x',
             state: 's',
           }
+        } else if (url.endsWith('api/prompts')) {
+          return Promise.resolve(Response.json(PROMPTS))
         } else if (url.endsWith('api/mcp')) {
           payload = MCP
         } else if (url.endsWith('api/auth')) {
@@ -2291,6 +2343,9 @@ describe('stopping a run', () => {
           return Promise.resolve(stalled(init?.signal))
         }
         let payload: unknown = PROFILES
+        if (url.endsWith('api/prompts')) {
+          return Promise.resolve(Response.json(PROMPTS))
+        }
         if (url.endsWith('api/mcp')) {
           payload = MCP
         } else if (url.endsWith('api/auth')) {
@@ -2441,6 +2496,79 @@ describe('reading a run', () => {
   })
 })
 
+describe('saved prompts', () => {
+  it('drops the one you pick in the box, and sends nothing', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.clear(await screen.findByLabelText('Message'))
+    await user.selectOptions(screen.getByLabelText('Saved'), 'two lines')
+
+    expect(screen.getByLabelText('Message')).toHaveValue('one\ntwo')
+    // A prompt is text for the box. Nothing has left the process for it.
+    expect(screen.queryByRole('log', { name: 'Conversation' })).toHaveTextContent(
+      'Nothing said yet',
+    )
+  })
+
+  it('replaces what was in the box rather than growing it', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.clear(await screen.findByLabelText('Message'))
+    await user.type(screen.getByLabelText('Message'), 'half a thought')
+    await user.selectOptions(screen.getByLabelText('Saved'), 'smallest signal')
+
+    expect(screen.getByLabelText('Message')).toHaveValue('ping')
+  })
+
+  it('picks the same one twice, because a select that remembers looks broken', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.selectOptions(await screen.findByLabelText('Saved'), 'smallest signal')
+    await user.clear(screen.getByLabelText('Message'))
+    await user.selectOptions(screen.getByLabelText('Saved'), 'smallest signal')
+
+    expect(screen.getByLabelText('Message')).toHaveValue('ping')
+  })
+
+  it('names the entry prompts.yaml would not load, where it bites', async () => {
+    render(<App />)
+
+    expect(await screen.findByText(/1 entry of prompts.yaml did not load/)).toHaveTextContent(
+      'hollow',
+    )
+  })
+
+  it('offers the same library to an embedding box', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: /embed/ }))
+    await user.selectOptions(await screen.findByLabelText('Saved'), 'two lines')
+
+    expect(screen.getByLabelText('One text per line')).toHaveValue('one\ntwo')
+  })
+
+  it('is gone entirely when the file declares nothing and complains about nothing', async () => {
+    vi.stubGlobal(
+      'fetch',
+      mockApi({
+        'api/profiles': PROFILES,
+        'api/auth': AUTH,
+        'api/mcp': MCP,
+        'api/prompts': { prompts: [], issues: [] },
+      }),
+    )
+
+    render(<App />)
+
+    await screen.findByLabelText('Message')
+    expect(screen.queryByLabelText('Saved')).not.toBeInTheDocument()
+  })
+})
+
 describe('coming back to it', () => {
   it('reopens on the profile and the draft it was left on', async () => {
     const user = userEvent.setup()
@@ -2496,7 +2624,10 @@ describe('coming back to it', () => {
 
     // The file was deleted between the two visits.
     const fewer = { ...PROFILES, profiles: PROFILES.profiles.filter((one) => one.name !== 'as-me') }
-    vi.stubGlobal('fetch', mockApi({ 'api/profiles': fewer, 'api/auth': AUTH, 'api/mcp': MCP }))
+    vi.stubGlobal(
+      'fetch',
+      mockApi({ 'api/profiles': fewer, 'api/auth': AUTH, 'api/mcp': MCP, 'api/prompts': PROMPTS }),
+    )
 
     render(<App />)
     await screen.findByRole('button', { name: /^chat/ })
@@ -2609,6 +2740,7 @@ describe('attaching a file', () => {
       'api/profiles': PROFILES,
       'api/auth': AUTH,
       'api/mcp': MCP,
+      'api/prompts': PROMPTS,
       'api/uploads': UPLOADED,
     })
     vi.stubGlobal('fetch', fetchMock)
@@ -2643,6 +2775,7 @@ describe('attaching a file', () => {
         'api/profiles': PROFILES,
         'api/auth': AUTH,
         'api/mcp': MCP,
+        'api/prompts': PROMPTS,
         'api/uploads': UPLOADED,
       }),
     )
@@ -2666,6 +2799,7 @@ describe('attaching a file', () => {
       'api/profiles': PROFILES,
       'api/auth': AUTH,
       'api/mcp': MCP,
+      'api/prompts': PROMPTS,
       'api/uploads': UPLOADED,
       'api/agent': agentStream([answerTurn(200, 'pong')]),
     })
@@ -2691,6 +2825,7 @@ describe('attaching a file', () => {
       'api/profiles': PROFILES,
       'api/auth': AUTH,
       'api/mcp': MCP,
+      'api/prompts': PROMPTS,
       'api/agent': agentStream([answerTurn(200, 'pong')]),
     })
     vi.stubGlobal('fetch', fetchMock)
@@ -2708,6 +2843,7 @@ describe('attaching a file', () => {
       'api/profiles': PROFILES,
       'api/auth': AUTH,
       'api/mcp': MCP,
+      'api/prompts': PROMPTS,
       'api/uploads': UPLOADED,
     })
     vi.stubGlobal('fetch', fetchMock)
@@ -2740,6 +2876,9 @@ describe('attaching a file', () => {
         if (url.endsWith('api/mcp')) {
           return Promise.resolve(Response.json(MCP))
         }
+        if (url.endsWith('api/prompts')) {
+          return Promise.resolve(Response.json(PROMPTS))
+        }
         return Promise.resolve(
           Response.json(
             {
@@ -2771,6 +2910,7 @@ describe('attaching a file', () => {
       'api/profiles': PROFILES,
       'api/auth': AUTH,
       'api/mcp': MCP,
+      'api/prompts': PROMPTS,
       'api/uploads': UPLOADED,
     })
     vi.stubGlobal('fetch', fetchMock)
@@ -2779,12 +2919,18 @@ describe('attaching a file', () => {
 
     pick([new File(['a known signal'], 'report.pdf', { type: 'application/pdf' })])
     await screen.findByText('report.pdf')
-    const before = fetchMock.mock.calls.length
+    // Requests about the file, rather than every request the page made. The
+    // whole page is not the subject here, and counting all of it would fail on
+    // whatever else the tab happens to be doing — a login poll from an earlier
+    // test outlives it by up to three minutes and lands wherever it lands.
+    const aboutTheFile = () =>
+      fetchMock.mock.calls.filter(([input]) => String(input).includes('api/uploads'))
+    const before = aboutTheFile().length
 
     await user.click(screen.getByRole('button', { name: 'Forget report.pdf' }))
 
     expect(screen.queryByText('report.pdf')).not.toBeInTheDocument()
-    expect(fetchMock.mock.calls).toHaveLength(before)
+    expect(aboutTheFile()).toHaveLength(before)
   })
 
   /**
@@ -2801,6 +2947,7 @@ describe('attaching a file', () => {
         'api/profiles': PROFILES,
         'api/auth': AUTH,
         'api/mcp': MCP,
+        'api/prompts': PROMPTS,
         'api/uploads': UPLOADED,
         'api/agent': agentStream([answerTurn(200, 'pong')]),
       }),

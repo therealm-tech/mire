@@ -213,6 +213,10 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   Nothing is sent upstream to call the work off: an endpoint that has been asked
   a question is going to answer it, so this is about your tab and says only that.
   More on what the transcript is [below](#having-a-conversation).
+- **Saved**, a dropdown above either box. The prompts `prompts.yaml` declares,
+  picked by name and dropped in the box — nothing is sent, and what the text
+  becomes on the wire is still the profile's template's decision. More
+  [below](#saving-a-prompt).
 - **Input**, for embedding profiles. One text per line, a run count, and a
   checkbox for the full vectors. There is no second turn of an embedding, so
   there is no conversation and no loop.
@@ -390,6 +394,56 @@ one place `mire` writes anything:
 - **× forgets, it does not delete.** The file stays where it was written.
   Deleting things off a disk because a browser tab said so is not a thing this
   process does; the directory is yours to empty.
+
+### Saving a prompt
+
+A profile says how to reach an endpoint. A prompt says what to send it, and that
+half is worth keeping for the same reason the first one is — the question that
+makes it call the tool, the one that makes it refuse, the paragraph that
+reproduces the bug. Retyping those from memory is how a comparison quietly stops
+being one.
+
+They live in `prompts.yaml`, next to the profiles, `auth.yaml` and `mcp.yaml`:
+
+```yaml
+prompts:
+  - name: ping
+    text: ping
+
+  - name: call a tool
+    text: What is the weather in Lyon right now?
+
+  - name: strict json
+    text: |
+      Answer with a JSON object and nothing else — no prose, no fences.
+      Keys: "city" (string), "temperature_c" (number), "measured_at" (RFC 3339).
+```
+
+A name and its text. That is the whole shape, and the omissions are the design:
+
+**Read-only, like everything else in this directory.** The file is the source of
+truth, your editor writes it, the watcher picks the change up without a restart.
+So a prompt is a thing you can commit, review and hand to somebody else — which
+a button that wrote into a config directory would not have been, and which is
+also why the container can still run `--read-only`. A bad entry is reported in
+the UI and skipped; the rest still work, the same policy every other file here
+gets.
+
+**A prompt says nothing about where it goes.** No profile, no kind, no `auth:`.
+Picking one fills the box and stops there — nothing is sent, and what the text
+becomes on the wire is still the profile's template's decision. That is what
+lets the same question be replayed against every endpoint in the directory,
+which is the comparison you came here to make. The same library is offered to
+an embedding profile's **Input** box, where one saved text can be several: the
+box is one text per line and a multi-line `text:` arrives whole.
+
+**Picking replaces what is in the box.** It is the honest reading of "load the
+saved one", and the dropdown says so. It returns to `pick one…` afterwards, so
+reaching for the same prompt a second time works rather than looking like a
+control that stopped responding.
+
+The whole library is `GET /api/prompts`, in the order the file writes them — a
+list somebody arranged is not re-sorted on the way out.
 
 ### Reading the traffic
 
@@ -1706,6 +1760,7 @@ ninety seconds.
 | --- | --- |
 | `GET /api/profiles` | Every profile, plus the files that failed to load and why |
 | `GET /api/profiles/{name}` | One profile, as declared |
+| `GET /api/prompts` | Prompts declared in `prompts.yaml`, plus the entries that did not load |
 | `GET /api/auth` | Auth providers, with session status |
 | `GET /api/mcp` | MCP servers declared in `mcp.yaml` |
 | `GET /api/mcp/{name}/tools` | Ask a server what it offers, right now, and on which revision |

@@ -844,6 +844,61 @@ async fn the_profile_listing_reports_broken_files_without_hiding_the_good_ones()
 }
 
 #[tokio::test]
+async fn the_prompt_listing_keeps_the_file_order_and_names_the_entry_it_dropped() {
+    let harness = Harness::start(&[
+        ("chat.yaml", openai_profile("https://models.internal/v1")),
+        (
+            "prompts.yaml",
+            // Second one has no text, so it puts nothing in the box and is not a
+            // prompt. The other two still are, in the order written.
+            "prompts:\n  - name: zebra\n    text: ping\n  - name: hollow\n    text: ''\n  - name: alpha\n    text: |\n      one\n      two\n"
+                .to_owned(),
+        ),
+    ])
+    .await;
+
+    let body = harness.get("/api/prompts").await;
+    let prompts = body["prompts"].as_array().unwrap();
+    assert_eq!(prompts.len(), 2);
+    assert_eq!(prompts[0]["name"], "zebra", "the file's order, not sorted");
+    assert_eq!(prompts[1]["text"], "one\ntwo\n");
+    assert!(
+        body["issues"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("hollow")
+    );
+
+    // And the library is not a profile, however much it looks like one from the
+    // outside: it lives in the same directory and ends in `.yaml`.
+    let profiles = harness.get("/api/profiles").await;
+    assert_eq!(profiles["profiles"].as_array().unwrap().len(), 1);
+    assert!(profiles["issues"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn editing_the_prompt_library_takes_effect_without_a_restart() {
+    let harness =
+        Harness::start(&[("chat.yaml", openai_profile("https://models.internal/v1"))]).await;
+
+    let body = harness.get("/api/prompts").await;
+    assert!(
+        body["prompts"].as_array().unwrap().is_empty(),
+        "no file is no prompts and no complaint"
+    );
+    assert!(body["issues"].as_array().unwrap().is_empty());
+
+    harness.write("prompts.yaml", "prompts:\n  - name: ping\n    text: ping\n");
+
+    let body = harness
+        .wait_for("/api/prompts", |body| {
+            !body["prompts"].as_array().unwrap().is_empty()
+        })
+        .await;
+    assert_eq!(body["prompts"][0]["name"], "ping");
+}
+
+#[tokio::test]
 async fn the_auth_listing_always_offers_anonymous() {
     let harness = Harness::start(&[(
         "auth.yaml",

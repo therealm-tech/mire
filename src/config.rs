@@ -1,8 +1,9 @@
 //! Shared, hot-reloading view of the configuration directory.
 //!
-//! Profiles *and* the auth registry come from the same directory and reload
-//! together, as one atomic snapshot: a call that starts with a given profile also
-//! gets the auth registry that was current when it started.
+//! Profiles, the auth registry, the MCP servers and the saved prompts all come
+//! from the same directory and reload together, as one atomic snapshot: a call
+//! that starts with a given profile also gets the auth registry that was current
+//! when it started.
 //!
 //! Readers take a cheap [`Arc`] snapshot; a reload swaps a whole new one in.
 
@@ -19,6 +20,7 @@ use crate::auth::{AuthRegistry, SessionStore};
 use crate::issue::LoadIssue;
 use crate::mcp::McpRegistry;
 use crate::profile::loader::{self, ProfileSet};
+use crate::prompt::PromptRegistry;
 
 /// How long the directory must stay quiet before a reload is triggered.
 ///
@@ -36,16 +38,20 @@ pub struct Config {
     /// MCP servers agent mode may call for real, plus the entries that did not
     /// load.
     pub mcp: McpRegistry,
+    /// Saved prompts the UI can drop in the box, plus the entries that did not
+    /// load.
+    pub prompts: PromptRegistry,
 }
 
 impl Config {
-    /// Every issue found in the directory, profiles and auth registry alike.
+    /// Every issue found in the directory, whichever file it came from.
     pub fn issues(&self) -> impl Iterator<Item = &LoadIssue> {
         self.profiles
             .issues()
             .iter()
             .chain(self.registry.issues().iter())
             .chain(self.mcp.issues().iter())
+            .chain(self.prompts.issues().iter())
     }
 }
 
@@ -117,6 +123,7 @@ impl ConfigStore {
                 info!(
                     profiles = config.profiles.len(),
                     providers = config.registry.descriptors().len(),
+                    prompts = config.prompts.len(),
                     issues = config.issues().count(),
                     dir = %self.dir.display(),
                     "configuration reloaded"
@@ -138,6 +145,7 @@ fn read(dir: &Path, http: &Client, sessions: &Arc<SessionStore>) -> std::io::Res
         profiles: loader::load_dir(dir)?,
         registry: AuthRegistry::load(dir, http, sessions),
         mcp: McpRegistry::load(dir, http),
+        prompts: PromptRegistry::load(dir),
     })
 }
 
@@ -223,6 +231,22 @@ mod tests {
         store.reload();
 
         assert!(store.snapshot().registry.get("gateway").is_some());
+    }
+
+    #[test]
+    fn a_reload_picks_up_a_new_prompt() {
+        let dir = temp_dir("prompt");
+        let store = ConfigStore::load(&dir, Client::new()).unwrap();
+        assert!(store.snapshot().prompts.is_empty());
+
+        std::fs::write(
+            dir.join("prompts.yaml"),
+            "prompts:\n  - name: ping\n    text: ping\n",
+        )
+        .unwrap();
+        store.reload();
+
+        assert_eq!(store.snapshot().prompts.prompts()[0].text, "ping");
     }
 
     #[test]

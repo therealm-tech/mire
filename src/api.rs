@@ -62,6 +62,7 @@ pub fn normalise_base_path(raw: &str) -> String {
 fn documented(api: &mut OpenApi) -> Router<AppState> {
     ApiRouter::new()
         .merge(profile_routes())
+        .merge(prompt_routes())
         .merge(auth_routes())
         .merge(mcp_routes())
         .merge(call_routes())
@@ -131,6 +132,26 @@ fn profile_routes() -> ApiRouter<AppState> {
                     .response::<200, Json<crate::profile::Profile>>()
             }),
         )
+}
+
+/// The questions worth keeping.
+fn prompt_routes() -> ApiRouter<AppState> {
+    ApiRouter::new().api_route(
+        "/api/prompts",
+        get_with(handlers::list_prompts, |op| {
+            op.summary("List saved prompts")
+                .description(
+                    "Prompts declared in `prompts.yaml`, in the order the file writes them, \
+                     plus the entries that did not load and why. Refreshed by the file \
+                     watcher, like everything else in the directory.\n\n\
+                     Read-only, and nothing here sends anything: a prompt is text the UI \
+                     drops in the box, and what it becomes on the wire is still the \
+                     profile's template's decision.",
+                )
+                .tag("prompts")
+                .response::<200, Json<dto::PromptsResponse>>()
+        }),
+    )
 }
 
 /// Everything about who we are when we call.
