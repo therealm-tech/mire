@@ -2852,12 +2852,18 @@ describe('attaching a file', () => {
 
     pick([new File(['a known signal'], 'report.pdf', { type: 'application/pdf' })])
     await screen.findByText('report.pdf')
-    const before = fetchMock.mock.calls.length
+    // Requests about the file, rather than every request the page made. The
+    // whole page is not the subject here, and counting all of it would fail on
+    // whatever else the tab happens to be doing — a login poll from an earlier
+    // test outlives it by up to three minutes and lands wherever it lands.
+    const aboutTheFile = () =>
+      fetchMock.mock.calls.filter(([input]) => String(input).includes('api/uploads'))
+    const before = aboutTheFile().length
 
     await user.click(screen.getByRole('button', { name: 'Forget report.pdf' }))
 
     expect(screen.queryByText('report.pdf')).not.toBeInTheDocument()
-    expect(fetchMock.mock.calls).toHaveLength(before)
+    expect(aboutTheFile()).toHaveLength(before)
   })
 
   /**
