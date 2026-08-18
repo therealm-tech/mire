@@ -458,10 +458,11 @@ with *these* arguments, *this* went to the server, it answered *that*, and the
 next request carried it *like this*. Split across panels, or reset per turn, and
 the comparison stops being possible.
 
-Every tool card says whether it really left the process (**called for real**,
-with the server that answered and how long it took) or was
-[simulated](#agent-mode). A plausible-looking result from a tool nothing wired up
-is the easiest way to believe an integration works.
+Every tool card says whether it really left the process: a call that did names
+the server that answered and how long it took, and one that did not is marked
+**simulated, nothing executed** (see [agent mode](#agent-mode)). A
+plausible-looking result from a tool nothing wired up is the easiest way to
+believe an integration works.
 
 The list **accumulates across the whole conversation** rather than resetting on
 every send, because "it worked on turn one and not on turn four" is a comparison

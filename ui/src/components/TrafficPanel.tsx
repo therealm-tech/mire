@@ -778,9 +778,11 @@ function nothingCameBack(hook: HookRecord): string {
  *
  * The arguments the model produced are the request, the schema check is the
  * decode — the only reading anyone does of them — and what the tool handed back
- * is the response. Whether it really ran is the first thing the card says,
- * because a simulated result that looks plausible is the easiest way to believe
- * an integration works when nothing has been wired up.
+ * is the response. A call that never left the process says so, because a
+ * simulated result that looks plausible is the easiest way to believe an
+ * integration works when nothing has been wired up. One that did leave names
+ * the server that answered and how long it took, which is the same statement
+ * made in the only terms that can be checked.
  *
  * **Captured** is the fourth part, and only shows up when `agent.capture` pulled
  * something out of that answer. It is the one part that is not a wire: it is
@@ -813,11 +815,7 @@ function ToolCard({
       onToggle={onToggle}
       badges={
         <>
-          {tool.source === 'mcp' ? (
-            <Badge tone="warn">called for real</Badge>
-          ) : (
-            <Badge tone="neutral">simulated, nothing executed</Badge>
-          )}
+          {tool.source === 'mcp' ? null : <Badge tone="neutral">simulated, nothing executed</Badge>}
           {tool.latencyMs === undefined ? null : (
             <span className="text-faint text-xs">{tool.latencyMs} ms</span>
           )}

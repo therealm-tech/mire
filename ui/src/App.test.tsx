@@ -920,7 +920,7 @@ describe('agent mode', () => {
     await waitFor(() => {
       expect(conversation.getByText('get_weather')).toBeInTheDocument()
     })
-    expect(conversation.getByText(/called for real via/)).toBeInTheDocument()
+    expect(conversation.getByText(/via/)).toHaveTextContent('via weather · 42 ms')
     expect(conversation.getByText(/asked for no more tools/i)).toBeInTheDocument()
   })
 
@@ -1492,8 +1492,10 @@ describe('traffic', () => {
     expect(tool.getByText(/arguments match the schema/i)).toBeInTheDocument()
     expect(tool.getByText('temp')).toBeInTheDocument()
     expect(tool.getByText('21')).toBeInTheDocument()
-    // Whether it really ran is the first thing the card says.
-    expect(tool.getByText(/called for real/)).toBeInTheDocument()
+    // It really ran, so the card names the server that answered rather than
+    // claiming nothing was executed.
+    expect(tool.getByText('weather')).toBeInTheDocument()
+    expect(tool.queryByText(/simulated/)).not.toBeInTheDocument()
     // And nothing was captured, so there is no section claiming otherwise.
     expect(tool.queryByText('Captured')).not.toBeInTheDocument()
   })
