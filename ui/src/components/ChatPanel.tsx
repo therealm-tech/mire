@@ -5,7 +5,9 @@ import {
   type ActivityItem,
   type ChatItem,
   describeStop,
+  type HookExchange,
   messagePositions,
+  type ToolExchange,
   type VerdictItem,
 } from '../conversation'
 import { Failure } from './Failure'
@@ -339,58 +341,137 @@ function Bubble({
 function Activity({ item, onReveal }: { item: ActivityItem; onReveal: (id: string) => void }) {
   return (
     <ul className="space-y-1 border-line border-l-2 pl-3">
-      {item.tools.map((exchange) => {
-        const tool = exchange.invocation
-        // Names, not values: a captured value is a session id on a good day and
-        // a paragraph on a bad one, and this row is a summary. What it is worth
-        // is one click away, on the card the name beside it opens.
-        const captured = Object.keys(tool.captured)
-        return (
-          <li key={exchange.id} className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-xs">
-            {item.call === null ? (
-              <span className="text-faint">turn {item.turn}</span>
-            ) : (
-              <button
-                type="button"
-                onClick={() => {
-                  if (item.call) {
-                    onReveal(item.call)
-                  }
-                }}
-                className="text-faint hover:text-ink hover:underline"
-                title="Show the model call that asked for this"
-              >
-                turn {item.turn}
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={() => onReveal(exchange.id)}
-              className="font-medium font-mono hover:underline"
-              title="Show this call in the traffic below"
-            >
-              {tool.call.name}
-            </button>
-            {tool.source === 'mcp' ? (
-              <span className="text-muted">
-                called for real via <span className="font-mono">{tool.server}</span>
-                {tool.latencyMs === undefined ? null : ` · ${tool.latencyMs} ms`}
-              </span>
-            ) : (
-              <span className="text-muted">simulated, nothing executed</span>
-            )}
-            {tool.error ? <Badge tone="bad">tool failed</Badge> : null}
-            {tool.reportedError ? <Badge tone="warn">the tool reported a problem</Badge> : null}
-            {tool.schemaErrors.length > 0 ? <Badge tone="warn">schema</Badge> : null}
-            {captured.length > 0 ? (
-              <span className="text-muted">
-                captured <span className="font-mono">{captured.join(', ')}</span>
-              </span>
-            ) : null}
-          </li>
-        )
-      })}
+      {item.steps.map((step) => (
+        <li key={step.id} className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-xs">
+          <TurnLink turn={item.turn} call={item.call} onReveal={onReveal} />
+          {step.kind === 'tool' ? (
+            <ToolRow exchange={step} onReveal={onReveal} />
+          ) : (
+            <HookRow exchange={step} onReveal={onReveal} />
+          )}
+        </li>
+      ))}
     </ul>
+  )
+}
+
+/** Which turn a row belongs to, and a way back to the call that asked for it. */
+function TurnLink({
+  turn,
+  call,
+  onReveal,
+}: {
+  turn: number
+  call: string | null
+  onReveal: (id: string) => void
+}) {
+  if (call === null) {
+    return <span className="text-faint">turn {turn}</span>
+  }
+  return (
+    <button
+      type="button"
+      onClick={() => onReveal(call)}
+      className="text-faint hover:text-ink hover:underline"
+      title="Show the model call that asked for this"
+    >
+      turn {turn}
+    </button>
+  )
+}
+
+/** One tool call: what was asked for, and whether it really ran. */
+function ToolRow({
+  exchange,
+  onReveal,
+}: {
+  exchange: ToolExchange
+  onReveal: (id: string) => void
+}) {
+  const tool = exchange.invocation
+  // Names, not values: a captured value is a session id on a good day and a
+  // paragraph on a bad one, and this row is a summary. What it is worth is one
+  // click away, on the card the name beside it opens.
+  const captured = Object.keys(tool.captured)
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => onReveal(exchange.id)}
+        className="font-medium font-mono hover:underline"
+        title="Show this call in the traffic below"
+      >
+        {tool.call.name}
+      </button>
+      {tool.source === 'mcp' ? (
+        <span className="text-muted">
+          called for real via <span className="font-mono">{tool.server}</span>
+          {tool.latencyMs === undefined ? null : ` · ${tool.latencyMs} ms`}
+        </span>
+      ) : (
+        <span className="text-muted">simulated, nothing executed</span>
+      )}
+      {tool.error ? <Badge tone="bad">tool failed</Badge> : null}
+      {tool.reportedError ? <Badge tone="warn">the tool reported a problem</Badge> : null}
+      {tool.schemaErrors.length > 0 ? <Badge tone="warn">schema</Badge> : null}
+      {captured.length > 0 ? (
+        <span className="text-muted">
+          captured <span className="font-mono">{captured.join(', ')}</span>
+        </span>
+      ) : null}
+    </>
+  )
+}
+
+/**
+ * One hook, on the side of the call it fired on.
+ *
+ * A hook is the half of a run nobody asked for in the moment and everybody asks
+ * about afterwards: a gate that refused a call explains a tool that never ran,
+ * and an audit that never fired explains a report nobody received. Both used to
+ * be findable only by opening the traffic panel and knowing to look, which is
+ * the same as not being told.
+ *
+ * `did not fire` is a first-class outcome here rather than a failure dressed up
+ * as one. A hook waiting on `when_defined:` is doing exactly what it was asked
+ * to, and the row says what it is waiting for, because that is the whole answer
+ * to the question it raises.
+ */
+function HookRow({
+  exchange,
+  onReveal,
+}: {
+  exchange: HookExchange
+  onReveal: (id: string) => void
+}) {
+  const hook = exchange.record
+  return (
+    <>
+      <span className="text-faint">hook</span>
+      <button
+        type="button"
+        onClick={() => onReveal(exchange.id)}
+        className="font-medium font-mono hover:underline"
+        title="Show this hook in the traffic below"
+      >
+        {hook.hook}
+      </button>
+      {hook.skipped === undefined ? (
+        <span className="text-muted">
+          fired {hook.phase} <span className="font-mono">{hook.tool}</span> ·{' '}
+          {hook.status === 0 ? 'never answered' : hook.status} · {hook.latencyMs} ms
+        </span>
+      ) : (
+        <span className="text-muted">
+          sat out <span className="font-mono">{hook.tool}</span>, waiting for{' '}
+          <span className="font-mono">{hook.skipped}</span>
+        </span>
+      )}
+      {hook.stoppedTheCall ? <Badge tone="bad">stopped the call</Badge> : null}
+      {hook.error !== undefined && !hook.stoppedTheCall ? (
+        <Badge tone="warn">failed, stepped over</Badge>
+      ) : null}
+    </>
   )
 }
 

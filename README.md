@@ -404,19 +404,25 @@ Three kinds of card, each showing what went out and what came back:
 
 **The transcript points at the cards.** A tool row in the conversation is a
 summary of one of these, so it takes you to it: the tool's name opens its own
-card, and the turn beside it opens the model call that asked for the tool. Any
-filter in the way is dropped on the way — a click that appeared to do nothing
-because the card was behind a filter set four minutes ago would be worse than no
-link at all.
+card, and the turn beside it opens the model call that asked for the tool. **The
+hooks are rows there too**, on the side of the call they fired on — the gate
+above the call it let through, the audit below it — each naming what it did:
+`fired before get_weather · 204 · 8 ms`, `stopped the call`, or `sat out
+get_weather, waiting for session`. A gate that refused explains a tool that never
+ran, and a hook nobody can see explains nothing. Any filter in the way is dropped
+on the way — a click that appeared to do nothing because the card was behind a
+filter set four minutes ago would be worse than no link at all.
 
 **And the list can be asked a narrower question.** A run puts five cards on the
 page and a session puts fifty, so **Model**, **Tools** and **Protocol** each show
 one kind, and the count beside them says how much is being hidden. **Failed**
 picks out the exchanges worth looking at first: a status the endpoint should not
 have answered, a stream that stopped rather than ended, a handshake that never
-landed, or a tool that failed, reported a problem, or was called with arguments
-its own schema refuses. A `401` you asked for anonymously is a pass, so it is not
-one of them. When nothing failed the button says so rather than offering an empty
+landed, a tool that failed, reported a problem, or was called with arguments its
+own schema refuses, or a hook that was refused or never landed. A `401` you asked
+for anonymously is a pass, so it is not one of them — and neither is a hook that
+[sat a call out](#a-hook-that-waits-for-one), which sent nothing and broke
+nothing. When nothing failed the button says so rather than offering an empty
 list.
 
 **And the whole run comes out as a file.** *Export* writes every exchange above
@@ -1259,8 +1265,9 @@ are the hook's own:
 Every firing lands in the trace, next to the JSON-RPC rather than inside it: a
 hook talks to a third address over plain HTTP, and filing a webhook's `POST`
 among the MCP methods would make both unreadable. Each turn carries a `hooks`
-array, the **Hooks** lens in the traffic panel shows nothing else, and a record
-that failed says whether that is also why the tool never ran:
+array, the **Hooks** lens in the traffic panel shows nothing else, the
+conversation puts a row where the firing happened, and a record that failed says
+whether that is also why the tool never ran:
 
 ```json
 {
@@ -1438,7 +1445,10 @@ real answer. The skip is recorded all the same, naming what it waited for:
 ```
 
 A hook that quietly never ran and a hook that was never declared must not look
-the same in a trace. Note that presence is the test, not truthiness: a path that
+the same in a trace, and neither must a hook that sat a call out and a hook that
+failed: the transcript says `sat out get_weather, waiting for session`, the card
+is badged **did not fire** rather than a red status it never got, and **Failed**
+leaves it alone. Note that presence is the test, not truthiness: a path that
 resolved to `null` resolved, and `when_defined:` does not second-guess the
 capture that accepted it.
 

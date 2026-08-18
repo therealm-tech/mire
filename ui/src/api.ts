@@ -402,6 +402,12 @@ export const hookRecordSchema = z.object({
   error: z.string().optional(),
   /** Whether this failure is what stopped the tool call. */
   stoppedTheCall: z.boolean(),
+  /**
+   * The `when_defined:` variable that was not set, when that is why nothing was
+   * sent. Not a failure: `on_error` does not apply, and the tool call went ahead
+   * untouched. Absent on every hook that did fire.
+   */
+  skipped: z.string().optional(),
 })
 
 const decisionSchema = z.discriminatedUnion('decision', [

@@ -59,7 +59,7 @@ export interface ActivityItem {
    * and holding the exchange is what lets the row say *which* card — the reason
    * a run stops being two lists you read against each other by eye.
    */
-  tools: ToolExchange[]
+  steps: Array<ToolExchange | HookExchange>
 }
 
 /** How a run ended, parked where it happened in the transcript. */
@@ -83,8 +83,44 @@ export function activityItem(turn: number, exchanges: Exchange[]): ActivityItem 
     id: nextId('activity'),
     turn,
     call: exchanges.find((exchange) => exchange.kind === 'model')?.id ?? null,
-    tools: exchanges.filter((exchange) => exchange.kind === 'tool'),
+    steps: around(
+      exchanges.filter((exchange) => exchange.kind === 'tool'),
+      exchanges.filter((exchange) => exchange.kind === 'hook'),
+    ),
   }
+}
+
+/**
+ * Tool calls with the hooks that fired around them, in the order it happened.
+ *
+ * The trace keeps the two apart — a hook is traffic to a third address, not a
+ * tool call — and the reading a person wants puts them back together: the gate,
+ * the call it let through, the audit that followed. Which hook wrapped which
+ * call is not something to guess at from the tool's name, because the same tool
+ * can be called twice in one turn: a turn fires every `before` hook, makes the
+ * call, then fires every `after` hook, and only then moves on. So the hooks are
+ * consumed from the front in that order, and the phase says which side of the
+ * call in hand each one belongs to.
+ *
+ * A hook left over at the end fired around a call the turn does not carry, which
+ * should not happen — and if it ever does, it is shown rather than dropped.
+ */
+function around(tools: ToolExchange[], hooks: HookExchange[]): Array<ToolExchange | HookExchange> {
+  const steps: Array<ToolExchange | HookExchange> = []
+  let next = 0
+  const take = (phase: 'before' | 'after') => {
+    for (let hook = hooks[next]; hook?.record.phase === phase; hook = hooks[next]) {
+      steps.push(hook)
+      next += 1
+    }
+  }
+
+  for (const tool of tools) {
+    take('before')
+    steps.push(tool)
+    take('after')
+  }
+  return [...steps, ...hooks.slice(next)]
 }
 
 export function verdictItem(trace: Trace): VerdictItem {
@@ -237,13 +273,13 @@ export function statusTone(status: number, expectUnauthorized: boolean): Tone {
 /**
  * Whether this exchange is one of the ones you are looking for.
  *
- * The failures, in the five shapes they come in: a status the endpoint should
+ * The failures, in the six shapes they come in: a status the endpoint should
  * not have answered, an error the endpoint reported in the body whatever status
  * it put on top, a stream that stopped rather than ended, a protocol round trip
- * that never landed, and a tool that failed, reported a problem, or was called
- * with arguments its own schema refuses. `expectUnauthorized` is carried through
- * because a `401` asked anonymously is a pass, and a filter that hid the passes
- * would hide it.
+ * that never landed, a tool that failed, reported a problem, or was called with
+ * arguments its own schema refuses, and a hook that was refused or never landed.
+ * `expectUnauthorized` is carried through because a `401` asked anonymously is a
+ * pass, and a filter that hid the passes would hide it.
  */
 export function failed(exchange: Exchange, expectUnauthorized: boolean): boolean {
   switch (exchange.kind) {
@@ -269,6 +305,13 @@ export function failed(exchange: Exchange, expectUnauthorized: boolean): boolean
     }
     case 'hook': {
       const hook = exchange.record
+      // A hook that sat a call out did not fail: `when_defined:` said "not yet",
+      // nothing was sent, and the tool call went ahead untouched. Its `status: 0`
+      // means "never sent", not "never answered", and a filter that pulled it in
+      // would say a run went wrong every time a session is opened partway.
+      if (hook.skipped !== undefined) {
+        return false
+      }
       return hook.error !== undefined || hook.status === 0 || hook.status >= 400
     }
   }

@@ -632,6 +632,10 @@ function HookCard({
   // Not `statusTone`: a hook is something you asked for, so nothing it answers
   // is ever the expected refusal an anonymous call is looking for.
   const tone = hook.error || hook.status === 0 || hook.status >= 400 ? 'bad' : 'good'
+  // A hook that sat the call out never sent anything, so it has no status to
+  // report and nothing went wrong. Read as one, `status: 0` says "never
+  // answered" in red about a hook nobody was ever asked anything by.
+  const skipped = hook.skipped
 
   return (
     <Card
@@ -645,12 +649,18 @@ function HookCard({
         <>
           <Badge tone="neutral">hook</Badge>
           <Badge tone="neutral">{hook.phase}</Badge>
-          {hook.status === 0 ? (
-            <Badge tone="bad">never answered</Badge>
+          {skipped === undefined ? (
+            <>
+              {hook.status === 0 ? (
+                <Badge tone="bad">never answered</Badge>
+              ) : (
+                <Badge tone={tone}>{hook.status}</Badge>
+              )}
+              <span className="text-faint text-xs">{hook.latencyMs} ms</span>
+            </>
           ) : (
-            <Badge tone={tone}>{hook.status}</Badge>
+            <Badge tone="neutral">did not fire</Badge>
           )}
-          <span className="text-faint text-xs">{hook.latencyMs} ms</span>
           {hook.stoppedTheCall ? <Badge tone="bad">stopped the call</Badge> : null}
         </>
       }
@@ -659,6 +669,13 @@ function HookCard({
         <p className="break-all font-mono text-xs">
           <span className="font-semibold">{hook.method}</span> {hook.url}
         </p>
+        {skipped === undefined ? null : (
+          <p className="text-muted text-sm">
+            Nothing was sent: this hook waits for <span className="font-mono">{skipped}</span>, and
+            nothing had captured one yet. No credential was resolved, and the tool call went ahead
+            untouched — the address above is the template it would have rendered.
+          </p>
+        )}
         <ul className="space-y-0.5 break-all font-mono text-[11px] text-muted">
           {Object.entries(hook.headers).map(([name, value]) => (
             <li key={name}>
@@ -691,10 +708,13 @@ function HookCard({
           </p>
         ) : null}
 
-        {hook.response.length > 0 ? (
-          <Body text={hook.response} />
-        ) : (
-          <p className="text-muted text-sm">Nothing, which a hook is entitled to answer.</p>
+        {hook.response.length > 0 ? <Body text={hook.response} /> : null}
+        {hook.response.length > 0 ? null : (
+          <p className="text-muted text-sm">
+            {skipped === undefined
+              ? 'Nothing, which a hook is entitled to answer.'
+              : 'Nothing, because nobody was asked.'}
+          </p>
         )}
       </Section>
     </Card>
