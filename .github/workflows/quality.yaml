@@ -15,12 +15,13 @@ permissions:
   contents: read
 
 jobs:
-  # `pre-commit` is the whole gate, not a subset of it: the hooks already run
-  # `cargo fmt`, `cargo clippy`, `cargo test`, `tsc --noEmit`, `vitest`,
+  # `pre-commit` is the whole of the lint gate, not a subset of it: the hooks
+  # already run `cargo fmt`, `cargo clippy`, `tsc --noEmit`, `biome`,
   # `hadolint`, `trivy config` and `actionlint`. Running any of those again as a
-  # separate job would double the bill to test the same thing twice — and would
+  # separate job would double the bill to check the same thing twice — and would
   # let CI and a local `pre-commit run` drift apart, which is the failure this
-  # arrangement exists to prevent.
+  # arrangement exists to prevent. The test suites are the one thing CI runs
+  # that a hook does not: they live in the two jobs below.
   pre-commit:
     name: pre-commit
     runs-on: ubuntu-24.04
@@ -41,7 +42,7 @@ jobs:
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
-      # The UI hooks (`tsc --noEmit`, `vitest`) run against the checkout, not a
+      # The UI hooks (`biome`, `tsc --noEmit`) run against the checkout, not a
       # container, so the dependencies have to be there before pre-commit starts.
       - name: install the UI dependencies
         run: npm --prefix ui ci
@@ -91,6 +92,50 @@ jobs:
 
       - name: run pre-commit
         run: pre-commit run --all-files --show-diff-on-failure
+
+  # The suites run here rather than as commit hooks. A hook has to stay fast
+  # enough that nobody reaches for `--no-verify`, and a test suite is the first
+  # thing to grow past that. Two jobs rather than one: they share nothing, so
+  # they may as well fail in parallel.
+  cargo-test:
+    name: cargo test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # No argument: rustup reads the channel out of `rust-toolchain.toml`, so
+      # the pin lives in one place.
+      - name: install the Rust toolchain
+        run: rustup toolchain install
+
+      - name: cache cargo build artifacts
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+
+      # `build.rs` writes a placeholder into `ui/dist` when the front end has
+      # not been built, so the crate compiles without a Node toolchain here.
+      - name: run the test suite
+        run: cargo test
+
+  ui-test:
+    name: vitest
+    runs-on: ubuntu-24.04
+    steps:
+      - name: check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: install the UI dependencies
+        run: npm --prefix ui ci
+
+      - name: run the test suite
+        run: npm --prefix ui test
 
   trivy:
     name: trivy

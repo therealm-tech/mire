@@ -23,6 +23,11 @@ repos:
       - id: ruff-check
       - id: ruff-format
 
+  # Linters and static analysis only. The test suites — `cargo test` and
+  # `vitest` — deliberately do not run here: a commit hook has to stay fast
+  # enough that nobody reaches for `--no-verify`, and a suite that grows past a
+  # few seconds is the thing that makes them. Both run in the `quality`
+  # workflow, on every push and every pull request.
   - repo: local
     hooks:
       - id: cargo-fmt
@@ -36,14 +41,6 @@ repos:
       - id: cargo-clippy
         name: cargo clippy
         entry: cargo clippy --all-targets -- -D warnings
-        language: system
-        types:
-          - rust
-        pass_filenames: false
-
-      - id: cargo-test
-        name: cargo test
-        entry: cargo test
         language: system
         types:
           - rust
@@ -80,7 +77,7 @@ repos:
         language: system
         files: ^\.github/workflows/.*\.ya?ml$
 
-      # Run from `ui/`, like the two hooks below, because that is where the
+      # Run from `ui/`, like the hook below, because that is where the
       # Biome configuration lives. Invoked from the repository root instead,
       # Biome 2 sees `ui/biome.json` as a nested root project and refuses to
       # start — the front end is a subproject of a Rust repository, not a
@@ -98,11 +95,4 @@ repos:
         entry: npm --prefix ui run typecheck
         language: system
         files: ^ui/.*\.(ts|tsx|json)$
-        pass_filenames: false
-
-      - id: ui-test
-        name: vitest
-        entry: npm --prefix ui test
-        language: system
-        files: ^ui/.*\.(ts|tsx)$
         pass_filenames: false
