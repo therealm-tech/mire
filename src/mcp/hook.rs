@@ -823,7 +823,9 @@ async fn run(
 
     let response = match sent {
         Ok(response) => response,
-        Err(error) => return (record, Err(scrub.text(&error.to_string()))),
+        // The endpoint's own words, not `reqwest`'s: a hook that failed at the
+        // address printed right above it has to say what it ran into there.
+        Err(error) => return (record, Err(scrub.text(&crate::transport::explain(&error)))),
     };
 
     let status = response.status();
@@ -834,10 +836,23 @@ async fn run(
     if status.is_success() {
         (record, Ok(()))
     } else {
-        // The body goes in the message, scrubbed: a policy gate that says no
-        // usually says why, and the reason is the only useful half.
-        let detail = snippet(&record.response);
-        (record, Err(format!("answered {status}: {detail}")))
+        let message = refused(status, &record.response);
+        (record, Err(message))
+    }
+}
+
+/// What a hook's endpoint saying no amounts to, in one line.
+///
+/// The body goes in the message, already scrubbed: a policy gate that refuses a
+/// call usually says why, and the reason is the only half worth reading. When it
+/// says nothing at all, say *that* — a message trailing off after a colon reads
+/// like something was lost on the way here.
+fn refused(status: reqwest::StatusCode, body: &str) -> String {
+    let detail = snippet(body);
+    if detail.is_empty() {
+        format!("answered {status} with an empty body")
+    } else {
+        format!("answered {status}: {detail}")
     }
 }
 
@@ -1685,6 +1700,18 @@ mod tests {
         // to assert on: it exists, which means the two files and the payload
         // encoded without anybody complaining about a media type.
         assert!(!built.boundary().is_empty());
+    }
+
+    #[test]
+    fn a_refusal_with_nothing_to_say_still_reads_as_a_sentence() {
+        assert_eq!(
+            refused(reqwest::StatusCode::FORBIDDEN, "   "),
+            "answered 403 Forbidden with an empty body"
+        );
+        assert_eq!(
+            refused(reqwest::StatusCode::FORBIDDEN, "not on my watch"),
+            "answered 403 Forbidden: not on my watch"
+        );
     }
 
     #[test]

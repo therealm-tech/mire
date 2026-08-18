@@ -240,7 +240,7 @@ impl OidcAuth {
             .await
             .map_err(|error| AuthError::TokenExchange {
                 provider: self.name.clone(),
-                message: scrub.text(&error.to_string()),
+                message: scrub.text(&crate::transport::explain(&error)),
             })?;
 
         let status = response.status();
@@ -461,7 +461,7 @@ pub(super) async fn fetch_discovery(
         .map_err(|error| AuthError::Discovery {
             provider: provider.to_owned(),
             url: url.to_string(),
-            message: error.to_string(),
+            message: crate::transport::explain(&error),
         })?;
 
     let status = response.status();

@@ -467,9 +467,18 @@ function HookRow({
           <span className="font-mono">{hook.skipped}</span>
         </span>
       )}
-      {hook.stoppedTheCall ? <Badge tone="bad">stopped the call</Badge> : null}
+      {/* The reason travels with the badge: a row that says a call was refused
+          and not by what is a row that sends you looking. The whole exchange is
+          still one click away, under the hook's name. */}
+      {hook.stoppedTheCall ? (
+        <span title={hook.error}>
+          <Badge tone="bad">stopped the call</Badge>
+        </span>
+      ) : null}
       {hook.error !== undefined && !hook.stoppedTheCall ? (
-        <Badge tone="warn">failed, stepped over</Badge>
+        <span title={hook.error}>
+          <Badge tone="warn">failed, stepped over</Badge>
+        </span>
       ) : null}
     </>
   )

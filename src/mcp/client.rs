@@ -732,7 +732,7 @@ impl McpClient {
         let response = match sent {
             Ok(response) => response,
             Err(error) => {
-                let message = scrub.text(&error.to_string());
+                let message = scrub.text(&crate::transport::explain(&error));
                 if let Some(mut record) = record {
                     record.latency_ms = latency_ms;
                     record.error = Some(message.clone());

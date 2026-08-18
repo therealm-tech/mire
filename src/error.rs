@@ -293,7 +293,7 @@ impl From<TransportError> for ApiError {
             TransportError::Timeout { .. } => {
                 Self::new(StatusCode::GATEWAY_TIMEOUT, "endpoint_timeout", message)
             }
-            TransportError::Send(_) => {
+            TransportError::Send { .. } => {
                 Self::new(StatusCode::BAD_GATEWAY, "endpoint_unreachable", message)
             }
             TransportError::Build(_)

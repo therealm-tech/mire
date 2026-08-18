@@ -299,7 +299,7 @@ impl OidcBrowserAuth {
             .await
             .map_err(|error| AuthError::TokenExchange {
                 provider: self.name.clone(),
-                message: scrub.text(&error.to_string()),
+                message: scrub.text(&crate::transport::explain(&error)),
             })?;
 
         let status = response.status();
