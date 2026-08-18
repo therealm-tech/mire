@@ -257,19 +257,24 @@ that never had the tab open. A server-side conversation would turn that button
 into a lie.
 
 So the transcript is not a log *of* the `messages` array — it **is** the array,
-laid out. The last turn keeps a **Retry**, because asking again is the point:
-dropping the model's last answer and putting the question back on the wire is
-how you find out whether it only said that because it had already said it.
+laid out. Every turn keeps a **Retry**, because asking again is the point:
+dropping the model's answer and putting the question back on the wire is how you
+find out whether it only said that because it had already said it.
 **New conversation** clears the lot.
 
 Four things follow, each of which is a decision:
 
-- **Only the last turn can be run again, and an empty box sends nothing.**
-  **Retry** on an answer drops it and asks the question underneath it again;
-  **Retry** on a question — which is what a failed call leaves behind — sends it
-  as it stands. Either way whatever followed it goes too, and **Send** stays
-  greyed out until there is something to say, so no request ever leaves without
-  the transcript showing what it carried.
+- **Any turn can be run again, and an empty box sends nothing.** **Retry** on an
+  answer drops it and asks the question underneath it again; **Retry** on a
+  question — which is what a failed call leaves behind — sends it as it stands.
+  A turn that went perfectly well is worth repeating too, and usually the most
+  interesting one to repeat, which is why it is offered on every turn rather
+  than only on the last. Either way the turns after it go: the transcript *is*
+  the next request, so no turn can be replayed with its own future still
+  attached — the button says how many it takes with it, and what leaves the
+  conversation stays in **Traffic**, which keeps every exchange this tab ever
+  made. **Send** stays greyed out until there is something to say, so no request
+  ever leaves without the transcript showing what it carried.
 - **Only the answer the run finished on rejoins the history.** The tool calls in
   between and their results stay out of it: replaying them into the next request
   without their results is how you get a `400` from an endpoint that was working

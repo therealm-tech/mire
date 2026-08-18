@@ -44,11 +44,18 @@ const MODE_LABELS: Record<RunMode, string> = {
  * answer on the left, and the tool calls a run made in between sit where they
  * happened rather than in a panel somewhere else.
  *
- * The last turn keeps a **Retry**, and only the last one: a call that failed
- * left the question in the transcript, and pressing **Send** on an empty box to
- * get it out again is a thing nobody guessed. On a question it asks it again; on
- * an answer it drops that answer first, which is how you find out whether the
- * model only said that because it had already said it.
+ * Every turn keeps a **Retry**, because a run that went fine is exactly the one
+ * worth doing twice: a model that answers the same question two different ways
+ * is the thing you came here to find out, and it was only ever askable of the
+ * last turn. On a question it asks it again; on an answer it drops that answer
+ * first, which is how you find out whether the model only said that because it
+ * had already said it. Either way the turns after it go — the transcript *is*
+ * the next request, so a turn cannot be replayed with its own future still
+ * attached — and the button says how many before it takes them.
+ *
+ * What is dropped is dropped from the conversation, not from the record:
+ * **Traffic** keeps every exchange a run ever made, including the ones whose
+ * turns are no longer on screen.
  */
 export function ChatPanel({
   items,
@@ -120,10 +127,6 @@ export function ChatPanel({
   const positions = messagePositions(items)
   const turns = positions.size
 
-  // Only the last turn can be asked again: anything earlier has answers after
-  // it, and re-running from the middle would silently drop them.
-  const last = [...items].reverse().find((item) => item.kind === 'message')?.id ?? null
-
   // Following the answer as it is written is the whole reason this is a
   // transcript rather than a list, so the view keeps its end in sight.
   const foot = useRef<HTMLDivElement>(null)
@@ -166,8 +169,9 @@ export function ChatPanel({
                 key={item.id}
                 message={item.message}
                 position={positions.get(item.id) ?? 0}
+                turns={turns}
                 busy={busy}
-                {...(item.id === last ? { onRetry: () => onRetry(item.id) } : {})}
+                onRetry={() => onRetry(item.id)}
               />
             ) : item.kind === 'activity' ? (
               <Activity key={item.id} item={item} onReveal={onReveal} />
@@ -235,17 +239,26 @@ const ROLE_LABELS: Record<Message['role'], string> = {
 function Bubble({
   message,
   position,
+  turns,
   busy,
   onRetry,
 }: {
   message: Message
   position: number
+  /** How many turns there are in all, which is what says how much a retry costs. */
+  turns: number
   busy: boolean
-  /** Absent on every turn but the last, which is the only one that can be run again. */
-  onRetry?: () => void
+  onRetry: () => void
 }) {
   const mine = message.role === 'user'
   const aside = message.role === 'system' || message.role === 'tool'
+
+  // Retry sends the history up to here, so every turn past this one leaves with
+  // it — and on an answer, that answer leaves first. Counted out on the button
+  // rather than discovered afterwards: a transcript losing four turns to a click
+  // is not a thing to learn by watching it happen.
+  const after = turns - position
+  const cost = after === 0 ? '' : ` The ${after} ${after === 1 ? 'turn' : 'turns'} after it go.`
 
   return (
     <div className={`flex flex-col gap-1 ${mine ? 'items-end' : 'items-start'}`}>
@@ -263,22 +276,20 @@ function Bubble({
       */}
       <div className="flex select-none items-center gap-2 px-1">
         <span className="text-faint text-xs">{ROLE_LABELS[message.role]}</span>
-        {onRetry === undefined ? null : (
-          <button
-            type="button"
-            disabled={busy}
-            onClick={onRetry}
-            aria-label={`Retry turn ${position}`}
-            title={
-              mine
-                ? 'Send the conversation again, ending on this message.'
-                : 'Drop this answer and ask the same question again.'
-            }
-            className="text-faint text-xs disabled:opacity-50 hover:text-ink hover:underline"
-          >
-            Retry
-          </button>
-        )}
+        <button
+          type="button"
+          disabled={busy}
+          onClick={onRetry}
+          aria-label={`Retry turn ${position}`}
+          title={
+            (mine
+              ? 'Send the conversation again, ending on this message.'
+              : 'Drop this answer and ask the same question again.') + cost
+          }
+          className="text-faint text-xs disabled:opacity-50 hover:text-ink hover:underline"
+        >
+          Retry
+        </button>
       </div>
 
       <div

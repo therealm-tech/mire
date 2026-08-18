@@ -719,6 +719,16 @@ export function App() {
    * first, since asking again with it still in the history would only be asking
    * the model to agree with itself. Either way whatever followed it goes too:
    * the verdict of the run being replaced is no longer about anything.
+   *
+   * Any turn, not only the last: a run that went fine is the one worth asking
+   * twice, and the history it needs is the history that came before it. What
+   * came after is a different conversation, and it does not survive the branch.
+   *
+   * The tool calls the replaced answer made on the way out go with it. They are
+   * rows about a run that is being re-run, and leaving them above the new one
+   * would read as a run that called the same tool twice. They stay in the
+   * traffic below, which is never truncated and is the actual record of what
+   * this tab has done.
    */
   const retry = useCallback(
     (id: string) => {
@@ -727,7 +737,11 @@ export function App() {
       if (item?.kind !== 'message') {
         return
       }
-      const kept = timeline.slice(0, item.message.role === 'user' ? index + 1 : index)
+      let end = item.message.role === 'user' ? index + 1 : index
+      while (timeline[end - 1]?.kind === 'activity') {
+        end -= 1
+      }
+      const kept = timeline.slice(0, end)
       setTimeline(kept)
       run(wireMessages(kept))
     },
