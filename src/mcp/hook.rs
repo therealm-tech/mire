@@ -2,10 +2,10 @@
 //!
 //! A live MCP tool is the one thing `mire` does that has effects outside this
 //! process, which makes it the one thing somebody else usually wants to know
-//! about: an audit trail, a policy gate, a webhook that pages whoever owns the
-//! server being poked. A hook is that — declared on the server in `mcp.yaml`,
-//! fired [`Before`](HookPhase::Before) the call goes out, [`After`](HookPhase::After)
-//! it comes back, or both.
+//! about: an audit trail, a policy gate, an upload endpoint that has to be
+//! handed the inputs before a task runs. A hook is that — declared on the server in
+//! `mcp.yaml`, fired [`Before`](HookPhase::Before) the call goes out,
+//! [`After`](HookPhase::After) it comes back, or both.
 //!
 //! ```yaml
 //! hooks:
@@ -13,28 +13,40 @@
 //!     on:
 //!       - before
 //!       - after
-//!     action:
-//!       kind: http
-//!       url: https://audit.internal/tool-calls
-//!       auth: keycloak-workload
+//!     actions:
+//!       - http:
+//!           url: https://audit.internal/tool-calls
+//!           auth: keycloak-workload
+//!           json:
+//!             tool: '{{ tool }}'
+//!             arguments: '{{ arguments }}'
 //! ```
+//!
+//! # Why a hook has several actions
+//!
+//! Because one event is usually two calls to two different people. The file goes
+//! to the API that is about to run it, the line goes to the audit sink; both
+//! belong to the same firing, both want their own address, credential and body.
+//! `actions:` is a list, they go out in the order written, and each produces its
+//! own [`HookRecord`].
 //!
 //! # Why the action is tagged
 //!
-//! `kind: http` is the only one today and the only one worth having first: an
-//! HTTP call is what every audit sink, policy service and chat webhook already
-//! speaks. It is tagged anyway, because the alternative is a second shape bolted
-//! onto a flat struct later, and a `kind:` added after the fact is a breaking
-//! change to every file that already exists.
+//! `- http:` is the only kind today and the only one worth having first: an HTTP
+//! call is what every audit sink, policy service and upload endpoint already
+//! speaks. The kind is the key it is written under anyway, because the
+//! alternative is a second shape bolted onto a flat struct later, and a `kind:`
+//! added after the fact is a breaking change to every file that already exists.
 //!
 //! # A hook can stop a call
 //!
 //! `on_error: fail` — the default — means a hook that could not be run, or whose
 //! endpoint answered outside `2xx`, is a failure of the tool call it belongs to.
 //! For a [`Before`](HookPhase::Before) hook that is a policy gate for free: the
-//! `tools/call` never goes out. For an [`After`](HookPhase::After) hook it is a
-//! report rather than an undo — the tool already ran, and nothing here can take
-//! that back. `on_error: continue` records the failure and gets out of the way.
+//! `tools/call` never goes out, and neither do the hook's remaining actions. For
+//! an [`After`](HookPhase::After) hook it is a report rather than an undo — the
+//! tool already ran, and nothing here can take that back. `on_error: continue`
+//! records the failure, moves on to the next action, and gets out of the way.
 //!
 //! The default is the loud one on purpose. A hook is something you asked for; a
 //! harness that quietly skipped it would be answering a question you did not ask.
@@ -55,14 +67,14 @@
 //!
 //! `when_defined:` names variables that must have been captured for the hook to
 //! fire at all — plain names, not templates, because this asks whether a value
-//! exists and the place to *use* it is `url:`, `body:` or `headers:`.
+//! exists and the place to *use* it is `url:`, `json:` or `headers:`.
 //!
 //! ```yaml
 //!     when_defined:
 //!       - session
-//!     action:
-//!       kind: http
-//!       url: https://audit.internal/sessions/{{ vars.session }}/tool-calls
+//!     actions:
+//!       - http:
+//!           url: https://audit.internal/sessions/{{ vars.session }}/tool-calls
 //! ```
 //!
 //! It is the graceful counterpart to the loud undefined above, and the pairing
@@ -71,8 +83,8 @@
 //!
 //! **Not firing is not failing.** `on_error` does not apply, nothing is sent, no
 //! credential is resolved, and the tool call proceeds untouched. The skip is
-//! recorded all the same, naming the variable it waited for — see
-//! [`HookRecord::skipped`]. A hook that quietly never ran and a hook that was
+//! recorded all the same, once per action, naming the variable it waited for —
+//! see [`HookRecord::skipped`]. A hook that quietly never ran and a hook that was
 //! never declared must not look the same in a trace.
 //!
 //! Names are matched against what the run has captured and nothing else. There
@@ -83,17 +95,35 @@
 //!
 //! # What it sends
 //!
-//! With no `body:`, the payload is the call itself — phase, server, tool,
-//! arguments, and on the way back the result — as JSON. A `body:` template
-//! replaces it and sees the same fields by name, plus `env` and `vars`:
+//! Whatever the file says, and nothing otherwise. An action declaring neither
+//! `json:` nor `multipart:` sends **no body at all** — see [`HookBody`] for why
+//! that is the only defensible default; the names a template can reach are the
+//! ones listed under *What it sends* below.
+//!
+//! `json:` is a document, not a string: written as YAML, sent as JSON, with every
+//! string in it a template.
 //!
 //! ```yaml
-//!     body: '{"who": "{{ env.USER }}", "ran": "{{ tool }}"}'
+//!           json:
+//!             who: '{{ env.USER }}'
+//!             ran: '{{ tool }}'
+//!             arguments: '{{ arguments }}'
+//!             attempt: 1
+//! ```
+//!
+//! A string that is one `{{ … }}` and nothing else keeps the type of what it
+//! names, so `arguments` above is the arguments *object* rather than a quoted
+//! rendering of one; text around the expression makes it a string again, because
+//! that is what interpolation is for. `{{ call }}` is the whole call in one
+//! line, for the audit sink that wants exactly that:
+//!
+//! ```yaml
+//!           json: '{{ call }}'
 //! ```
 //!
 //! `auth` is deliberately **not** in scope there. A credential belongs in a
-//! header, where the redactor is; a body template that can reach the auth
-//! registry is a credential one typo away from a webhook's access log.
+//! header, where the redactor is; a body that can reach the auth registry is a
+//! credential one typo away from a webhook's access log.
 //!
 //! A hook's own `headers:` see `vars` too, beside the `env` and `auth` they
 //! already had — see [`super::headers`]. Unlike a server's, they need no
@@ -103,11 +133,11 @@
 //! # Where it sends it
 //!
 //! `url:` is ordinarily just a URL, parsed and checked when `mcp.yaml` loads. It
-//! may also be a template, seeing exactly what `body:` sees — one context, so
+//! may also be a template, seeing exactly what `json:` sees — one context, so
 //! there is no second table to remember:
 //!
 //! ```yaml
-//!     url: https://audit.internal/sessions/{{ vars.session }}/tool-calls
+//!           url: https://audit.internal/sessions/{{ vars.session }}/tool-calls
 //! ```
 //!
 //! `vars` is what earlier tool calls captured; see [`crate::vars`] for how a
@@ -121,27 +151,41 @@
 //! happened to be written with. A template that renders to a host the provider
 //! does not allow gets the refusal.
 //!
-//! # Attaching the run's files
+//! # Sending the run's files
 //!
-//! `files:` names uploads the same way `tools:` names tools, and what it names
-//! goes out for real: the request becomes a `multipart/form-data` with the body
-//! demoted to a `payload` part and one `file` part per attachment.
+//! `multipart:` is one entry per form field, each naming uploads of the run. The
+//! request becomes a `multipart/form-data` carrying exactly those, under exactly
+//! those field names — which is what an upload endpoint asking for `file` is
+//! actually asking for.
 //!
 //! ```yaml
-//!     files:
-//!       - .*\.pdf
+//!           multipart:
+//!             file: '{{ uploads[0].path }}'
 //! ```
 //!
-//! Empty — the default — attaches **nothing**, which is the opposite of what an
-//! empty `tools:` means. The asymmetry is deliberate: covering every tool is a
-//! wide hook, while shipping every file somebody attached to a third address is
-//! a leak, and the second must be asked for. `.*` asks for it.
+//! A field can carry several files — write a list, or an expression producing
+//! one — and they go out as several parts under the same name, which is what
+//! every server-side upload handler already reads:
 //!
-//! The same files reach a `body:` template as `uploads`, whole — `base64`,
-//! `dataUrl`, `text`, the entries a model template gets from the same run. The
-//! default payload describes them instead, by name and size: the bytes are
-//! already going out as parts, and putting them in the body too would send every
-//! file twice.
+//! ```yaml
+//!           multipart:
+//!             file: '{{ uploads }}'
+//! ```
+//!
+//! Each entry names **one** upload: the object itself, or a string matching its
+//! `path`, `name` or `id`. A field that names something the run is not carrying
+//! fails the hook, and so does one that resolves to nothing at all. Sending a
+//! form with a part missing is how an endpoint ends up
+//! explaining our own configuration back to us, in the form of a `422`.
+//!
+//! `json:` and `multipart:` are mutually exclusive, refused together at load: a
+//! request is one body.
+//!
+//! The files reach a `json:` template as `uploads`, whole — `base64`, `dataUrl`,
+//! `text`, the entries a model template gets from the same run — for the webhook
+//! that wants the bytes inline instead. The trace never repeats them: it names
+//! the field, the file and its size, because 25 MB of base64 in a panel costs
+//! everything and tells nobody anything.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -149,6 +193,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use minijinja::value::{Value as Rendered, ValueKind};
 use minijinja::{Environment, UndefinedBehavior};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use reqwest::multipart::{Form, Part};
@@ -219,9 +264,8 @@ pub enum OnError {
 
 /// A name-matching pattern, shared with the profile's own `tools:` lists.
 ///
-/// Used here by `tools:` for tool names and by `files:` for upload names. One
-/// type because it is one rule — the pattern has to match the whole name. See
-/// [`crate::pattern`] for why that is not negotiable.
+/// One type because it is one rule — the pattern has to match the whole name.
+/// See [`crate::pattern`] for why that is not negotiable.
 pub use crate::pattern::NamePattern;
 
 /// One hook, compiled and ready to fire.
@@ -238,12 +282,17 @@ pub struct Hook {
     /// the default — is no condition.
     ///
     /// Names, not templates: this asks whether a value exists, and the place to
-    /// use it is `url:`, `body:` or `headers:`.
+    /// use it is `url:`, `json:` or `headers:`.
     pub when_defined: Vec<String>,
     /// What its failure does to the call.
     pub on_error: OnError,
-    /// What it actually does.
-    pub action: HookAction,
+    /// What it actually does, in declaration order.
+    ///
+    /// A list, because one event is usually two calls to two different people:
+    /// the file goes to the API that is about to run it, the line goes to the
+    /// audit sink. Each action produces its own record, and the first failure
+    /// decides what happens to the rest — see [`Self::on_error`].
+    pub actions: Vec<HookAction>,
 }
 
 impl Hook {
@@ -272,44 +321,6 @@ impl Hook {
             .find(|name| !vars.contains_key(*name))
             .map(String::as_str)
     }
-
-    /// Where it sends what it sends, as `mcp.yaml` wrote it.
-    ///
-    /// Its own URL, not the server's — which is the whole reason its credentials
-    /// are resolved separately: an auth provider's `allowed_hosts` is a statement
-    /// about where its credential may go, and a hook goes somewhere else.
-    ///
-    /// A [template](HookUrl::Template) is only an address once a call has been
-    /// made; [`HookUrl::resolve`] is where it becomes one.
-    #[must_use]
-    pub const fn url(&self) -> &HookUrl {
-        match &self.action {
-            HookAction::Http(http) => &http.url,
-        }
-    }
-
-    /// The provider it authenticates with, if it names one.
-    #[must_use]
-    pub fn auth(&self) -> Option<&str> {
-        match &self.action {
-            HookAction::Http(http) => http.auth.as_deref(),
-        }
-    }
-
-    /// Providers its header templates read, beyond [`Self::auth`].
-    pub fn header_providers(&self) -> impl Iterator<Item = &str> {
-        match &self.action {
-            HookAction::Http(http) => http.headers.providers(),
-        }
-    }
-
-    /// The action's kind, as `mcp.yaml` spells it.
-    #[must_use]
-    pub const fn kind(&self) -> &'static str {
-        match &self.action {
-            HookAction::Http(_) => "http",
-        }
-    }
 }
 
 /// What a hook does when it fires.
@@ -319,6 +330,49 @@ impl Hook {
 pub enum HookAction {
     /// Calls an HTTP endpoint.
     Http(HttpAction),
+}
+
+impl HookAction {
+    /// Where it sends what it sends, as `mcp.yaml` wrote it.
+    ///
+    /// Its own URL, not the server's — which is the whole reason its credentials
+    /// are resolved separately: an auth provider's `allowed_hosts` is a statement
+    /// about where its credential may go, and a hook goes somewhere else. Per
+    /// action, and not per hook, for exactly the same reason: two actions of one
+    /// hook are two addresses, and one of them may be somewhere the other's
+    /// credential must never reach.
+    ///
+    /// A [template](HookUrl::Template) is only an address once a call has been
+    /// made; [`HookUrl::resolve`] is where it becomes one.
+    #[must_use]
+    pub const fn url(&self) -> &HookUrl {
+        match self {
+            Self::Http(http) => &http.url,
+        }
+    }
+
+    /// The provider it authenticates with, if it names one.
+    #[must_use]
+    pub fn auth(&self) -> Option<&str> {
+        match self {
+            Self::Http(http) => http.auth.as_deref(),
+        }
+    }
+
+    /// Providers its header templates read, beyond [`Self::auth`].
+    pub fn header_providers(&self) -> impl Iterator<Item = &str> {
+        match self {
+            Self::Http(http) => http.headers.providers(),
+        }
+    }
+
+    /// The kind, as `mcp.yaml` spells it.
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::Http(_) => "http",
+        }
+    }
 }
 
 /// Where a hook sends what it sends.
@@ -395,17 +449,55 @@ pub struct HttpAction {
     /// Extra headers, rendered per request. `env` and `auth` are in scope,
     /// exactly as they are for a server's own headers.
     pub headers: HeaderTemplates,
-    /// Body template. `None` sends the call as JSON — see [`Payload`].
-    pub body: Option<String>,
-    /// Which of the run's uploads to attach, by name.
+    /// What the request carries, or `None` for no body at all.
     ///
-    /// Empty — the default — is **none**, which is the opposite of what `tools:`
-    /// empty means and deliberately so: a hook that shipped somebody's attached
-    /// files to a third party unless told otherwise is a leak, not a default.
-    /// `.*` asks for all of them.
-    pub files: Vec<NamePattern>,
+    /// `None` is the honest default. A hook that posted a payload nobody wrote
+    /// is a request the endpoint never agreed to read, and the one thing worse
+    /// than no body is one somebody has to reverse-engineer from a `422`. The
+    /// call itself is still one line away — `json: "{{ call }}"` — for the audit
+    /// sink that does want exactly that.
+    pub body: Option<HookBody>,
     /// Per-request timeout.
     pub timeout: Duration,
+}
+
+/// What a hook's request carries.
+///
+/// Two shapes, because they answer two questions. [`Json`](Self::Json) is "tell
+/// somebody about this call", and the endpoint being told has a schema of its
+/// own — so the file writes that schema out, field by field, instead of hoping a
+/// fixed payload happens to fit. [`Multipart`](Self::Multipart) is "send
+/// somebody these bytes", which is the shape every upload endpoint already
+/// reads.
+///
+/// Mutually exclusive, and `mcp.yaml` refuses both together at load rather than
+/// picking one: a request cannot be a JSON document and a form at the same time,
+/// and a file declaring both was written expecting something else to happen.
+#[derive(Debug, Clone)]
+pub enum HookBody {
+    /// A JSON document, as written, with every string a template.
+    ///
+    /// The tree is walked on each firing: strings render, everything else goes
+    /// out as it stands. A string that is one `{{ … }}` and nothing else keeps
+    /// the expression's own type, so `"{{ arguments }}"` is the arguments object
+    /// rather than a quoted rendering of one.
+    Json(Value),
+    /// A `multipart/form-data`, one entry per field.
+    Multipart(Vec<PartSpec>),
+}
+
+/// One field of a multipart body, and the uploads it carries.
+///
+/// `sources` is a list because a field can carry several files: they go out as
+/// several parts under the same name, which is what every server-side upload
+/// handler already reads. Naming each part after its file would make the
+/// endpoint guess field names it cannot know in advance.
+#[derive(Debug, Clone)]
+pub struct PartSpec {
+    /// The form field, as `mcp.yaml` named it.
+    pub field: String,
+    /// Templates, each naming uploads of the run.
+    pub sources: Vec<String>,
 }
 
 /// One hook firing, as it happened.
@@ -419,6 +511,12 @@ pub struct HookRecord {
     pub server: String,
     /// The hook's own name.
     pub hook: String,
+    /// Which of the hook's actions this was, counting from one.
+    ///
+    /// A hook is allowed several, and two of them can differ only by what they
+    /// send. Without this, a trace of a hook that both uploads and audits is two
+    /// cards with the same title and no way to say which is which.
+    pub step: u32,
     /// Which side of the call it fired on.
     pub phase: HookPhase,
     /// The tool whose call it fired around.
@@ -431,10 +529,11 @@ pub struct HookRecord {
     pub method: String,
     /// Request headers, masked.
     pub headers: BTreeMap<String, String>,
-    /// The body it sent, masked. Empty when it never got that far.
+    /// The body it sent, masked.
     ///
-    /// With files attached this is the `payload` part alone. The parts carrying
-    /// the files are in [`files`](Self::files), by name and size: a trace is
+    /// Empty for a hook that sent files, and for one that sent nothing at all:
+    /// there is no text to show in either case, and the parts that did go out
+    /// are in [`files`](Self::files), by field, name and size. A trace is
     /// something a person reads, and 25 MB of base64 in it would cost the panel
     /// everything and tell nobody anything.
     pub request: String,
@@ -468,13 +567,19 @@ pub struct HookRecord {
     pub skipped: Option<String>,
 }
 
-/// One attached file, as the trace and the default payload describe it.
+/// One attached file, as the trace describes it.
 ///
 /// Everything except the bytes. The endpoint got those as a multipart part; a
 /// reader of the trace wants to know which file went, not to scroll past it.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Attachment {
+    /// The form field it went out under, as `mcp.yaml` named it.
+    ///
+    /// A multipart with three fields makes three different statements to the
+    /// endpoint, and a trace listing only file names would say which bytes went
+    /// without saying what they were sent *as*.
+    pub field: String,
     /// The upload's handle, as `POST /api/uploads` answered it.
     pub id: String,
     /// File name, sanitised. Also the part's `filename`.
@@ -517,10 +622,10 @@ pub fn drain(journal: &HookJournal) -> Vec<HookRecord> {
 
 /// What a hook is told about the call it fired around.
 ///
-/// This is the default body verbatim, and the named variables a `body:` template
-/// sees. `env` is added for the template and left out of the payload — a hook
-/// that ships the whole process environment to a webhook by default is a leak
-/// nobody asked for.
+/// The named variables every template of a hook sees, and what `{{ call }}`
+/// renders to. `env`, `vars` and `uploads` sit beside it rather than in it — a
+/// hook that shipped the whole process environment to a webhook because somebody
+/// wrote `{{ call }}` would be a leak nobody asked for.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Payload<'a> {
@@ -535,25 +640,6 @@ pub struct Payload<'a> {
     /// What the call produced. `after` only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<ToolOutcome>,
-}
-
-/// The payload as one hook sends it: the call, plus what that hook attached.
-///
-/// Separate from [`Payload`] because the call is one thing and `files:` is per
-/// hook — two hooks on the same `tools/call` can attach different files, and the
-/// payload they share must not have to pick one of them.
-#[derive(Debug, Serialize)]
-struct Envelope<'a> {
-    #[serde(flatten)]
-    payload: &'a Payload<'a>,
-    /// The files travelling alongside, described.
-    ///
-    /// Described and not embedded: the bytes are already going out as multipart
-    /// parts, and a default payload that also carried them base64'd would send
-    /// every file twice. A `body:` template that wants the bytes anyway has
-    /// `uploads` for exactly that.
-    #[serde(skip_serializing_if = "<[Attachment]>::is_empty")]
-    files: &'a [Attachment],
 }
 
 /// The outcome of a `tools/call`, as an `after` hook sees it.
@@ -579,12 +665,18 @@ pub struct ToolOutcome {
 
 /// The payload plus what only a template gets to see.
 ///
-/// Shared by `url:` and `body:` so the two cannot drift into two vocabularies
-/// for the same call.
+/// Shared by `url:`, `headers:`, `json:` and `multipart:`, so the four cannot
+/// drift into four vocabularies for the same call.
 #[derive(Debug, Serialize)]
 struct Rendering<'a> {
     #[serde(flatten)]
-    envelope: &'a Envelope<'a>,
+    payload: &'a Payload<'a>,
+    /// The same fields again, under one name.
+    ///
+    /// So that `json: "{{ call }}"` is the whole call in one line: the entire
+    /// configuration of an audit sink, and the thing `mire` used to send whether
+    /// anybody had asked for it or not.
+    call: &'a Payload<'a>,
     /// The process environment, read fresh on every render.
     env: BTreeMap<String, String>,
     /// What the run's tool calls have captured so far.
@@ -592,21 +684,24 @@ struct Rendering<'a> {
     /// Here and not in the payload, like `env`: a hook that shipped a run's
     /// whole variable bag to a webhook by default is a decision nobody made.
     vars: &'a Captured,
-    /// The attached files whole — `base64`, `dataUrl`, `text` and the rest, the
-    /// same entries a model template gets from the same run.
+    /// Every file the run is carrying, whole — `base64`, `dataUrl`, `text` and
+    /// the rest, the same entries a model template gets from the same run.
     ///
-    /// Only here, never in the payload: the bytes go out as parts, and a
-    /// template asking for them in the body is asking on purpose.
-    uploads: &'a [&'a UploadRef],
+    /// All of them, not a selection: `multipart:` is where a hook says which
+    /// ones leave, and it says so by naming them.
+    uploads: &'a [UploadRef],
 }
 
-/// Fires every hook that applies, in declaration order.
+/// Fires every hook that applies, in declaration order, and every action of
+/// each in the order the file wrote them.
 ///
 /// # Errors
 ///
-/// The first failure of a hook whose `on_error` is `fail`. Later hooks are not
-/// fired: a gate that said no has said no, and running the rest would be a
-/// notification about a call that is not happening.
+/// The first failure of a hook whose `on_error` is `fail`. Nothing after it
+/// runs — neither the hook's remaining actions nor the hooks behind it: a gate
+/// that said no has said no, and the rest would be notifications about a call
+/// that is not happening. `on_error: continue` records the failure and moves on
+/// to the next action, which is the same rule applied one level down.
 pub(super) async fn fire(
     http: &Client,
     hooks: &[Hook],
@@ -623,8 +718,9 @@ pub(super) async fn fire(
 
         // Asked for by `when_defined:`, and answered before anything is built:
         // a hook waiting on a variable pays for no credential, renders no
-        // template, and sends nothing. It is filed all the same — see
-        // [`HookRecord::skipped`] for why a non-event still belongs in a trace.
+        // template, and sends nothing. Every one of its actions is filed all the
+        // same — see [`HookRecord::skipped`] for why a non-event belongs in a
+        // trace, and once per action because each names its own address.
         if let Some(missing) = hook.waiting_for(vars) {
             debug!(
                 server = %payload.server,
@@ -634,67 +730,87 @@ pub(super) async fn fire(
                 %missing,
                 "hook skipped: the variable it waits for is not captured yet"
             );
-            file(skipped(hook, payload, missing));
+            for (step, action) in hook.actions.iter().enumerate() {
+                file(skipped(hook, action, step, payload, missing));
+            }
             continue;
         }
 
-        let (mut record, outcome) = run(http, hook, payload, uploads, vars, credentials).await;
+        for (step, action) in hook.actions.iter().enumerate() {
+            let firing = Firing { hook, action, step };
+            let (mut record, outcome) =
+                run(http, firing, payload, uploads, vars, credentials).await;
 
-        let Err(message) = outcome else {
-            debug!(
+            let Err(message) = outcome else {
+                debug!(
+                    server = %payload.server,
+                    hook = %hook.name,
+                    action = record.step,
+                    phase = %payload.phase,
+                    tool = %payload.tool,
+                    "hook fired"
+                );
+                file(record);
+                continue;
+            };
+
+            record.stopped_the_call = hook.on_error == OnError::Fail;
+            record.error = Some(message.clone());
+            warn!(
                 server = %payload.server,
                 hook = %hook.name,
+                action = record.step,
                 phase = %payload.phase,
                 tool = %payload.tool,
-                "hook fired"
+                stopped_the_call = record.stopped_the_call,
+                %message,
+                "hook failed"
             );
+            let stopped = record.stopped_the_call;
             file(record);
-            continue;
-        };
 
-        record.stopped_the_call = hook.on_error == OnError::Fail;
-        record.error = Some(message.clone());
-        warn!(
-            server = %payload.server,
-            hook = %hook.name,
-            phase = %payload.phase,
-            tool = %payload.tool,
-            stopped_the_call = record.stopped_the_call,
-            %message,
-            "hook failed"
-        );
-        let stopped = record.stopped_the_call;
-        file(record);
-
-        if stopped {
-            return Err(McpError::Hook {
-                server: payload.server.to_owned(),
-                hook: hook.name.clone(),
-                phase: payload.phase,
-                message,
-            });
+            if stopped {
+                return Err(McpError::Hook {
+                    server: payload.server.to_owned(),
+                    hook: hook.name.clone(),
+                    phase: payload.phase,
+                    message,
+                });
+            }
         }
     }
 
     Ok(())
 }
 
-/// The record for a hook that `when_defined:` held back.
+/// Which action of its hook this is, as a person counts.
+fn step_of(index: usize) -> u32 {
+    u32::try_from(index + 1).unwrap_or(u32::MAX)
+}
+
+/// The record for an action `when_defined:` held back.
 ///
-/// Everything a firing would have said about *which* hook this was, and nothing
-/// about a request: there was none. `url` is what the file says rather than a
-/// rendered address, because rendering it is exactly what did not happen — and
-/// on the hook this is written for, could not have.
-fn skipped(hook: &Hook, payload: &Payload<'_>, missing: &str) -> HookRecord {
-    let HookAction::Http(action) = &hook.action;
+/// Everything a firing would have said about *which* action this was, and
+/// nothing about a request: there was none. `url` is what the file says rather
+/// than a rendered address, because rendering it is exactly what did not happen
+/// — and on the hook this is written for, could not have.
+fn skipped(
+    hook: &Hook,
+    action: &HookAction,
+    step: usize,
+    payload: &Payload<'_>,
+    missing: &str,
+) -> HookRecord {
+    let HookAction::Http(http) = action;
     HookRecord {
         server: payload.server.to_owned(),
         hook: hook.name.clone(),
+        step: step_of(step),
         phase: payload.phase,
         tool: payload.tool.to_owned(),
-        action: hook.kind().to_owned(),
-        url: action.url.source().to_owned(),
-        method: action.method.to_string(),
+        action: action.kind().to_owned(),
+        url: http.url.source().to_owned(),
+        method: http.method.to_string(),
         headers: BTreeMap::new(),
         request: String::new(),
         files: Vec::new(),
@@ -707,27 +823,40 @@ fn skipped(hook: &Hook, payload: &Payload<'_>, missing: &str) -> HookRecord {
     }
 }
 
-/// One hook, run to completion. Always produces a record.
+/// Which action of which hook is going out, for the record it will produce.
+///
+/// Three fields that only ever travel together: a record has to name the hook,
+/// the action within it, and where that action sits in the list.
+struct Firing<'a> {
+    hook: &'a Hook,
+    action: &'a HookAction,
+    step: usize,
+}
+
+/// One action of one hook, run to completion. Always produces a record.
 async fn run(
     http: &Client,
-    hook: &Hook,
+    firing: Firing<'_>,
     payload: &Payload<'_>,
     uploads: &[UploadRef],
     vars: &Captured,
     credentials: &McpCredentials<'_>,
 ) -> (HookRecord, Result<(), String>) {
-    let HookAction::Http(action) = &hook.action;
+    let Firing { hook, action, step } = firing;
+    let HookAction::Http(http_action) = action;
 
     let mut record = HookRecord {
         server: payload.server.to_owned(),
         hook: hook.name.clone(),
+        step: step_of(step),
         phase: payload.phase,
         tool: payload.tool.to_owned(),
-        action: hook.kind().to_owned(),
+        action: action.kind().to_owned(),
         // Replaced below by the address actually used. Until then it is what the
-        // file says, so a hook that dies rendering its URL still says which one.
-        url: action.url.source().to_owned(),
-        method: action.method.to_string(),
+        // file says, so an action that dies rendering its URL still says which
+        // one.
+        url: http_action.url.source().to_owned(),
+        method: http_action.method.to_string(),
         headers: BTreeMap::new(),
         request: String::new(),
         files: Vec::new(),
@@ -739,60 +868,53 @@ async fn run(
         skipped: None,
     };
 
-    let attached: Vec<&UploadRef> = select(&action.files, uploads);
-    let described: Vec<Attachment> = attached.iter().map(|file| describe(file)).collect();
-    let envelope = Envelope {
-        payload,
-        files: &described,
-    };
     let rendering = Rendering {
-        envelope: &envelope,
+        payload,
+        call: payload,
         env: std::env::vars().collect(),
         vars,
-        uploads: &attached,
+        uploads,
     };
 
     // Before the credential, and this order is not an accident: the provider
     // decides what to hand over by looking at where it is going, so the address
     // has to exist first. A template that renders to somewhere `allowed_hosts`
     // refuses is refused, which is the check doing its job.
-    let url = match action.url.resolve(&rendering) {
+    let url = match http_action.url.resolve(&rendering) {
         Ok(url) => url,
         Err(message) => return (record, Err(message)),
     };
     record.url = url.to_string();
 
     // Resolved here rather than with the server's, and only now: a credential
-    // costs an exchange and can fail, and neither belongs to a hook that did not
-    // fire. Against the *hook's* URL, so `allowed_hosts` means what it says.
-    let resolved = match credentials.for_hook(hook, &url).await {
+    // costs an exchange and can fail, and neither belongs to an action that did
+    // not fire. Against the *action's* URL, so `allowed_hosts` means what it
+    // says.
+    let resolved = match credentials.for_action(action, &url).await {
         Ok(resolved) => resolved,
         Err(error) => return (record, Err(error.to_string())),
     };
 
-    let body = match body(action, &rendering) {
-        Ok(body) => body,
+    let sent = match render_body(http_action, &rendering) {
+        Ok(sent) => sent,
         Err(message) => return (record, Err(message)),
     };
 
-    // Files turn the whole thing into a `multipart/form-data`, with the body
-    // demoted to a `payload` part beside them.
-    let attachments = if attached.is_empty() {
-        None
-    } else {
-        match form(body.clone(), &attached) {
+    let multipart = match &sent {
+        Sent::Files(attached) => match form(attached) {
             Ok(form) => Some(form),
             Err(message) => return (record, Err(message)),
-        }
+        },
+        Sent::Nothing | Sent::Json(_) => None,
     };
 
     let (mut headers, scrub) = match authenticate(
-        action,
+        http_action,
         &url,
         &resolved,
         payload.server,
         vars,
-        attachments.is_some(),
+        sent.is_json(),
     )
     .await
     {
@@ -800,21 +922,27 @@ async fn run(
         Err(message) => return (record, Err(message)),
     };
 
-    let shown = settle_content_type(&mut headers, attachments.as_ref());
+    let shown = settle_content_type(&mut headers, multipart.as_ref());
 
     // Filled in only now: the auth provider has just added its secret to the
     // redactor, and a record taken a line earlier would carry it in the clear.
     record.headers = scrub.headers(&shown);
-    record.request = scrub.text(&body);
-    record.files = described;
+    match &sent {
+        Sent::Nothing => {}
+        Sent::Json(text) => record.request = scrub.text(text),
+        Sent::Files(attached) => record.files = attached.iter().map(describe).collect(),
+    }
 
     let request = http
-        .request(action.method.clone(), url)
+        .request(http_action.method.clone(), url)
         .headers(headers)
-        .timeout(action.timeout);
-    let request = match attachments {
-        None => request.body(body),
-        Some(form) => request.multipart(form),
+        .timeout(http_action.timeout);
+    let request = match (multipart, sent) {
+        (Some(form), _) => request.multipart(form),
+        (None, Sent::Json(text)) => request.body(text),
+        // No `json:`, no `multipart:`, no body — and no `content-length` guess
+        // on the endpoint's part about what the silence meant.
+        (None, Sent::Nothing | Sent::Files(_)) => request,
     };
 
     let started = Instant::now();
@@ -823,7 +951,7 @@ async fn run(
 
     let response = match sent {
         Ok(response) => response,
-        // The endpoint's own words, not `reqwest`'s: a hook that failed at the
+        // The endpoint's own words, not `reqwest`'s: an action that failed at the
         // address printed right above it has to say what it ran into there.
         Err(error) => return (record, Err(scrub.text(&crate::transport::explain(&error)))),
     };
@@ -841,6 +969,29 @@ async fn run(
     }
 }
 
+/// What one firing puts on the wire.
+enum Sent<'a> {
+    /// Nothing at all: the action declares neither `json:` nor `multipart:`.
+    Nothing,
+    /// A JSON document, serialised.
+    Json(String),
+    /// Files, each under the field that named it.
+    Files(Vec<Attached<'a>>),
+}
+
+impl Sent<'_> {
+    /// Whether `content-type: application/json` is the truth about this body.
+    const fn is_json(&self) -> bool {
+        matches!(self, Self::Json(_))
+    }
+}
+
+/// One upload on its way out, under the field that named it.
+struct Attached<'a> {
+    field: String,
+    upload: &'a UploadRef,
+}
+
 /// What a hook's endpoint saying no amounts to, in one line.
 ///
 /// The body goes in the message, already scrubbed: a policy gate that refuses a
@@ -856,27 +1007,228 @@ fn refused(status: reqwest::StatusCode, body: &str) -> String {
     }
 }
 
-/// The run's uploads this hook asked for, in the order the run attached them.
-///
-/// No patterns is none of them. See [`HttpAction::files`] for why that is the
-/// opposite of what `tools:` empty means.
-fn select<'a>(patterns: &[NamePattern], uploads: &'a [UploadRef]) -> Vec<&'a UploadRef> {
-    if patterns.is_empty() {
-        return Vec::new();
+/// The body an action sends, rendered: whatever `json:` or `multipart:` asked
+/// for, and nothing when it asked for neither.
+fn render_body<'a>(action: &HttpAction, rendering: &Rendering<'a>) -> Result<Sent<'a>, String> {
+    match &action.body {
+        None => Ok(Sent::Nothing),
+        Some(HookBody::Json(node)) => serde_json::to_string(&render_json(node, rendering)?)
+            .map(Sent::Json)
+            .map_err(|error| format!("the rendered body could not be serialised: {error}")),
+        Some(HookBody::Multipart(parts)) => attach(parts, rendering).map(Sent::Files),
     }
-    uploads
-        .iter()
-        .filter(|upload| patterns.iter().any(|pattern| pattern.matches(&upload.name)))
-        .collect()
 }
 
-/// One upload, as the trace and the payload describe it. Everything but bytes.
-fn describe(upload: &UploadRef) -> Attachment {
+/// A JSON body, rendered node by node.
+///
+/// Strings render; numbers, booleans, `null` and the shape of the document
+/// itself go out as `mcp.yaml` wrote them. The document is the endpoint's
+/// schema, written down — which is the whole reason this is a tree and not a
+/// string somebody has to keep valid by hand.
+fn render_json(node: &Value, rendering: &Rendering<'_>) -> Result<Value, String> {
+    match node {
+        Value::String(text) => render_value(text, rendering),
+        Value::Array(items) => {
+            let mut rendered = Vec::with_capacity(items.len());
+            for item in items {
+                rendered.push(render_json(item, rendering)?);
+            }
+            Ok(Value::Array(rendered))
+        }
+        Value::Object(fields) => {
+            let mut rendered = serde_json::Map::with_capacity(fields.len());
+            for (name, value) in fields {
+                rendered.insert(name.clone(), render_json(value, rendering)?);
+            }
+            Ok(Value::Object(rendered))
+        }
+        other => Ok(other.clone()),
+    }
+}
+
+/// One string of a JSON body, rendered with its type kept.
+///
+/// A string that is one `{{ … }}` and nothing else is *evaluated* rather than
+/// rendered, so an expression naming an object stays an object. Anything with
+/// text around it is a string, because that is what interpolation is for.
+///
+/// The rule earns its paragraph: without it, `"{{ arguments }}"` reaches the
+/// endpoint as a quoted rendering of a map. That parses as JSON, survives
+/// review, and is wrong — the field is a string where a schema promised an
+/// object, and the endpoint is the one that finds out.
+fn render_value(text: &str, rendering: &Rendering<'_>) -> Result<Value, String> {
+    let Some(expression) = lone_expression(text) else {
+        return ENVIRONMENT
+            .render_str(text, rendering)
+            .map(Value::String)
+            .map_err(|error| {
+                format!(
+                    "the body could not be rendered: {}",
+                    explain(&error, text, rendering)
+                )
+            });
+    };
+
+    serde_json::to_value(evaluate(expression, text, rendering)?)
+        .map_err(|error| format!("the body could not be serialised: {error}"))
+}
+
+/// The expression a string is made of, when it is made of nothing else.
+fn lone_expression(text: &str) -> Option<&str> {
+    let trimmed = text.trim();
+    let inner = trimmed.strip_prefix("{{")?.strip_suffix("}}")?;
+    (!inner.contains("{{") && !inner.contains("}}")).then_some(inner)
+}
+
+/// One expression, evaluated to a value rather than rendered to text.
+fn evaluate(
+    expression: &str,
+    template: &str,
+    rendering: &Rendering<'_>,
+) -> Result<Rendered, String> {
+    let value = ENVIRONMENT
+        .compile_expression(expression)
+        .map_err(|error| {
+            format!(
+                "the template could not be compiled: {}",
+                explain(&error, template, rendering)
+            )
+        })?
+        .eval(rendering)
+        .map_err(|error| {
+            format!(
+                "the template could not be rendered: {}",
+                explain(&error, template, rendering)
+            )
+        })?;
+
+    // Strict undefined behaviour catches this while *rendering* a template, and
+    // says nothing while evaluating one: an expression naming something that is
+    // not there evaluates happily to undefined, which serialises to `null`. A
+    // field silently `null` is the webhook that looks like it works — the exact
+    // failure the strict setting exists to prevent — so the same rule is applied
+    // here by hand.
+    if value.is_undefined() {
+        return Err(format!(
+            "the template could not be rendered: {}",
+            name_the_missing("undefined value".to_owned(), template, rendering)
+        ));
+    }
+
+    Ok(value)
+}
+
+/// The parts of a multipart body, resolved against what the run is carrying.
+fn attach<'a>(parts: &[PartSpec], rendering: &Rendering<'a>) -> Result<Vec<Attached<'a>>, String> {
+    let mut attached: Vec<Attached<'a>> = Vec::new();
+
+    for part in parts {
+        let before = attached.len();
+
+        for source in &part.sources {
+            let value =
+                match lone_expression(source) {
+                    Some(expression) => evaluate(expression, source, rendering)?,
+                    None => Rendered::from(ENVIRONMENT.render_str(source, rendering).map_err(
+                        |error| format!("`{}`: {}", part.field, explain(&error, source, rendering)),
+                    )?),
+                };
+
+            for upload in resolve(&value, rendering.uploads, &part.field)? {
+                attached.push(Attached {
+                    field: part.field.clone(),
+                    upload,
+                });
+            }
+        }
+
+        // A field that named nothing is the failure this whole shape exists to
+        // make loud. A multipart missing the one part the endpoint asked for
+        // goes out looking perfectly well-formed and comes back a `422` about a
+        // field nobody in the file ever mentioned.
+        if attached.len() == before {
+            return Err(format!(
+                "`{}` named no upload ({})",
+                part.field,
+                carrying(rendering.uploads)
+            ));
+        }
+    }
+
+    Ok(attached)
+}
+
+/// The uploads one rendered value names.
+///
+/// Three forms, because a template can sensibly produce three things: an upload
+/// whole (`{{ uploads[0] }}`), a list of them (`{{ uploads }}`), or a string
+/// naming one — its `path`, its `name` or its `id`. Anything else is an error
+/// rather than a part quietly left out of the form.
+fn resolve<'a>(
+    value: &Rendered,
+    uploads: &'a [UploadRef],
+    field: &str,
+) -> Result<Vec<&'a UploadRef>, String> {
+    if let Some(text) = value.as_str() {
+        return named(text, uploads, field).map(|upload| vec![upload]);
+    }
+
+    if value.kind() == ValueKind::Seq {
+        let items = value
+            .try_iter()
+            .map_err(|error| format!("`{field}`: {}", root(&error)))?;
+        let mut found = Vec::new();
+        for item in items {
+            found.extend(resolve(&item, uploads, field)?);
+        }
+        return Ok(found);
+    }
+
+    // An upload as the context carries it. Any of the three identifying fields
+    // will do, and `path` is the one a file is most likely to have written.
+    for attribute in ["path", "id", "name"] {
+        if let Ok(inner) = value.get_attr(attribute)
+            && let Some(text) = inner.as_str()
+        {
+            return named(text, uploads, field).map(|upload| vec![upload]);
+        }
+    }
+
+    Err(format!(
+        "`{field}`: that is not a file, and not the name of one"
+    ))
+}
+
+/// The upload a path, name or id points at.
+fn named<'a>(text: &str, uploads: &'a [UploadRef], field: &str) -> Result<&'a UploadRef, String> {
+    uploads
+        .iter()
+        .find(|upload| upload.path == text || upload.name == text || upload.id == text)
+        .ok_or_else(|| {
+            format!(
+                "`{field}`: `{text}` is not a file this run is carrying ({})",
+                carrying(uploads)
+            )
+        })
+}
+
+/// What the run has to offer, for the error saying it had none of it.
+fn carrying(uploads: &[UploadRef]) -> String {
+    if uploads.is_empty() {
+        return "nothing was attached to this run".to_owned();
+    }
+    let names: Vec<&str> = uploads.iter().map(|upload| upload.name.as_str()).collect();
+    format!("it is carrying {}", names.join(", "))
+}
+
+/// One upload on its way out, as the trace describes it. Everything but bytes.
+fn describe(attached: &Attached<'_>) -> Attachment {
     Attachment {
-        id: upload.id.clone(),
-        name: upload.name.clone(),
-        size: upload.size,
-        content_type: mime_of(upload).to_owned(),
+        field: attached.field.clone(),
+        id: attached.upload.id.clone(),
+        name: attached.upload.name.clone(),
+        size: attached.upload.size,
+        content_type: mime_of(attached.upload).to_owned(),
     }
 }
 
@@ -892,49 +1244,25 @@ fn mime_of(upload: &UploadRef) -> &str {
         .unwrap_or("application/octet-stream")
 }
 
-/// The multipart form: the `payload` part, then one `file` part per attachment.
-///
-/// Every file uses the same part name. A form with one field repeated is what
-/// every server-side upload handler already reads, and naming each part after
-/// its file would make the endpoint guess field names it cannot know in advance.
-fn form(body: String, attached: &[&UploadRef]) -> Result<Form, String> {
-    let payload = Part::text(body)
-        .mime_str("application/json")
-        .map_err(|error| format!("the payload part could not be built: {error}"))?;
-    let mut form = Form::new().part("payload", payload);
+/// The multipart form: one part per file, under the field that named it.
+fn form(attached: &[Attached<'_>]) -> Result<Form, String> {
+    let mut form = Form::new();
 
-    for upload in attached {
+    for one in attached {
         // Decoded rather than re-read off the disk: the run already holds the
         // file, and going back to the filesystem would be a second answer to a
         // question already answered — one that can differ if the file moved.
         let bytes = BASE64
-            .decode(&upload.base64)
-            .map_err(|error| format!("`{}` could not be decoded: {error}", upload.name))?;
+            .decode(&one.upload.base64)
+            .map_err(|error| format!("`{}` could not be decoded: {error}", one.upload.name))?;
         let part = Part::bytes(bytes)
-            .file_name(upload.name.clone())
-            .mime_str(mime_of(upload))
-            .map_err(|error| format!("`{}` could not be attached: {error}", upload.name))?;
-        form = form.part("file", part);
+            .file_name(one.upload.name.clone())
+            .mime_str(mime_of(one.upload))
+            .map_err(|error| format!("`{}` could not be attached: {error}", one.upload.name))?;
+        form = form.part(one.field.clone(), part);
     }
 
     Ok(form)
-}
-
-/// The body to send: the template's, or the call itself as JSON.
-fn body(action: &HttpAction, rendering: &Rendering<'_>) -> Result<String, String> {
-    let Some(template) = &action.body else {
-        return serde_json::to_string(rendering.envelope)
-            .map_err(|error| format!("the payload could not be serialised: {error}"));
-    };
-
-    ENVIRONMENT
-        .render_str(template, rendering)
-        .map_err(|error| {
-            format!(
-                "the body template could not be rendered: {}",
-                explain(&error, template, rendering)
-            )
-        })
 }
 
 /// The headers to send, and a redactor holding every secret among them.
@@ -944,16 +1272,14 @@ async fn authenticate(
     credentials: &HookCredentials<'_>,
     server: &str,
     vars: &Captured,
-    multipart: bool,
+    json: bool,
 ) -> Result<(HeaderMap, Redactor), String> {
     let mut headers = HeaderMap::new();
-    // The default body is JSON. A template that sends something else says so with
-    // a `content-type:` header of its own, which lands after this and wins.
-    //
-    // Skipped entirely when files are going out: that body's type is settled by
-    // the multipart encoder, boundary and all, and nothing written here could be
-    // right about it.
-    if !multipart {
+    // Only for a `json:` body, and only as a starting point: a `content-type:`
+    // of the action's own lands after this and wins. A multipart's type is
+    // settled by the encoder, boundary and all, and nothing written here could
+    // be right about it — and a request with no body has no type to declare.
+    if json {
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     }
 
@@ -1033,11 +1359,18 @@ fn readable(headers: &HeaderMap) -> BTreeMap<String, String> {
 /// cannot find different names for the same template.
 ///
 /// Only **names** are ever emitted. Echoing the template back would be more
-/// direct and is exactly the wrong thing: a `body:` may hold a literal
+/// direct and is exactly the wrong thing: a `json:` field may hold a literal
 /// credential, and an error message is a place secrets go to be logged forever.
 fn explain(error: &minijinja::Error, template: &str, rendering: &Rendering<'_>) -> String {
-    let message = root(error);
+    name_the_missing(root(error), template, rendering)
+}
 
+/// The same, for a failure `MiniJinja` did not report as an error.
+///
+/// Split out for [`evaluate`], which has to raise "undefined" itself: the naming
+/// is the useful half, and it must read identically whichever side found the
+/// problem.
+fn name_the_missing(message: String, template: &str, rendering: &Rendering<'_>) -> String {
     let mut missing: Vec<&str> = super::headers::lookups(template, "env")
         .into_iter()
         .filter(|name| !rendering.env.contains_key(*name))
@@ -1082,6 +1415,17 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn action() -> HttpAction {
+        HttpAction {
+            url: HookUrl::Fixed("https://audit.internal/events".parse().expect("url")),
+            method: Method::POST,
+            auth: None,
+            headers: HeaderTemplates::default(),
+            body: None,
+            timeout: Duration::from_secs(5),
+        }
+    }
+
     fn hook(name: &str, phases: &[HookPhase], tools: &[&str]) -> Hook {
         Hook {
             name: name.to_owned(),
@@ -1092,15 +1436,7 @@ mod tests {
                 .collect(),
             when_defined: Vec::new(),
             on_error: OnError::Fail,
-            action: HookAction::Http(HttpAction {
-                url: HookUrl::Fixed("https://audit.internal/events".parse().expect("url")),
-                method: Method::POST,
-                auth: None,
-                headers: HeaderTemplates::default(),
-                body: None,
-                files: Vec::new(),
-                timeout: Duration::from_secs(5),
-            }),
+            actions: vec![HookAction::Http(action())],
         }
     }
 
@@ -1112,55 +1448,103 @@ mod tests {
         }
     }
 
-    /// The body one hook would send, with nothing attached and nothing captured.
-    fn rendered(action: &HttpAction, payload: &Payload<'_>) -> Result<String, String> {
-        with_files(action, payload, &[])
+    /// An action sending the JSON document `body`.
+    fn sending(body: Value) -> HttpAction {
+        HttpAction {
+            body: Some(HookBody::Json(body)),
+            ..action()
+        }
     }
 
-    /// The body one hook would send, with `attached` going out beside it.
-    fn with_files(
-        action: &HttpAction,
-        payload: &Payload<'_>,
-        attached: &[&UploadRef],
-    ) -> Result<String, String> {
-        with_vars(action, payload, attached, &Captured::new())
-            .map(|(body, _)| body)
-            .map_err(|(message, _)| message)
+    /// An action sending `field`, filled by `sources`.
+    fn attaching(field: &str, sources: &[&str]) -> HttpAction {
+        HttpAction {
+            body: Some(HookBody::Multipart(vec![PartSpec {
+                field: field.to_owned(),
+                sources: sources.iter().map(|s| (*s).to_owned()).collect(),
+            }])),
+            ..action()
+        }
     }
 
-    /// The body and the URL one hook would produce, given what a run captured.
+    /// What one firing put on the wire, in terms a test can assert on.
+    #[derive(Debug)]
+    struct Fired {
+        /// The JSON body, or empty when there was none.
+        body: String,
+        /// The parts, as `field:name`, in the order they go out.
+        parts: Vec<String>,
+        /// Where it was all going.
+        url: Url,
+    }
+
+    /// One action, rendered against a call — body and URL together.
     ///
     /// Both at once because they render from one context, and a test that could
     /// only see one of them could not catch the two drifting apart.
-    fn with_vars(
+    fn fire_once(
         action: &HttpAction,
         payload: &Payload<'_>,
-        attached: &[&UploadRef],
+        uploads: &[UploadRef],
         vars: &Captured,
-    ) -> Result<(String, Url), (String, Option<Url>)> {
-        let described: Vec<Attachment> = attached.iter().map(|file| describe(file)).collect();
-        let envelope = Envelope {
-            payload,
-            files: &described,
-        };
+    ) -> Result<Fired, (String, Option<Url>)> {
         let rendering = Rendering {
-            envelope: &envelope,
+            payload,
+            call: payload,
             env: std::env::vars().collect(),
             vars,
-            uploads: attached,
+            uploads,
         };
         let url = action
             .url
             .resolve(&rendering)
             .map_err(|message| (message, None))?;
-        let body = body(action, &rendering).map_err(|message| (message, Some(url.clone())))?;
-        Ok((body, url))
+        let sent =
+            render_body(action, &rendering).map_err(|message| (message, Some(url.clone())))?;
+
+        let (body, parts) = match &sent {
+            Sent::Nothing => (String::new(), Vec::new()),
+            Sent::Json(text) => (text.clone(), Vec::new()),
+            Sent::Files(attached) => (
+                String::new(),
+                attached
+                    .iter()
+                    .map(|one| format!("{}:{}", one.field, one.upload.name))
+                    .collect(),
+            ),
+        };
+
+        Ok(Fired { body, parts, url })
+    }
+
+    /// The body one action would send, with nothing attached and nothing
+    /// captured.
+    fn rendered(action: &HttpAction, payload: &Payload<'_>) -> Result<String, String> {
+        fire_once(action, payload, &[], &Captured::new())
+            .map(|fired| fired.body)
+            .map_err(|(message, _)| message)
+    }
+
+    /// The same, parsed, for a test that reads fields rather than text.
+    fn document(action: &HttpAction, payload: &Payload<'_>) -> Value {
+        serde_json::from_str(&rendered(action, payload).expect("body")).expect("json")
+    }
+
+    /// A `before` call, which is the shape most of these need.
+    fn calling<'a>(tool: &'a str, arguments: &'a Value) -> Payload<'a> {
+        Payload {
+            phase: HookPhase::Before,
+            server: "files",
+            tool,
+            arguments,
+            result: None,
+        }
     }
 
     /// One upload, as a run would have it: bytes already read and encoded.
     fn upload(name: &str, content_type: Option<&str>, bytes: &[u8]) -> UploadRef {
         UploadRef {
-            id: "aB3dE5gH7jK9".to_owned(),
+            id: format!("id-{name}"),
             name: name.to_owned(),
             stored_as: format!("aB3dE5gH7jK9-{name}"),
             path: format!("/uploads/aB3dE5gH7jK9-{name}"),
@@ -1233,19 +1617,28 @@ mod tests {
     }
 
     #[test]
-    fn the_default_body_is_the_call_itself() {
+    fn an_action_with_neither_json_nor_multipart_sends_no_body_at_all() {
+        // The whole reason this shape exists. A payload nobody wrote is a
+        // request an endpoint never agreed to read, and it used to go out on
+        // every hook that had not been told otherwise.
         let arguments = json!({"path": "/etc/passwd"});
-        let payload = Payload {
-            phase: HookPhase::Before,
-            server: "files",
-            tool: "read_file",
-            arguments: &arguments,
-            result: None,
-        };
-        let HookAction::Http(action) = &hook("audit", &[HookPhase::Before], &[]).action;
 
-        let body: Value = serde_json::from_str(&rendered(action, &payload).expect("body")).unwrap();
+        assert_eq!(
+            rendered(&action(), &calling("read_file", &arguments)).expect("body"),
+            ""
+        );
+    }
+
+    #[test]
+    fn the_call_itself_is_one_variable_away() {
+        // And the audit sink that did want it says so in one line.
+        let arguments = json!({"path": "/etc/passwd"});
+        let action = sending(json!("{{ call }}"));
+
+        let body = document(&action, &calling("read_file", &arguments));
+
         assert_eq!(body["phase"], "before");
+        assert_eq!(body["server"], "files");
         assert_eq!(body["tool"], "read_file");
         assert_eq!(body["arguments"]["path"], "/etc/passwd");
         // `result` is an `after` field, and a `before` hook must not imply one.
@@ -1268,128 +1661,404 @@ mod tests {
                 error: None,
             }),
         };
-        let HookAction::Http(action) = &hook("audit", &[HookPhase::After], &[]).action;
 
-        let body: Value = serde_json::from_str(&rendered(action, &payload).expect("body")).unwrap();
+        let body = document(&sending(json!("{{ call }}")), &payload);
+
         assert_eq!(body["result"]["isError"], true);
         assert_eq!(body["result"]["latencyMs"], 12);
     }
 
     #[test]
-    fn a_body_template_sees_the_call_by_name() {
+    fn a_json_body_sees_the_call_by_name() {
         let arguments = json!({"path": "/tmp/x"});
-        let payload = Payload {
-            phase: HookPhase::Before,
-            server: "files",
-            tool: "write_file",
-            arguments: &arguments,
-            result: None,
-        };
-        let HookAction::Http(mut action) = hook("audit", &[HookPhase::Before], &[]).action;
-        action.body = Some("{{ tool }} on {{ server }} with {{ arguments.path }}".to_owned());
+        let action = sending(json!({
+            "ran": "{{ tool }}",
+            "on": "{{ server }}",
+            "with": "{{ arguments.path }}",
+        }));
 
-        assert_eq!(
-            rendered(&action, &payload).expect("render"),
-            "write_file on files with /tmp/x"
-        );
+        let body = document(&action, &calling("write_file", &arguments));
+
+        assert_eq!(body["ran"], "write_file");
+        assert_eq!(body["on"], "files");
+        assert_eq!(body["with"], "/tmp/x");
     }
 
     #[test]
-    fn a_body_template_that_reads_something_undefined_is_an_error() {
+    fn an_expression_on_its_own_keeps_the_type_it_names() {
+        // The rule the whole shape turns on. `"{{ arguments }}"` rendered as text
+        // reaches the endpoint as a quoted rendering of a map: valid JSON, wrong
+        // type, and the endpoint is the one that finds out.
+        let arguments = json!({"path": "/tmp/x", "retries": 2});
+        let vars = Captured::from([("attempt".to_owned(), json!(3))]);
+        let action = sending(json!({
+            "arguments": "{{ arguments }}",
+            "attempt": "{{ vars.attempt }}",
+            "retries": "{{ arguments.retries }}",
+        }));
+
+        let fired =
+            fire_once(&action, &calling("write_file", &arguments), &[], &vars).expect("render");
+        let body: Value = serde_json::from_str(&fired.body).expect("json");
+
+        assert_eq!(body["arguments"], json!({"path": "/tmp/x", "retries": 2}));
+        assert_eq!(body["attempt"], json!(3));
+        assert_eq!(body["retries"], json!(2));
+    }
+
+    #[test]
+    fn text_around_an_expression_makes_it_a_string_again() {
+        // Which is what interpolation is for, and the only unambiguous line to
+        // draw: one expression is a value, an expression in a sentence is a
+        // sentence.
+        let arguments = json!({"retries": 2});
+        let action = sending(json!({"note": "tried {{ arguments.retries }} times"}));
+
+        let body = document(&action, &calling("write_file", &arguments));
+
+        assert_eq!(body["note"], "tried 2 times");
+    }
+
+    #[test]
+    fn the_document_goes_out_in_the_shape_the_file_wrote_it() {
+        // Numbers stay numbers, booleans stay booleans, and nesting survives:
+        // the document is the endpoint's schema written down.
         let arguments = json!({});
-        let payload = Payload {
-            phase: HookPhase::Before,
-            server: "files",
-            tool: "write_file",
-            arguments: &arguments,
-            result: None,
-        };
-        let HookAction::Http(mut action) = hook("audit", &[HookPhase::Before], &[]).action;
+        let action = sending(json!({
+            "tags": ["audit", "{{ server }}"],
+            "nested": {"deep": {"tool": "{{ tool }}"}},
+            "count": 3,
+            "enabled": true,
+            "nothing": null,
+        }));
+
+        let body = document(&action, &calling("read_file", &arguments));
+
+        assert_eq!(body["tags"], json!(["audit", "files"]));
+        assert_eq!(body["nested"]["deep"]["tool"], "read_file");
+        assert_eq!(body["count"], json!(3));
+        assert_eq!(body["enabled"], json!(true));
+        assert!(body["nothing"].is_null());
+    }
+
+    #[test]
+    fn a_json_body_that_reads_something_undefined_is_an_error() {
+        let arguments = json!({});
         // A payload silently missing the field it was meant to carry is a webhook
         // that looks like it works.
-        action.body = Some("{{ env.MIRE_DEFINITELY_NOT_SET }}".to_owned());
+        let action = sending(json!({"who": "{{ env.MIRE_DEFINITELY_NOT_SET }}"}));
 
-        let message = rendered(&action, &payload).expect_err("undefined");
+        let message = rendered(&action, &calling("write_file", &arguments)).expect_err("undefined");
+
         assert!(message.contains("undefined"), "{message}");
     }
 
     #[test]
-    fn a_body_template_reads_what_the_run_captured() {
+    fn a_json_body_reads_what_the_run_captured() {
         let arguments = json!({});
-        let payload = Payload {
-            phase: HookPhase::After,
-            server: "files",
-            tool: "read_file",
-            arguments: &arguments,
-            result: None,
-        };
-        let HookAction::Http(mut action) = hook("audit", &[HookPhase::After], &[]).action;
-        action.body = Some(r#"{"session": "{{ vars.session }}"}"#.to_owned());
+        let vars = Captured::from([("session".to_owned(), json!("abc-123"))]);
+        let action = sending(json!({"session": "{{ vars.session }}"}));
+
+        let fired =
+            fire_once(&action, &calling("read_file", &arguments), &[], &vars).expect("render");
+
+        assert_eq!(fired.body, r#"{"session":"abc-123"}"#);
+    }
+
+    #[test]
+    fn the_call_carries_neither_the_environment_nor_the_variables() {
+        // `vars` and `env` are for a template that asked for them. A hook
+        // shipping a run's whole variable bag to a third party because somebody
+        // wrote `{{ call }}` is a decision nobody made.
+        let arguments = json!({});
         let vars = Captured::from([("session".to_owned(), json!("abc-123"))]);
 
-        let (body, _) = with_vars(&action, &payload, &[], &vars).expect("render");
+        let fired = fire_once(
+            &sending(json!("{{ call }}")),
+            &calling("read_file", &arguments),
+            &[],
+            &vars,
+        )
+        .expect("render");
 
-        assert_eq!(body, r#"{"session": "abc-123"}"#);
+        assert!(!fired.body.contains("abc-123"), "{}", fired.body);
+        assert!(!fired.body.contains("vars"), "{}", fired.body);
+        assert!(!fired.body.contains("env"), "{}", fired.body);
+    }
+
+    #[test]
+    fn a_multipart_field_sends_the_upload_it_names() {
+        let uploads = vec![upload("report.pdf", Some("application/pdf"), b"%PDF-1.7")];
+        let arguments = json!({});
+        let action = attaching("file", &["{{ uploads[0].path }}"]);
+
+        let fired = fire_once(
+            &action,
+            &calling("run_task", &arguments),
+            &uploads,
+            &Captured::new(),
+        )
+        .expect("render");
+
+        assert_eq!(fired.parts, vec!["file:report.pdf"]);
+        // A multipart is not a JSON body with files stapled to it: there is no
+        // payload part, because nobody asked for one.
+        assert!(fired.body.is_empty());
+    }
+
+    #[test]
+    fn an_upload_answers_to_its_path_its_name_or_its_id() {
+        let uploads = vec![upload("report.pdf", Some("application/pdf"), b"%PDF")];
+        let arguments = json!({});
+
+        for source in [
+            "/uploads/aB3dE5gH7jK9-report.pdf",
+            "report.pdf",
+            "id-report.pdf",
+        ] {
+            let fired = fire_once(
+                &attaching("file", &[source]),
+                &calling("run_task", &arguments),
+                &uploads,
+                &Captured::new(),
+            )
+            .expect("render");
+            assert_eq!(fired.parts, vec!["file:report.pdf"], "{source}");
+        }
+    }
+
+    #[test]
+    fn one_field_can_carry_several_files() {
+        // Several parts under one name, which is what every upload handler on
+        // the other side already reads.
+        let uploads = vec![
+            upload("a.txt", Some("text/plain"), b"one"),
+            upload("b.txt", Some("text/plain"), b"two"),
+        ];
+        let arguments = json!({});
+        let action = attaching("file", &["{{ uploads[0].path }}", "{{ uploads[1].path }}"]);
+
+        let fired = fire_once(
+            &action,
+            &calling("run_task", &arguments),
+            &uploads,
+            &Captured::new(),
+        )
+        .expect("render");
+
+        assert_eq!(fired.parts, vec!["file:a.txt", "file:b.txt"]);
+    }
+
+    #[test]
+    fn an_expression_naming_every_upload_sends_every_upload() {
+        // The list falls out of the typing rule rather than out of a second
+        // syntax: `{{ uploads }}` is a list, so it is several parts.
+        let uploads = vec![
+            upload("a.txt", Some("text/plain"), b"one"),
+            upload("b.txt", Some("text/plain"), b"two"),
+        ];
+        let arguments = json!({});
+
+        let fired = fire_once(
+            &attaching("file", &["{{ uploads }}"]),
+            &calling("run_task", &arguments),
+            &uploads,
+            &Captured::new(),
+        )
+        .expect("render");
+
+        assert_eq!(fired.parts, vec!["file:a.txt", "file:b.txt"]);
+    }
+
+    #[test]
+    fn a_field_can_be_filled_from_what_an_earlier_call_captured() {
+        let uploads = vec![upload("input.csv", Some("text/csv"), b"a,b")];
+        let arguments = json!({});
+        let vars = Captured::from([("input".to_owned(), json!("input.csv"))]);
+
+        let fired = fire_once(
+            &attaching("file", &["{{ vars.input }}"]),
+            &calling("run_task", &arguments),
+            &uploads,
+            &vars,
+        )
+        .expect("render");
+
+        assert_eq!(fired.parts, vec!["file:input.csv"]);
+    }
+
+    #[test]
+    fn several_fields_each_carry_their_own_file() {
+        let uploads = vec![
+            upload("input.csv", Some("text/csv"), b"a,b"),
+            upload("baseline.csv", Some("text/csv"), b"c,d"),
+        ];
+        let arguments = json!({});
+        let action = HttpAction {
+            body: Some(HookBody::Multipart(vec![
+                PartSpec {
+                    field: "input".to_owned(),
+                    sources: vec!["input.csv".to_owned()],
+                },
+                PartSpec {
+                    field: "reference".to_owned(),
+                    sources: vec!["baseline.csv".to_owned()],
+                },
+            ])),
+            ..action()
+        };
+
+        let fired = fire_once(
+            &action,
+            &calling("run_task", &arguments),
+            &uploads,
+            &Captured::new(),
+        )
+        .expect("render");
+
+        assert_eq!(
+            fired.parts,
+            vec!["input:input.csv", "reference:baseline.csv"]
+        );
+    }
+
+    #[test]
+    fn a_field_naming_a_file_the_run_is_not_carrying_fails_the_hook() {
+        // Loudly, and saying what it looked for: a part quietly left out is a
+        // `422` about a field nobody in the file ever mentioned.
+        let uploads = vec![upload("report.pdf", Some("application/pdf"), b"%PDF")];
+        let arguments = json!({});
+
+        let (message, _) = fire_once(
+            &attaching("file", &["raport.pdf"]),
+            &calling("run_task", &arguments),
+            &uploads,
+            &Captured::new(),
+        )
+        .expect_err("no such upload");
+
+        assert!(message.contains("raport.pdf"), "{message}");
+        assert!(message.contains("file"), "{message}");
+        // And what there was instead, because the typo is usually visible from
+        // the two names side by side.
+        assert!(message.contains("report.pdf"), "{message}");
+    }
+
+    #[test]
+    fn a_field_that_names_nothing_at_all_fails_rather_than_going_out_empty() {
+        // `{{ uploads }}` on a run where nobody attached anything. Sending a
+        // multipart with no file in it is how the endpoint ends up explaining
+        // our own config to us, in the form of a `422`.
+        let arguments = json!({});
+
+        let (message, _) = fire_once(
+            &attaching("file", &["{{ uploads }}"]),
+            &calling("run_task", &arguments),
+            &[],
+            &Captured::new(),
+        )
+        .expect_err("nothing attached");
+
+        assert!(message.contains("file"), "{message}");
+        assert!(message.contains("nothing was attached"), "{message}");
+    }
+
+    #[test]
+    fn a_field_naming_something_that_is_not_a_file_says_so() {
+        let arguments = json!({});
+        let vars = Captured::from([("attempt".to_owned(), json!(3))]);
+
+        let (message, _) = fire_once(
+            &attaching("file", &["{{ vars.attempt }}"]),
+            &calling("run_task", &arguments),
+            &[],
+            &vars,
+        )
+        .expect_err("not a file");
+
+        assert!(message.contains("file"), "{message}");
+    }
+
+    #[test]
+    fn a_json_body_can_reach_the_bytes_when_it_asks_for_them() {
+        let uploads = vec![upload("notes.txt", Some("text/plain"), b"ping")];
+        let arguments = json!({});
+        let action =
+            sending(json!({"name": "{{ uploads[0].name }}", "text": "{{ uploads[0].text }}"}));
+
+        let fired = fire_once(
+            &action,
+            &calling("write_file", &arguments),
+            &uploads,
+            &Captured::new(),
+        )
+        .expect("render");
+        let body: Value = serde_json::from_str(&fired.body).expect("json");
+
+        assert_eq!(body["name"], "notes.txt");
+        assert_eq!(body["text"], "ping");
     }
 
     #[test]
     fn a_url_template_is_rendered_from_the_same_variables() {
         let arguments = json!({});
-        let payload = Payload {
-            phase: HookPhase::After,
-            server: "files",
-            tool: "read_file",
-            arguments: &arguments,
-            result: None,
+        let action = HttpAction {
+            url: HookUrl::Template("https://audit.internal/sessions/{{ vars.session }}".to_owned()),
+            ..action()
         };
-        let HookAction::Http(mut action) = hook("audit", &[HookPhase::After], &[]).action;
-        action.url =
-            HookUrl::Template("https://audit.internal/sessions/{{ vars.session }}".to_owned());
         let vars = Captured::from([("session".to_owned(), json!("abc-123"))]);
 
-        let (_, url) = with_vars(&action, &payload, &[], &vars).expect("render");
+        let fired =
+            fire_once(&action, &calling("read_file", &arguments), &[], &vars).expect("render");
 
-        assert_eq!(url.as_str(), "https://audit.internal/sessions/abc-123");
+        assert_eq!(
+            fired.url.as_str(),
+            "https://audit.internal/sessions/abc-123"
+        );
     }
 
     #[test]
     fn a_url_template_also_sees_the_call_it_fired_around() {
-        // One context for `url:` and `body:`, so anything the payload carries is
-        // addressable — not a second, smaller vocabulary to look up.
+        // One context for `url:`, `json:` and `multipart:`, so anything the
+        // payload carries is addressable — not a second, smaller vocabulary to
+        // look up.
         let arguments = json!({});
-        let payload = Payload {
-            phase: HookPhase::Before,
-            server: "files",
-            tool: "write_file",
-            arguments: &arguments,
-            result: None,
+        let action = HttpAction {
+            url: HookUrl::Template("https://audit.internal/{{ server }}/{{ tool }}".to_owned()),
+            ..action()
         };
-        let HookAction::Http(mut action) = hook("audit", &[HookPhase::Before], &[]).action;
-        action.url = HookUrl::Template("https://audit.internal/{{ server }}/{{ tool }}".to_owned());
 
-        let (_, url) = with_vars(&action, &payload, &[], &Captured::new()).expect("render");
+        let fired = fire_once(
+            &action,
+            &calling("write_file", &arguments),
+            &[],
+            &Captured::new(),
+        )
+        .expect("render");
 
-        assert_eq!(url.as_str(), "https://audit.internal/files/write_file");
+        assert_eq!(
+            fired.url.as_str(),
+            "https://audit.internal/files/write_file"
+        );
     }
 
     #[test]
     fn a_url_template_reading_a_variable_nobody_captured_is_an_error() {
         let arguments = json!({});
-        let payload = Payload {
-            phase: HookPhase::After,
-            server: "files",
-            tool: "read_file",
-            arguments: &arguments,
-            result: None,
+        let action = HttpAction {
+            url: HookUrl::Template("https://audit.internal/sessions/{{ vars.session }}".to_owned()),
+            ..action()
         };
-        let HookAction::Http(mut action) = hook("audit", &[HookPhase::After], &[]).action;
-        action.url =
-            HookUrl::Template("https://audit.internal/sessions/{{ vars.session }}".to_owned());
 
         // Rendering it loosely would send the request to `/sessions/`, which is a
         // different endpoint that may well answer `200`.
-        let (message, _) =
-            with_vars(&action, &payload, &[], &Captured::new()).expect_err("undefined");
+        let (message, _) = fire_once(
+            &action,
+            &calling("read_file", &arguments),
+            &[],
+            &Captured::new(),
+        )
+        .expect_err("undefined");
 
         assert!(message.contains("undefined"), "{message}");
         assert!(message.contains("url"), "{message}");
@@ -1398,18 +2067,14 @@ mod tests {
     #[test]
     fn a_url_template_that_renders_to_something_that_is_not_a_url_says_what_it_produced() {
         let arguments = json!({});
-        let payload = Payload {
-            phase: HookPhase::After,
-            server: "files",
-            tool: "read_file",
-            arguments: &arguments,
-            result: None,
+        let action = HttpAction {
+            url: HookUrl::Template("{{ vars.wherever }}".to_owned()),
+            ..action()
         };
-        let HookAction::Http(mut action) = hook("audit", &[HookPhase::After], &[]).action;
-        action.url = HookUrl::Template("{{ vars.wherever }}".to_owned());
         let vars = Captured::from([("wherever".to_owned(), json!("not a url"))]);
 
-        let (message, _) = with_vars(&action, &payload, &[], &vars).expect_err("not a url");
+        let (message, _) = fire_once(&action, &calling("read_file", &arguments), &[], &vars)
+            .expect_err("not a url");
 
         // The rendered text, because that is the part nobody can see by reading
         // the file.
@@ -1419,19 +2084,12 @@ mod tests {
     #[test]
     fn a_fixed_url_is_used_as_written_whatever_the_run_captured() {
         let arguments = json!({});
-        let payload = Payload {
-            phase: HookPhase::After,
-            server: "files",
-            tool: "read_file",
-            arguments: &arguments,
-            result: None,
-        };
-        let HookAction::Http(action) = hook("audit", &[HookPhase::After], &[]).action;
         let vars = Captured::from([("session".to_owned(), json!("abc-123"))]);
 
-        let (_, url) = with_vars(&action, &payload, &[], &vars).expect("render");
+        let fired =
+            fire_once(&action(), &calling("read_file", &arguments), &[], &vars).expect("render");
 
-        assert_eq!(url.as_str(), "https://audit.internal/events");
+        assert_eq!(fired.url.as_str(), "https://audit.internal/events");
     }
 
     #[test]
@@ -1509,7 +2167,7 @@ mod tests {
         };
         let hook = waiting("audit", &["session"]);
 
-        let record = skipped(&hook, &payload, "session");
+        let record = skipped(&hook, &hook.actions[0], 0, &payload, "session");
 
         assert_eq!(record.skipped.as_deref(), Some("session"));
         // Not a failure, and nothing went out.
@@ -1517,29 +2175,36 @@ mod tests {
         assert!(!record.stopped_the_call);
         assert_eq!(record.status, 0);
         assert!(record.request.is_empty());
-        // Enough to know which hook this was.
+        // Enough to know which hook, and which of its actions, this was.
         assert_eq!(record.hook, "audit");
+        assert_eq!(record.step, 1);
         assert_eq!(record.tool, "read_file");
         assert_eq!(record.url, "https://audit.internal/events");
     }
 
     #[test]
+    fn actions_are_counted_the_way_a_person_counts_them() {
+        assert_eq!(step_of(0), 1);
+        assert_eq!(step_of(2), 3);
+    }
+
+    #[test]
     fn an_undefined_variable_is_named_rather_than_left_as_undefined_value() {
         let arguments = json!({});
-        let payload = Payload {
-            phase: HookPhase::After,
-            server: "files",
-            tool: "read_file",
-            arguments: &arguments,
-            result: None,
+        let action = HttpAction {
+            url: HookUrl::Template(
+                "https://audit.internal/{{ vars.session }}/{{ vars.job }}".to_owned(),
+            ),
+            ..action()
         };
-        let HookAction::Http(mut action) = hook("audit", &[HookPhase::After], &[]).action;
-        action.url = HookUrl::Template(
-            "https://audit.internal/{{ vars.session }}/{{ vars.job }}".to_owned(),
-        );
 
-        let (message, _) =
-            with_vars(&action, &payload, &[], &Captured::new()).expect_err("undefined");
+        let (message, _) = fire_once(
+            &action,
+            &calling("read_file", &arguments),
+            &[],
+            &Captured::new(),
+        )
+        .expect_err("undefined");
 
         // "undefined value" on a URL reading two variables leaves you guessing.
         assert!(message.contains("session"), "{message}");
@@ -1547,134 +2212,26 @@ mod tests {
     }
 
     #[test]
-    fn a_body_template_names_what_it_could_not_read_either() {
+    fn a_json_body_names_what_it_could_not_read_either() {
         let arguments = json!({});
-        let payload = Payload {
-            phase: HookPhase::After,
-            server: "files",
-            tool: "read_file",
-            arguments: &arguments,
-            result: None,
-        };
-        let HookAction::Http(mut action) = hook("audit", &[HookPhase::After], &[]).action;
-        action.body = Some(r#"{"session": "{{ vars.session }}"}"#.to_owned());
+        let action = sending(json!({"session": "{{ vars.session }}"}));
 
-        let (message, _) =
-            with_vars(&action, &payload, &[], &Captured::new()).expect_err("undefined");
+        let message = rendered(&action, &calling("read_file", &arguments)).expect_err("undefined");
 
         assert!(message.contains("session"), "{message}");
     }
 
     #[test]
     fn an_error_names_the_variable_and_never_the_template() {
-        // A `body:` may hold a literal credential. An error message is exactly
-        // where one must not end up — the same rule the headers follow.
+        // A `json:` field may hold a literal credential. An error message is
+        // exactly where one must not end up — the same rule the headers follow.
         let arguments = json!({});
-        let payload = Payload {
-            phase: HookPhase::After,
-            server: "files",
-            tool: "read_file",
-            arguments: &arguments,
-            result: None,
-        };
-        let HookAction::Http(mut action) = hook("audit", &[HookPhase::After], &[]).action;
-        action.body = Some(r#"{"key": "hunter2-{{ vars.suffix }}"}"#.to_owned());
+        let action = sending(json!({"key": "hunter2-{{ vars.suffix }}"}));
 
-        let (message, _) =
-            with_vars(&action, &payload, &[], &Captured::new()).expect_err("undefined");
+        let message = rendered(&action, &calling("read_file", &arguments)).expect_err("undefined");
 
         assert!(message.contains("suffix"), "{message}");
         assert!(!message.contains("hunter2"), "{message}");
-    }
-
-    #[test]
-    fn the_default_payload_says_nothing_about_the_variables() {
-        // `vars` is for a template that asked for it. A hook shipping a run's
-        // whole variable bag to a third party by default is a decision nobody
-        // made — the same rule `env` follows.
-        let arguments = json!({});
-        let payload = Payload {
-            phase: HookPhase::After,
-            server: "files",
-            tool: "read_file",
-            arguments: &arguments,
-            result: None,
-        };
-        let HookAction::Http(action) = hook("audit", &[HookPhase::After], &[]).action;
-        let vars = Captured::from([("session".to_owned(), json!("abc-123"))]);
-
-        let (body, _) = with_vars(&action, &payload, &[], &vars).expect("render");
-
-        assert!(!body.contains("abc-123"), "{body}");
-        assert!(!body.contains("vars"), "{body}");
-    }
-
-    #[test]
-    fn no_files_pattern_attaches_nothing_however_much_the_run_carried() {
-        // The asymmetry with `tools:` is the point: empty there is everything,
-        // empty here is nothing. A hook that shipped somebody's attachments to a
-        // third party unless told otherwise would be a leak, not a default.
-        let uploads = vec![upload("report.pdf", Some("application/pdf"), b"%PDF-1.7")];
-        assert!(select(&[], &uploads).is_empty());
-    }
-
-    #[test]
-    fn a_files_pattern_picks_the_uploads_it_names() {
-        let uploads = vec![
-            upload("report.pdf", Some("application/pdf"), b"%PDF"),
-            upload("notes.txt", Some("text/plain"), b"ping"),
-            upload("report.pdf.bak", None, b"old"),
-        ];
-        let patterns = vec![NamePattern::compile(r".*\.pdf").expect("pattern")];
-
-        let picked = select(&patterns, &uploads);
-        // Anchored, so the backup is not a `.pdf` however much it looks like one.
-        assert_eq!(picked.len(), 1);
-        assert_eq!(picked[0].name, "report.pdf");
-    }
-
-    #[test]
-    fn the_default_payload_describes_the_files_rather_than_repeating_them() {
-        let arguments = json!({});
-        let payload = Payload {
-            phase: HookPhase::Before,
-            server: "files",
-            tool: "write_file",
-            arguments: &arguments,
-            result: None,
-        };
-        let attached = upload("report.pdf", Some("application/pdf"), b"%PDF-1.7");
-        let HookAction::Http(action) = &hook("audit", &[HookPhase::Before], &[]).action;
-
-        let sent: Value =
-            serde_json::from_str(&with_files(action, &payload, &[&attached]).expect("body"))
-                .unwrap();
-        assert_eq!(sent["files"][0]["name"], "report.pdf");
-        assert_eq!(sent["files"][0]["size"], 8);
-        assert_eq!(sent["files"][0]["contentType"], "application/pdf");
-        // The bytes went out as a part. Sending them here too would be sending
-        // every file twice.
-        assert!(sent["files"][0].get("base64").is_none());
-    }
-
-    #[test]
-    fn a_body_template_can_reach_the_bytes_when_it_asks_for_them() {
-        let arguments = json!({});
-        let payload = Payload {
-            phase: HookPhase::Before,
-            server: "files",
-            tool: "write_file",
-            arguments: &arguments,
-            result: None,
-        };
-        let attached = upload("notes.txt", Some("text/plain"), b"ping");
-        let HookAction::Http(mut action) = hook("audit", &[HookPhase::Before], &[]).action;
-        action.body = Some("{{ uploads[0].name }}:{{ uploads[0].text }}".to_owned());
-
-        assert_eq!(
-            with_files(&action, &payload, &[&attached]).expect("render"),
-            "notes.txt:ping"
-        );
     }
 
     #[test]
@@ -1683,23 +2240,45 @@ mod tests {
         // supposed to say, and a part with no type at all is one an endpoint has
         // to guess about.
         let unknown = upload("blob.whatever", None, b"\x00\x01");
+        let attached = Attached {
+            field: "file".to_owned(),
+            upload: &unknown,
+        };
+
         assert_eq!(mime_of(&unknown), "application/octet-stream");
-        assert_eq!(describe(&unknown).content_type, "application/octet-stream");
+        assert_eq!(describe(&attached).content_type, "application/octet-stream");
+        // And the trace says what it was sent *as*, not only which file it was.
+        assert_eq!(describe(&attached).field, "file");
     }
 
     #[test]
-    fn a_form_carries_the_payload_beside_every_file() {
-        let attached = [
+    fn a_form_carries_one_part_per_file() {
+        let files = [
             upload("a.txt", Some("text/plain"), b"one"),
             upload("b.png", Some("image/png"), &[0x89, b'P']),
         ];
-        let refs: Vec<&UploadRef> = attached.iter().collect();
+        let attached: Vec<Attached<'_>> = files
+            .iter()
+            .map(|upload| Attached {
+                field: "file".to_owned(),
+                upload,
+            })
+            .collect();
 
-        let built = form("{\"phase\":\"before\"}".to_owned(), &refs).expect("form");
+        let built = form(&attached).expect("form");
         // `Form` does not hand its parts back, so the boundary is what there is
-        // to assert on: it exists, which means the two files and the payload
-        // encoded without anybody complaining about a media type.
+        // to assert on: it exists, which means both files encoded without
+        // anybody complaining about a media type.
         assert!(!built.boundary().is_empty());
+    }
+
+    #[test]
+    fn a_lone_expression_is_the_whole_string_or_it_is_not_one() {
+        assert_eq!(lone_expression("{{ call }}"), Some(" call "));
+        assert_eq!(lone_expression("  {{ call }}  "), Some(" call "));
+        assert_eq!(lone_expression("a {{ call }}"), None);
+        assert_eq!(lone_expression("{{ a }} {{ b }}"), None);
+        assert_eq!(lone_expression("plain"), None);
     }
 
     #[test]

@@ -9,9 +9,10 @@
 //! A plain `write_file` means that one tool. That is what a list of names meant
 //! before it took patterns, and a gate that silently widened to
 //! `overwrite_file_backup` the day patterns landed would be a hole nobody opened
-//! on purpose. The same goes for a `files:` entry naming `report.pdf`: it must
-//! not quietly pick up `report.pdf.bak`. Widening is available by asking for it:
-//! `write_.*`, or `.*` for everything.
+//! on purpose. A capture rule follows the rule for the same reason from the
+//! other side: `read_file` must not start reading what `read_file_metadata`
+//! answered. Widening is available by asking for it: `write_.*`, or `.*` for
+//! everything.
 //!
 //! Anchoring wraps the whole pattern rather than its first branch, so
 //! `read_.*|write_.*` is two anchored alternatives and not one anchored

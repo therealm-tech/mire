@@ -3843,10 +3843,24 @@ async fn hook_endpoint(status: u16, body: &str) -> MockServer {
 }
 
 /// `mcp.yaml` for a server whose tool call is wrapped in one hook.
-fn mcp_with_hook(mcp: &MockServer, hook: &str, phases: &str, extra: &str) -> String {
+///
+/// `hook_extra` lands among the hook's own fields — `tools:`, `on_error:` — and
+/// `action_extra` among its single action's, so a test adds a `json:` document
+/// or a `multipart:` form without repeating the scaffolding.
+fn mcp_with_hook(
+    mcp: &MockServer,
+    hook: &str,
+    phases: &[&str],
+    hook_extra: &str,
+    action_extra: &str,
+) -> String {
+    let on: String = phases
+        .iter()
+        .map(|phase| ["          - ", phase, "\n"].concat())
+        .collect();
     format!(
         "servers:\n  - name: weather\n    url: {}/mcp\n    hooks:\n      - name: audit\n        \
-         on: {phases}\n        action:\n          kind: http\n          url: {hook}/hook\n{extra}",
+         on:\n{on}{hook_extra}        actions:\n          - http:\n              url: {hook}/hook\n{action_extra}",
         mcp.uri()
     )
 }
@@ -3869,7 +3883,15 @@ async fn a_hook_fires_on_both_sides_of_a_tool_call_and_says_what_it_sent() {
     let harness = Harness::start(&[
         (
             "mcp.yaml",
-            mcp_with_hook(&mcp, &hook.uri(), "[before, after]", ""),
+            mcp_with_hook(
+                &mcp,
+                &hook.uri(),
+                &["before", "after"],
+                "",
+                // The call itself, which is now something a file asks for by
+                // name rather than something every hook sends by default.
+                "              json: '{{ call }}'\n",
+            ),
         ),
         (
             "chat.yaml",
@@ -3975,7 +3997,7 @@ async fn a_hook_url_is_addressed_with_what_the_tool_call_captured() {
             "mcp.yaml",
             format!(
                 "servers:\n  - name: weather\n    url: {}/mcp\n    hooks:\n      - name: audit\n        \
-                 on: [after]\n        action:\n          kind: http\n          \
+                 on:\n          - after\n        actions:\n          - http:\n              \
                  url: {}/sessions/{{{{ vars.session }}}}/audit\n",
                 mcp.uri(),
                 hook.uri()
@@ -4041,7 +4063,7 @@ async fn a_hook_url_naming_a_variable_nobody_captured_fails_the_call_rather_than
             "mcp.yaml",
             format!(
                 "servers:\n  - name: weather\n    url: {}/mcp\n    hooks:\n      - name: audit\n        \
-                 on: [after]\n        action:\n          kind: http\n          \
+                 on:\n          - after\n        actions:\n          - http:\n              \
                  url: {}/sessions/{{{{ vars.session }}}}/audit\n",
                 mcp.uri(),
                 hook.uri()
@@ -4100,8 +4122,8 @@ async fn a_hook_header_carries_what_the_tool_call_captured() {
             "mcp.yaml",
             format!(
                 "servers:\n  - name: weather\n    url: {}/mcp\n    hooks:\n      - name: audit\n        \
-                 on: [after]\n        action:\n          kind: http\n          url: {}/hook\n          \
-                 headers:\n            x-session: '{{{{ vars.session }}}}'\n",
+                 on:\n          - after\n        actions:\n          - http:\n              \
+                 url: {}/hook\n              headers:\n                x-session: '{{{{ vars.session }}}}'\n",
                 mcp.uri(),
                 hook.uri()
             ),
@@ -4265,8 +4287,8 @@ async fn a_hook_waits_for_its_variable_then_fires_once_a_call_has_captured_one()
             "mcp.yaml",
             format!(
                 "servers:\n  - name: weather\n    url: {}/mcp\n    hooks:\n      - name: audit\n        \
-                 on: [after]\n        when_defined: [session]\n        action:\n          kind: http\n          \
-                 url: {}/sessions/{{{{ vars.session }}}}/audit\n",
+                 on:\n          - after\n        when_defined:\n          - session\n        actions:\n          \
+                 - http:\n              url: {}/sessions/{{{{ vars.session }}}}/audit\n",
                 mcp.uri(),
                 hook.uri()
             ),
@@ -4332,7 +4354,10 @@ async fn a_before_hook_that_says_no_stops_the_call_from_happening_at_all() {
     model_using_a_tool(&endpoint).await;
 
     let harness = Harness::start(&[
-        ("mcp.yaml", mcp_with_hook(&mcp, &hook.uri(), "[before]", "")),
+        (
+            "mcp.yaml",
+            mcp_with_hook(&mcp, &hook.uri(), &["before"], "", ""),
+        ),
         (
             "chat.yaml",
             mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
@@ -4394,8 +4419,9 @@ async fn a_hook_told_to_step_aside_records_its_failure_and_lets_the_tool_answer(
             mcp_with_hook(
                 &mcp,
                 &hook.uri(),
-                "[before]",
+                &["before"],
                 "        on_error: continue\n",
+                "",
             ),
         ),
         (
@@ -4451,8 +4477,9 @@ async fn a_hook_authenticates_with_the_registry_and_never_echoes_the_credential(
             mcp_with_hook(
                 &mcp,
                 &hook.uri(),
-                "[before]",
-                "          auth: workload\n          headers:\n            \
+                &["before"],
+                "",
+                "              auth: workload\n              headers:\n                \
                  x-api-key: 'k-{{ auth[\"workload\"] }}'\n",
             ),
         ),
@@ -4490,7 +4517,7 @@ async fn a_hook_authenticates_with_the_registry_and_never_echoes_the_credential(
 }
 
 #[tokio::test]
-async fn a_hook_body_template_replaces_the_default_payload() {
+async fn a_hook_sends_the_json_document_the_file_wrote() {
     let mcp = mcp_server(
         weather_tool(),
         vec![json!({"resultType": "complete", "content": [{"type": "text", "text": "21"}]})],
@@ -4506,8 +4533,10 @@ async fn a_hook_body_template_replaces_the_default_payload() {
             mcp_with_hook(
                 &mcp,
                 &hook.uri(),
-                "[before]",
-                "          body: '{\"text\": \"{{ tool }} wants {{ arguments.city }}\"}'\n",
+                &["before"],
+                "",
+                "              json:\n                text: '{{ tool }} wants {{ arguments.city }}'\n                \
+                 arguments: '{{ arguments }}'\n                attempt: 1\n",
             ),
         ),
         (
@@ -4525,16 +4554,22 @@ async fn a_hook_body_template_replaces_the_default_payload() {
     let sent = hook.received_requests().await.expect("hook requests");
     let body: Value = serde_json::from_slice(&sent[0].body).expect("payload");
     assert_eq!(body["text"], "get_weather wants Paris");
+    // An expression on its own keeps its type: an object stays an object, and a
+    // number written as one stays a number. A field that arrived as a quoted
+    // rendering of a map would be valid JSON and the wrong type.
+    assert_eq!(body["arguments"]["city"], "Paris");
+    assert!(body["arguments"].is_object(), "{body:#?}");
+    assert_eq!(body["attempt"], 1);
 }
 
-/// A hook can attach the run's uploaded files, and does so as a real upload.
+/// A hook can send the run's uploaded files, and does so as a real upload.
 ///
-/// The whole point of `files:`: the endpoint gets a `multipart/form-data` with
-/// the payload beside the bytes, so an audit sink can archive the attachment
-/// rather than be told one existed. The trace, meanwhile, must describe the file
-/// and not repeat it.
+/// The whole point of `multipart:`: the endpoint gets a `multipart/form-data`
+/// carrying the bytes under the field *it* asked for, so an endpoint that wants
+/// `file` gets `file`. The trace, meanwhile, must describe what went out
+/// and repeat none of it.
 #[tokio::test]
-async fn a_hook_attaches_the_uploads_it_names_as_multipart_parts() {
+async fn a_hook_sends_the_uploads_a_field_names_as_multipart_parts() {
     let mcp = mcp_server(
         weather_tool(),
         vec![json!({"resultType": "complete", "content": [{"type": "text", "text": "21"}]})],
@@ -4550,8 +4585,9 @@ async fn a_hook_attaches_the_uploads_it_names_as_multipart_parts() {
             mcp_with_hook(
                 &mcp,
                 &hook.uri(),
-                "[before]",
-                "          files:\n            - .*\\.txt\n",
+                &["before"],
+                "",
+                "              multipart:\n                file: notes.txt\n",
             ),
         ),
         (
@@ -4578,8 +4614,8 @@ async fn a_hook_attaches_the_uploads_it_names_as_multipart_parts() {
         .await;
     assert_eq!(status, 200);
 
-    // What actually went out: one request, multipart, carrying both the payload
-    // and the file the pattern named.
+    // What actually went out: one request, multipart, carrying the file the
+    // field named and nothing else.
     let sent = hook.received_requests().await.expect("hook requests");
     assert_eq!(sent.len(), 1);
     let content_type = sent[0]
@@ -4594,24 +4630,83 @@ async fn a_hook_attaches_the_uploads_it_names_as_multipart_parts() {
     );
 
     let body = String::from_utf8_lossy(&sent[0].body);
-    assert!(body.contains(r#"name="payload""#), "{body}");
-    assert!(body.contains(r#""tool":"get_weather""#), "{body}");
     assert!(body.contains(r#"name="file""#), "{body}");
     assert!(body.contains(r#"filename="notes.txt""#), "{body}");
     // The bytes themselves, not a description of them.
     assert!(body.contains("ping"), "{body}");
-    // And the upload the pattern did not name stayed home.
+    // No payload part: a multipart is not a JSON body with files stapled to it,
+    // and nobody asked for one.
+    assert!(!body.contains(r#"name="payload""#), "{body}");
+    assert!(!body.contains(r#""tool":"get_weather""#), "{body}");
+    // And the upload the field did not name stayed home.
     assert!(!body.contains("skip.bin"), "{body}");
 
-    // The trace names the file and its size, and carries none of its bytes.
+    // The trace names the field, the file and its size, and carries none of its
+    // bytes.
     let turn = &events.iter().find(|(name, _)| name == "turn").unwrap().1;
     let record = &turn["hooks"][0];
+    assert_eq!(record["files"][0]["field"], "file");
     assert_eq!(record["files"][0]["name"], "notes.txt");
     assert_eq!(record["files"][0]["size"], 4);
     assert_eq!(record["files"][0]["contentType"], "text/plain");
-    let request = record["request"].as_str().expect("the payload part");
-    assert!(request.contains(r#""tool":"get_weather""#), "{request}");
-    assert!(!request.contains("ping"), "{request}");
+    // A multipart has no body text to show, and the parts above are why.
+    assert_eq!(record["request"], "");
+}
+
+/// A field naming a file nobody attached stops the hook rather than going out
+/// half-filled.
+///
+/// The failure this shape exists to make loud: the `422` that started all this
+/// came back from an endpoint asked to validate a form with no file in it.
+#[tokio::test]
+async fn a_multipart_field_that_names_no_upload_fails_the_hook() {
+    let mcp = mcp_server(
+        weather_tool(),
+        vec![json!({"resultType": "complete", "content": [{"type": "text", "text": "21"}]})],
+    )
+    .await;
+    let hook = hook_endpoint(200, "ok").await;
+    let endpoint = MockServer::start().await;
+    model_using_a_tool(&endpoint).await;
+
+    let harness = Harness::start(&[
+        (
+            "mcp.yaml",
+            mcp_with_hook(
+                &mcp,
+                &hook.uri(),
+                &["before"],
+                "        on_error: continue\n",
+                "              multipart:\n                file: '{{ uploads }}'\n",
+            ),
+        ),
+        (
+            "chat.yaml",
+            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+        ),
+    ])
+    .await;
+
+    let (status, events) = harness
+        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .await;
+    assert_eq!(status, 200);
+
+    let turn = &events.iter().find(|(name, _)| name == "turn").unwrap().1;
+    let record = &turn["hooks"][0];
+    let error = record["error"].as_str().expect("the reason");
+    assert!(error.contains("file"), "{error}");
+    assert!(error.contains("nothing was attached"), "{error}");
+
+    // Nothing went out: an empty form is what the endpoint would have had to
+    // explain back to us.
+    assert!(
+        hook.received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty(),
+        "a hook with nothing to attach must not send an empty form"
+    );
 }
 
 /// A `tools:` entry is a regex, and it has to match the whole name.
@@ -4637,8 +4732,9 @@ async fn a_tool_pattern_covers_what_it_matches_and_not_what_it_merely_contains()
             mcp_with_hook(
                 &mcp,
                 &hook.uri(),
-                "[before]",
+                &["before"],
                 "        tools:\n          - get_.*\n          - weather\n",
+                "",
             ),
         ),
         (
@@ -4679,8 +4775,9 @@ async fn a_hook_scoped_to_one_tool_leaves_the_others_alone() {
             mcp_with_hook(
                 &mcp,
                 &hook.uri(),
-                "[before, after]",
+                &["before", "after"],
                 "        tools:\n          - delete_everything\n",
+                "",
             ),
         ),
         (

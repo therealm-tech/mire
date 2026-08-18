@@ -372,6 +372,8 @@ export const mcpExchangeSchema = z.object({
  * the panel everything and tell the reader nothing.
  */
 export const attachmentSchema = z.object({
+  /** The form field it went out under, as `mcp.yaml` named it. */
+  field: z.string(),
   id: z.string(),
   name: z.string(),
   size: z.number(),
@@ -381,6 +383,13 @@ export const attachmentSchema = z.object({
 export const hookRecordSchema = z.object({
   server: z.string(),
   hook: z.string(),
+  /**
+   * Which of the hook's actions this was, counting from one.
+   *
+   * A hook is allowed several — the file to the API about to run it, the line to
+   * the audit sink — and two of them can differ only by what they send.
+   */
+  step: z.number(),
   /** `before` the tools/call went out, or `after` it came back. */
   phase: z.enum(['before', 'after']),
   tool: z.string(),
@@ -390,11 +399,11 @@ export const hookRecordSchema = z.object({
   method: z.string(),
   headers: z.record(z.string(), z.string()),
   /**
-   * The body it sent. With files attached this is the `payload` part alone —
-   * the bytes are in `files`, by name and size.
+   * The body it sent. Empty for an action that sent files, and for one that
+   * sent nothing at all — the parts are in `files`, by field, name and size.
    */
   request: z.string(),
-  /** The uploads it attached. Absent when it attached none. */
+  /** The uploads it sent. Absent when it sent none. */
   files: z.array(attachmentSchema).default([]),
   status: z.number(),
   response: z.string(),

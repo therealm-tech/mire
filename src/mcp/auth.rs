@@ -32,7 +32,7 @@ use url::Url;
 use crate::auth::{Auth, AuthProvider, registry::AuthRegistry};
 use crate::redact::Secret;
 
-use super::hook::Hook;
+use super::hook::HookAction;
 use super::{McpError, McpServer};
 
 /// Everything one MCP request needs to authenticate.
@@ -47,7 +47,7 @@ impl<'a> McpCredentials<'a> {
     /// Resolves the server's own provider and whatever its templates name.
     ///
     /// A hook's credentials are deliberately **not** resolved here — see
-    /// [`Self::for_hook`].
+    /// [`Self::for_action`].
     ///
     /// # Errors
     ///
@@ -90,14 +90,14 @@ impl<'a> McpCredentials<'a> {
         &self.named
     }
 
-    /// Resolves what one hook needs, at the moment it fires.
+    /// Resolves what one action of one hook needs, at the moment it fires.
     ///
     /// Two things separate this from the server's own resolution, and both are
     /// the reason it is a second pass rather than a bigger first one:
     ///
-    /// * **Against the hook's URL.** A provider's `allowed_hosts` is a statement
+    /// * **Against the action's URL.** A provider's `allowed_hosts` is a statement
     ///   about where its credential may be sent, and a hook sends it somewhere
-    ///   else. Resolving it against the MCP server's URL would check the wrong
+    ///   else — and two actions of one hook send it to two different places. Resolving it against the MCP server's URL would check the wrong
     ///   host and hand the credential to a URL the rule was written to exclude.
     ///   `target` is the address the request will *actually* use — already
     ///   rendered, for a hook whose `url:` is a template — for exactly the same
@@ -110,18 +110,18 @@ impl<'a> McpCredentials<'a> {
     /// # Errors
     ///
     /// [`McpError::Auth`], as [`Self::resolve`].
-    pub(super) async fn for_hook(
+    pub(super) async fn for_action(
         &self,
-        hook: &Hook,
+        action: &HookAction,
         target: &Url,
     ) -> Result<HookCredentials<'a>, McpError> {
-        let provider = match hook.auth() {
+        let provider = match action.auth() {
             None => None,
             Some(name) => Some(look_up(self.registry, name)?),
         };
 
         let mut named = BTreeMap::new();
-        for name in hook.header_providers() {
+        for name in action.header_providers() {
             let entry = look_up(self.registry, name)?;
             if let Some(token) = entry.credential(target, None).await? {
                 named.insert(name.to_owned(), token);

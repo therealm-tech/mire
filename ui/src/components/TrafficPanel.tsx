@@ -640,7 +640,11 @@ function HookCard({
   return (
     <Card
       id={exchange.id}
-      label={`${turnLabel(exchange.turn, 'Hook')} · ${hook.hook} (${hook.phase})`}
+      label={`${turnLabel(exchange.turn, 'Hook')} · ${hook.hook}${
+        // Only when there is more than one to tell apart: `action 1` on a hook
+        // that makes a single call is a number nobody needed.
+        hook.step > 1 ? ` · action ${hook.step}` : ''
+      } (${hook.phase})`}
       summary={`${hook.server} · ${hook.tool} · ${hook.url}`}
       open={open}
       flash={flash}
@@ -685,11 +689,16 @@ function HookCard({
         </ul>
         {hook.request.length > 0 ? <Body text={hook.request} /> : null}
 
+        {/*
+          The parts, by the field each went out under. The field is the half the
+          endpoint actually reads — a form carrying the right file under the
+          wrong name is refused exactly like one carrying no file at all.
+        */}
         {hook.files.length > 0 ? (
           <ul className="space-y-0.5 text-xs">
             {hook.files.map((file) => (
-              <li key={file.id} className="flex flex-wrap items-baseline gap-2">
-                <Badge tone="neutral">file</Badge>
+              <li key={`${file.field}·${file.id}`} className="flex flex-wrap items-baseline gap-2">
+                <Badge tone="neutral">{file.field}</Badge>
                 <span className="font-mono">{file.name}</span>
                 <span className="text-faint">
                   {file.contentType} · {formatBytes(file.size)}
@@ -697,6 +706,19 @@ function HookCard({
               </li>
             ))}
           </ul>
+        ) : null}
+
+        {/*
+          And when there was neither. Said rather than left blank: an empty
+          Request section reads as something the panel failed to show, and the
+          answer — this action declares no body — is one somebody would otherwise
+          go looking for in `mcp.yaml`.
+        */}
+        {skipped === undefined && hook.request.length === 0 && hook.files.length === 0 ? (
+          <p className="text-muted text-sm">
+            No body: this action declares neither <span className="font-mono">json:</span> nor{' '}
+            <span className="font-mono">multipart:</span>, so the request carried nothing.
+          </p>
         ) : null}
       </Section>
 

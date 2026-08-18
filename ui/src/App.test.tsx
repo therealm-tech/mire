@@ -933,6 +933,7 @@ describe('agent mode', () => {
       {
         server: 'weather',
         hook: 'gate',
+        step: 1,
         phase: 'before',
         tool: 'get_weather',
         action: 'http',
@@ -949,6 +950,7 @@ describe('agent mode', () => {
       {
         server: 'weather',
         hook: 'audit',
+        step: 1,
         phase: 'after',
         tool: 'get_weather',
         action: 'http',
@@ -998,6 +1000,7 @@ describe('agent mode', () => {
       {
         server: 'weather',
         hook: 'session-audit',
+        step: 1,
         phase: 'after',
         tool: 'get_weather',
         action: 'http',
@@ -1287,6 +1290,7 @@ describe('traffic', () => {
       {
         server: 'weather',
         hook: 'gate',
+        step: 1,
         phase: 'before',
         tool: 'get_weather',
         action: 'http',
@@ -1330,15 +1334,16 @@ describe('traffic', () => {
     // saying the request never arrived.
     turn.hooks = [
       {
-        server: 'sandbox',
+        server: 'weather',
         hook: 'audit',
+        step: 1,
         phase: 'after',
-        tool: 'run_code',
+        tool: 'get_weather',
         action: 'http',
-        url: 'http://sandbox-mcp.sandbox-api:8080/v1/inputs',
+        url: 'http://audit.internal:8080/v1/tool-calls',
         method: 'POST',
         headers: {},
-        request: '{"phase":"after","tool":"run_code"}',
+        request: '{"phase":"after","tool":"get_weather"}',
         files: [],
         status: 0,
         response: '',
@@ -1365,22 +1370,29 @@ describe('traffic', () => {
     expect(hook.queryByText(/entitled to answer/)).not.toBeInTheDocument()
   })
 
-  it('names the files a hook attached, and shows none of their bytes', async () => {
+  it('names the parts a hook sent, by field, and shows none of their bytes', async () => {
     const turn = turnFixture()
     turn.hooks = [
       {
         server: 'weather',
         hook: 'audit',
+        step: 1,
         phase: 'after',
         tool: 'get_weather',
         action: 'http',
         url: 'https://audit.internal/tool-calls',
         method: 'POST',
         headers: { 'content-type': 'multipart/form-data; boundary=abc' },
-        // The `payload` part alone: the bytes went out beside it, as parts.
-        request: '{"phase":"after","tool":"get_weather"}',
+        // A multipart has no body text: what went out is the parts below.
+        request: '',
         files: [
-          { id: 'aB3dE5gH7jK9', name: 'report.pdf', size: 2048, contentType: 'application/pdf' },
+          {
+            field: 'file',
+            id: 'aB3dE5gH7jK9',
+            name: 'report.pdf',
+            size: 2048,
+            contentType: 'application/pdf',
+          },
         ],
         status: 200,
         response: 'ok',
@@ -1402,6 +1414,112 @@ describe('traffic', () => {
     expect(hook.getByText('report.pdf')).toBeInTheDocument()
     // Sized the way every other file chip in this UI is sized.
     expect(hook.getByText(/application\/pdf · 2\.0 kB/)).toBeInTheDocument()
+    // The field is the half the endpoint reads: the right file under the wrong
+    // name is refused exactly like no file at all.
+    expect(hook.getByText('file')).toBeInTheDocument()
+  })
+
+  it('says when an action carried no body rather than leaving the section blank', async () => {
+    const turn = turnFixture()
+    turn.hooks = [
+      {
+        server: 'weather',
+        hook: 'audit',
+        step: 1,
+        phase: 'after',
+        tool: 'get_weather',
+        action: 'http',
+        url: 'https://audit.internal/tool-calls',
+        method: 'POST',
+        headers: {},
+        request: '',
+        files: [],
+        status: 204,
+        response: '',
+        latencyMs: 4,
+        stoppedTheCall: false,
+      },
+    ]
+    vi.stubGlobal('fetch', toolRunApi([turn]))
+    const user = userEvent.setup()
+    render(<App />)
+
+    await agentMode(user)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Turn 1 · audit \(after\)/ })).toBeInTheDocument()
+    })
+    const hook = within(await openCard(user, /Turn 1 · audit \(after\)/))
+    // An empty Request section reads as something the panel failed to show; the
+    // answer is in `mcp.yaml`, and this is where somebody is standing.
+    expect(hook.getByText(/declares neither/)).toBeInTheDocument()
+  })
+
+  it('gives each action of a hook its own card, named by number', async () => {
+    const turn = turnFixture()
+    // One event, two calls: the file goes to the API about to run it, the line
+    // goes to the audit sink.
+    turn.hooks = [
+      {
+        server: 'weather',
+        hook: 'upload',
+        step: 1,
+        phase: 'before',
+        tool: 'get_weather',
+        action: 'http',
+        url: 'https://intake.internal/inputs',
+        method: 'POST',
+        headers: {},
+        request: '',
+        files: [
+          {
+            field: 'file',
+            id: 'aB3dE5gH7jK9',
+            name: 'input.csv',
+            size: 12,
+            contentType: 'text/csv',
+          },
+        ],
+        status: 201,
+        response: '',
+        latencyMs: 9,
+        stoppedTheCall: false,
+      },
+      {
+        server: 'weather',
+        hook: 'upload',
+        step: 2,
+        phase: 'before',
+        tool: 'get_weather',
+        action: 'http',
+        url: 'https://audit.internal/tool-calls',
+        method: 'POST',
+        headers: {},
+        request: '{"tool":"get_weather"}',
+        files: [],
+        status: 204,
+        response: '',
+        latencyMs: 3,
+        stoppedTheCall: false,
+      },
+    ]
+    vi.stubGlobal('fetch', toolRunApi([turn]))
+    const user = userEvent.setup()
+    render(<App />)
+
+    await agentMode(user)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    // The first is just the hook; the second says which action it was, because
+    // two cards with the same title and no way to tell them apart is the thing
+    // the number is for.
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Turn 1 · upload \(before\)/ })).toBeInTheDocument()
+    })
+    expect(
+      screen.getByRole('button', { name: /Turn 1 · upload · action 2 \(before\)/ }),
+    ).toBeInTheDocument()
   })
 
   it('records what was said to the MCP server before the loop began', async () => {

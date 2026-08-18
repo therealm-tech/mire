@@ -20,7 +20,9 @@ use url::Url;
 
 use super::client::{McpClient, McpServer};
 use super::headers::HeaderTemplates;
-use super::hook::{Hook, HookAction, HookPhase, HookUrl, HttpAction, NamePattern, OnError};
+use super::hook::{
+    Hook, HookAction, HookBody, HookPhase, HookUrl, HttpAction, NamePattern, OnError, PartSpec,
+};
 use crate::issue::LoadIssue;
 
 /// File declaring the MCP servers, in the profiles directory.
@@ -81,21 +83,38 @@ pub struct HookDescriptor {
     pub when_defined: Vec<String>,
     /// What its failure does to the call.
     pub on_error: OnError,
-    /// The action's kind: `http`.
-    pub action: String,
-    /// Where it goes.
+    /// What it does when it fires, in order.
+    pub actions: Vec<ActionDescriptor>,
+}
+
+/// One action of a hook, as advertised to the UI.
+///
+/// Says what it sends as well as where, because "what is this about to do" is
+/// not answered by an address: a hook that posts a JSON document somebody wrote
+/// and a hook that ships a run's files to a third party are different events,
+/// and the difference is the half worth reading before a run rather than after.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionDescriptor {
+    /// The kind: `http`.
+    pub kind: String,
+    /// Where it goes, as written — template and all.
     pub url: String,
+    /// The method it goes out as.
+    pub method: String,
     /// Auth provider it authenticates with, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth: Option<String>,
     /// Names of the extra headers it sends. **Names only** — the values are
     /// rendered per request and are usually credentials.
     pub headers: Vec<String>,
-    /// Patterns naming the uploads it attaches. Empty means it attaches none,
-    /// and saying so is the point: a run's files leaving for a third address is
-    /// exactly what "what is this about to do" has to cover.
+    /// What its request carries: `json`, `multipart`, or `nothing`.
+    pub sends: String,
+    /// The multipart fields it fills, when that is what it sends. Naming them
+    /// is the point: a run's files leaving for a third address is exactly what
+    /// "what is this about to do" has to cover.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub files: Vec<String>,
+    pub fields: Vec<String>,
     /// Auth providers its header templates read, beyond `auth:`.
     pub uses_auth: Vec<String>,
 }
@@ -303,14 +322,23 @@ struct HookConfig {
     /// What its failure does to the call. `fail` by default.
     #[serde(default)]
     on_error: OnError,
-    action: ActionConfig,
+    /// What it does, in order. At least one, or it is a hook that happens.
+    actions: Vec<ActionConfig>,
 }
 
-/// Tagged from the start. See [`super::hook`] for why.
+/// One action, written under the key naming its kind: `- http:`.
+///
+/// A struct with one field rather than an enum, because that is what the file
+/// looks like and what YAML can carry without a `!http` tag on every entry — and
+/// because it keeps `deny_unknown_fields` doing the naming: `- carrier_pigeon:`
+/// is refused at the line it was written on. The next kind is another field
+/// beside this one plus a check that exactly one was named, which is an addition
+/// rather than a break. See [`super::hook`] for why the shape is tagged at all.
 #[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum ActionConfig {
-    Http(HttpConfig),
+#[serde(deny_unknown_fields)]
+struct ActionConfig {
+    /// The only kind so far.
+    http: HttpConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -328,15 +356,41 @@ struct HttpConfig {
     /// exactly the ones a server's own `headers:` takes.
     #[serde(default)]
     headers: BTreeMap<String, String>,
-    /// Body template. Absent sends the call itself as JSON.
+    /// The JSON document to send, as written. Every string in it is a template.
     #[serde(default)]
-    body: Option<String>,
-    /// Which of the run's uploads to attach, as regexes on the file name.
-    /// Empty — the default — is none of them.
+    json: Option<serde_json::Value>,
+    /// The form to send, one entry per field, each naming uploads of the run.
+    ///
+    /// Exclusive with `json`: a request is one body, and a file declaring two is
+    /// a file whose author expected something else to happen.
     #[serde(default)]
-    files: Vec<String>,
+    multipart: Option<BTreeMap<String, PartConfig>>,
     #[serde(default = "default_hook_timeout_ms")]
     timeout_ms: u64,
+}
+
+/// What one multipart field carries: one file, or several.
+///
+/// The short form is the common one and stays short. The list is not sugar for
+/// repeating the field — several files under one name is what the wire carries
+/// and what every upload handler reads.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum PartConfig {
+    /// One template.
+    One(String),
+    /// Several, in order.
+    Many(Vec<String>),
+}
+
+impl PartConfig {
+    /// The templates it holds, however it was written.
+    fn sources(&self) -> Vec<String> {
+        match self {
+            Self::One(source) => vec![source.clone()],
+            Self::Many(sources) => sources.clone(),
+        }
+    }
 }
 
 /// Compiles a server's hooks, or says which one is wrong and why.
@@ -356,33 +410,11 @@ fn compile_hooks(server: &str, declared: &[HookConfig]) -> Result<Vec<Hook>, Str
                 "{label}: `on` must name at least one of `before`, `after`"
             ));
         }
-
-        let ActionConfig::Http(http) = &config.action;
-
-        let method = match &http.method {
-            None => Method::POST,
-            Some(verb) => Method::from_str(&verb.to_ascii_uppercase())
-                .map_err(|_| format!("{label}: `{verb}` is not an HTTP method"))?,
-        };
-        let headers =
-            HeaderTemplates::compile(&http.headers).map_err(|why| format!("{label}: {why}"))?;
-        if let Some(body) = &http.body {
-            crate::mcp::hook::check_template("body", body)
-                .map_err(|why| format!("{label}: {why}"))?;
+        // And a hook that does nothing is the same silence written differently.
+        if config.actions.is_empty() {
+            return Err(format!("{label}: `actions` must declare at least one"));
         }
-        // A plain URL is parsed now — a typo in a scheme belongs to startup, not
-        // to the first tool call. A template can only be syntax-checked here;
-        // what it produces is a URL or a hook failure, per firing.
-        let url = if HookUrl::is_template(&http.url) {
-            crate::mcp::hook::check_template("url", &http.url)
-                .map_err(|why| format!("{label}: {why}"))?;
-            HookUrl::Template(http.url.clone())
-        } else {
-            HookUrl::Fixed(
-                Url::parse(&http.url)
-                    .map_err(|why| format!("{label}: `url`: `{}` is not a URL: {why}", http.url))?,
-            )
-        };
+
         // Compiled here rather than matched as text on every call: a pattern that
         // does not parse is a hook covering nothing, and finding that out on the
         // first `tools/call` is finding it out too late to matter.
@@ -392,12 +424,15 @@ fn compile_hooks(server: &str, declared: &[HookConfig]) -> Result<Vec<Hook>, Str
             .map(|pattern| NamePattern::compile(pattern))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|why| format!("{label}: `tools`: {why}"))?;
-        let files = http
-            .files
-            .iter()
-            .map(|pattern| NamePattern::compile(pattern))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|why| format!("{label}: `files`: {why}"))?;
+
+        let mut actions = Vec::with_capacity(config.actions.len());
+        for (index, declared) in config.actions.iter().enumerate() {
+            // Numbered from one, and named in every error below: "hook `audit`"
+            // is not an answer when the hook makes three calls and one of them
+            // has the typo.
+            let label = format!("{label}: action {}", index + 1);
+            actions.push(HookAction::Http(compile_http(&label, &declared.http)?));
+        }
 
         hooks.push(Hook {
             name: config.name.clone(),
@@ -405,24 +440,112 @@ fn compile_hooks(server: &str, declared: &[HookConfig]) -> Result<Vec<Hook>, Str
             tools,
             when_defined: config.when_defined.clone(),
             on_error: config.on_error,
-            action: HookAction::Http(HttpAction {
-                url,
-                method,
-                auth: http.auth.clone(),
-                headers,
-                body: http.body.clone(),
-                files,
-                timeout: Duration::from_millis(http.timeout_ms),
-            }),
+            actions,
         });
     }
 
     Ok(hooks)
 }
 
+/// One `kind: http` action, compiled.
+fn compile_http(label: &str, http: &HttpConfig) -> Result<HttpAction, String> {
+    let method = match &http.method {
+        None => Method::POST,
+        Some(verb) => Method::from_str(&verb.to_ascii_uppercase())
+            .map_err(|_| format!("{label}: `{verb}` is not an HTTP method"))?,
+    };
+    let headers =
+        HeaderTemplates::compile(&http.headers).map_err(|why| format!("{label}: {why}"))?;
+
+    // Two bodies is not a body. Refused here rather than resolved by precedence:
+    // whichever one this picked, it would be the other one somebody meant.
+    let body = match (&http.json, &http.multipart) {
+        (Some(_), Some(_)) => {
+            return Err(format!(
+                "{label}: `json` and `multipart` are two bodies; declare one"
+            ));
+        }
+        (Some(json), None) => {
+            check_json(label, json)?;
+            Some(HookBody::Json(json.clone()))
+        }
+        (None, Some(multipart)) => Some(HookBody::Multipart(compile_parts(label, multipart)?)),
+        (None, None) => None,
+    };
+
+    // A plain URL is parsed now — a typo in a scheme belongs to startup, not to
+    // the first tool call. A template can only be syntax-checked here; what it
+    // produces is a URL or a hook failure, per firing.
+    let url = if HookUrl::is_template(&http.url) {
+        crate::mcp::hook::check_template("url", &http.url)
+            .map_err(|why| format!("{label}: {why}"))?;
+        HookUrl::Template(http.url.clone())
+    } else {
+        HookUrl::Fixed(
+            Url::parse(&http.url)
+                .map_err(|why| format!("{label}: `url`: `{}` is not a URL: {why}", http.url))?,
+        )
+    };
+
+    Ok(HttpAction {
+        url,
+        method,
+        auth: http.auth.clone(),
+        headers,
+        body,
+        timeout: Duration::from_millis(http.timeout_ms),
+    })
+}
+
+/// Every string of a JSON body is a template, and every one is checked now.
+///
+/// The whole tree, not the top level: a template three fields deep is exactly
+/// the one nobody re-reads, and a syntax error in it belongs to startup like
+/// every other one here.
+fn check_json(label: &str, node: &serde_json::Value) -> Result<(), String> {
+    match node {
+        serde_json::Value::String(text) => {
+            crate::mcp::hook::check_template("json", text).map_err(|why| format!("{label}: {why}"))
+        }
+        serde_json::Value::Array(items) => {
+            items.iter().try_for_each(|item| check_json(label, item))
+        }
+        serde_json::Value::Object(fields) => fields
+            .values()
+            .try_for_each(|value| check_json(label, value)),
+        _ => Ok(()),
+    }
+}
+
+/// The multipart fields, in the order `mcp.yaml` wrote them.
+fn compile_parts(
+    label: &str,
+    declared: &BTreeMap<String, PartConfig>,
+) -> Result<Vec<PartSpec>, String> {
+    let mut parts = Vec::with_capacity(declared.len());
+
+    for (field, config) in declared {
+        let sources = config.sources();
+        // An empty list is a field that will never carry anything, which is a
+        // `422` waiting for the first run rather than a startup issue.
+        if sources.is_empty() {
+            return Err(format!("{label}: `multipart`: `{field}` names no file"));
+        }
+        for source in &sources {
+            crate::mcp::hook::check_template(&format!("multipart.{field}"), source)
+                .map_err(|why| format!("{label}: {why}"))?;
+        }
+        parts.push(PartSpec {
+            field: field.clone(),
+            sources,
+        });
+    }
+
+    Ok(parts)
+}
+
 /// One hook, for the UI. Names only, never a rendered value.
 fn describe(hook: &Hook) -> HookDescriptor {
-    let HookAction::Http(http) = &hook.action;
     HookDescriptor {
         name: hook.name.clone(),
         on: hook.phases.iter().copied().collect(),
@@ -431,14 +554,33 @@ fn describe(hook: &Hook) -> HookDescriptor {
         tools: hook.tools.iter().map(|p| p.as_str().to_owned()).collect(),
         when_defined: hook.when_defined.clone(),
         on_error: hook.on_error,
-        action: hook.kind().to_owned(),
+        actions: hook.actions.iter().map(describe_action).collect(),
+    }
+}
+
+/// One action, for the UI.
+fn describe_action(action: &HookAction) -> ActionDescriptor {
+    let HookAction::Http(http) = action;
+    let (sends, fields) = match &http.body {
+        None => ("nothing", Vec::new()),
+        Some(HookBody::Json(_)) => ("json", Vec::new()),
+        Some(HookBody::Multipart(parts)) => (
+            "multipart",
+            parts.iter().map(|part| part.field.clone()).collect(),
+        ),
+    };
+
+    ActionDescriptor {
+        kind: action.kind().to_owned(),
         // As written, template and all: a UI showing a rendered URL would be
         // showing one firing of many, and this listing belongs to none of them.
         url: http.url.source().to_owned(),
+        method: http.method.to_string(),
         auth: http.auth.clone(),
         headers: http.headers.names().map(str::to_owned).collect(),
-        files: http.files.iter().map(|p| p.as_str().to_owned()).collect(),
-        uses_auth: hook.header_providers().map(str::to_owned).collect(),
+        sends: sends.to_owned(),
+        fields,
+        uses_auth: action.header_providers().map(str::to_owned).collect(),
     }
 }
 
@@ -540,13 +682,21 @@ servers:
           - after
         tools:
           - write_file
-        action:
-          kind: http
-          url: https://audit.internal/events
-          auth: workload
-          headers:
-            x-source: mire
+        actions:
+          - http:
+              url: https://audit.internal/events
+              auth: workload
+              headers:
+                x-source: mire
 ";
+
+    /// A server declaring one hook whose single action is `body`.
+    fn one_action(body: &str) -> String {
+        format!(
+            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      \
+             - name: audit\n        on:\n          - before\n        actions:\n          - http:\n{body}"
+        )
+    }
 
     #[test]
     fn a_hook_loads_with_its_phases_its_tools_and_its_defaults() {
@@ -563,12 +713,17 @@ servers:
         assert!(!hook.fires(HookPhase::Before, "read_file"));
         // A hook is loud by default: it is something you asked for.
         assert_eq!(hook.on_error, OnError::Fail);
-        assert_eq!(hook.auth(), Some("workload"));
-        assert_eq!(hook.url().source(), "https://audit.internal/events");
 
-        let HookAction::Http(http) = &hook.action;
+        assert_eq!(hook.actions.len(), 1);
+        let action = &hook.actions[0];
+        assert_eq!(action.auth(), Some("workload"));
+        assert_eq!(action.url().source(), "https://audit.internal/events");
+
+        let HookAction::Http(http) = action;
         assert_eq!(http.method, Method::POST);
         assert_eq!(http.timeout, Duration::from_millis(DEFAULT_HOOK_TIMEOUT_MS));
+        // Neither `json:` nor `multipart:` is no body at all — the one default
+        // that cannot surprise the endpoint on the other end.
         assert!(http.body.is_none());
     }
 
@@ -580,17 +735,81 @@ servers:
         let hooks = &registry.descriptors()[0].hooks;
         assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0].name, "audit");
-        assert_eq!(hooks[0].action, "http");
         assert_eq!(hooks[0].on, vec![HookPhase::Before, HookPhase::After]);
+
+        let action = &hooks[0].actions[0];
+        assert_eq!(action.kind, "http");
+        assert_eq!(action.method, "POST");
+        // What it sends, not only where: a hook posting a document somebody wrote
+        // and a hook shipping a run's files are different events.
+        assert_eq!(action.sends, "nothing");
         // The header's name travels; its rendered value never does.
-        assert_eq!(hooks[0].headers, vec!["x-source".to_owned()]);
+        assert_eq!(action.headers, vec!["x-source".to_owned()]);
+    }
+
+    #[test]
+    fn several_actions_load_in_the_order_they_were_written() {
+        // The shape this is all for: the file goes to the API about to run it,
+        // the line goes to the audit sink, and both belong to one event.
+        let dir = write(
+            "hook-actions",
+            r"
+servers:
+  - name: files
+    url: https://mcp.internal/mcp
+    hooks:
+      - name: upload
+        on:
+          - before
+        actions:
+          - http:
+              url: https://intake.internal/inputs
+              multipart:
+                file: '{{ uploads[0].path }}'
+          - http:
+              url: https://audit.internal/events
+              json:
+                tool: '{{ tool }}'
+",
+        );
+        let registry = McpRegistry::load(&dir, &Client::new());
+
+        assert!(registry.issues().is_empty(), "{:?}", registry.issues());
+        let hook = &registry.get("files").unwrap().server().hooks[0];
+        assert_eq!(hook.actions.len(), 2);
+        assert_eq!(
+            hook.actions[0].url().source(),
+            "https://intake.internal/inputs"
+        );
+        assert_eq!(
+            hook.actions[1].url().source(),
+            "https://audit.internal/events"
+        );
+
+        let advertised = &registry.descriptors()[0].hooks[0].actions;
+        assert_eq!(advertised[0].sends, "multipart");
+        assert_eq!(advertised[0].fields, vec!["file".to_owned()]);
+        assert_eq!(advertised[1].sends, "json");
+    }
+
+    #[test]
+    fn a_hook_that_does_nothing_is_refused_like_one_that_fires_on_nothing() {
+        let dir = write(
+            "hook-no-action",
+            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      - name: audit\n        on:\n          - before\n        actions: []\n",
+        );
+        let registry = McpRegistry::load(&dir, &Client::new());
+
+        assert_eq!(registry.issues().len(), 1);
+        assert!(registry.issues()[0].message.contains("audit"));
+        assert!(registry.issues()[0].message.contains("`actions`"));
     }
 
     #[test]
     fn a_hook_that_fires_on_nothing_is_a_webhook_nobody_will_ever_get() {
         let dir = write(
             "hook-no-phase",
-            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      - name: audit\n        on: []\n        action:\n          kind: http\n          url: https://audit.internal/events\n",
+            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      - name: audit\n        on: []\n        actions:\n          - http:\n              url: https://audit.internal/events\n",
         );
         let registry = McpRegistry::load(&dir, &Client::new());
 
@@ -603,7 +822,7 @@ servers:
     fn two_hooks_of_the_same_name_are_reported() {
         let dir = write(
             "hook-dup",
-            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      - name: audit\n        on: [before]\n        action:\n          kind: http\n          url: https://one.internal/e\n      - name: audit\n        on: [after]\n        action:\n          kind: http\n          url: https://two.internal/e\n",
+            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      - name: audit\n        on:\n          - before\n        actions:\n          - http:\n              url: https://one.internal/e\n      - name: audit\n        on:\n          - after\n        actions:\n          - http:\n              url: https://two.internal/e\n",
         );
         let registry = McpRegistry::load(&dir, &Client::new());
 
@@ -618,16 +837,16 @@ servers:
     fn a_url_holding_a_template_is_kept_as_one() {
         let dir = write(
             "hook-url-template",
-            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      - name: audit\n        on: [after]\n        action:\n          kind: http\n          url: https://audit.internal/{{ vars.session }}\n",
+            &one_action("              url: https://audit.internal/{{ vars.session }}\n"),
         );
         let registry = McpRegistry::load(&dir, &Client::new());
 
         assert!(registry.issues().is_empty(), "{:?}", registry.issues());
-        let hook = &registry.get("files").unwrap().server().hooks[0];
-        assert!(matches!(hook.url(), HookUrl::Template(_)));
+        let action = &registry.get("files").unwrap().server().hooks[0].actions[0];
+        assert!(matches!(action.url(), HookUrl::Template(_)));
         // As written, template and all: what it renders to belongs to a firing.
         assert_eq!(
-            hook.url().source(),
+            action.url().source(),
             "https://audit.internal/{{ vars.session }}"
         );
     }
@@ -637,7 +856,7 @@ servers:
         let dir = write(
             "hook-when-defined",
             "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      - name: audit\n        \
-             on: [after]\n        when_defined: [session, job]\n        action:\n          kind: http\n          \
+             on:\n          - after\n        when_defined:\n          - session\n          - job\n        actions:\n          - http:\n              \
              url: https://audit.internal/events\n",
         );
         let registry = McpRegistry::load(&dir, &Client::new());
@@ -665,7 +884,7 @@ servers:
     fn a_url_that_is_not_a_url_and_not_a_template_is_caught_at_startup() {
         let dir = write(
             "hook-url-bad",
-            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      - name: audit\n        on: [after]\n        action:\n          kind: http\n          url: audit.internal/events\n",
+            &one_action("              url: audit.internal/events\n"),
         );
         let registry = McpRegistry::load(&dir, &Client::new());
 
@@ -688,7 +907,7 @@ servers:
     fn a_url_template_that_does_not_parse_is_caught_at_startup() {
         let dir = write(
             "hook-url-template-bad",
-            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      - name: audit\n        on: [after]\n        action:\n          kind: http\n          url: https://audit.internal/{{ vars.session\n",
+            &one_action("              url: https://audit.internal/{{ vars.session\n"),
         );
         let registry = McpRegistry::load(&dir, &Client::new());
 
@@ -701,48 +920,138 @@ servers:
     }
 
     #[test]
-    fn a_body_template_that_does_not_parse_is_caught_at_startup() {
+    fn a_json_body_loads_as_the_document_it_is() {
         let dir = write(
-            "hook-body",
-            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      - name: audit\n        on: [before]\n        action:\n          kind: http\n          url: https://audit.internal/e\n          body: '{{ unclosed'\n",
+            "hook-json",
+            &one_action(
+                "              url: https://audit.internal/e\n              json:\n                tool: '{{ tool }}'\n                count: 3\n",
+            ),
+        );
+        let registry = McpRegistry::load(&dir, &Client::new());
+
+        assert!(registry.issues().is_empty(), "{:?}", registry.issues());
+        let HookAction::Http(http) = &registry.get("files").unwrap().server().hooks[0].actions[0];
+        let Some(HookBody::Json(document)) = &http.body else {
+            panic!("a json body");
+        };
+        // The shape survives the file: a number is a number, and the endpoint's
+        // schema is what was written rather than what a string template produced.
+        assert_eq!(document["tool"], "{{ tool }}");
+        assert_eq!(document["count"], 3);
+    }
+
+    #[test]
+    fn a_json_template_that_does_not_parse_is_caught_at_startup() {
+        // Three fields deep, because that is the one nobody re-reads.
+        let dir = write(
+            "hook-json-bad",
+            &one_action(
+                "              url: https://audit.internal/e\n              json:\n                nested:\n                  deep: '{{ unclosed'\n",
+            ),
         );
         let registry = McpRegistry::load(&dir, &Client::new());
 
         assert_eq!(registry.issues().len(), 1);
         assert!(registry.issues()[0].message.contains("audit"));
-        assert!(registry.issues()[0].message.contains("body"));
+        assert!(registry.issues()[0].message.contains("json"));
     }
 
     #[test]
-    fn a_files_pattern_loads_and_a_broken_one_is_caught_at_startup() {
+    fn a_multipart_field_loads_in_either_form() {
         let dir = write(
-            "hook-files",
-            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      - name: audit\n        on: [before]\n        action:\n          kind: http\n          url: https://audit.internal/e\n          files:\n            - '.*\\.pdf'\n",
+            "hook-multipart",
+            &one_action(
+                "              url: https://intake.internal/inputs\n              multipart:\n                file: '{{ uploads[0].path }}'\n                extra:\n                  - a.txt\n                  - b.txt\n",
+            ),
         );
         let registry = McpRegistry::load(&dir, &Client::new());
-        assert!(registry.issues().is_empty(), "{:?}", registry.issues());
-        let hooks = &registry.get("files").unwrap().server().hooks;
-        let HookAction::Http(http) = &hooks[0].action;
-        assert_eq!(http.files.len(), 1);
-        assert_eq!(http.files[0].as_str(), r".*\.pdf");
-        // Names only in the descriptor, the same as the headers beside them.
-        assert_eq!(registry.descriptors()[0].hooks[0].files, vec![r".*\.pdf"]);
 
-        let broken = write(
-            "hook-files-broken",
-            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      - name: audit\n        on: [before]\n        action:\n          kind: http\n          url: https://audit.internal/e\n          files:\n            - '*.pdf'\n",
+        assert!(registry.issues().is_empty(), "{:?}", registry.issues());
+        let HookAction::Http(http) = &registry.get("files").unwrap().server().hooks[0].actions[0];
+        let Some(HookBody::Multipart(parts)) = &http.body else {
+            panic!("a multipart body");
+        };
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].field, "extra");
+        assert_eq!(parts[0].sources, vec!["a.txt", "b.txt"]);
+        assert_eq!(parts[1].field, "file");
+        assert_eq!(parts[1].sources, vec!["{{ uploads[0].path }}"]);
+
+        // Names only in the descriptor, the same as the headers beside them.
+        let advertised = &registry.descriptors()[0].hooks[0].actions[0];
+        assert_eq!(advertised.sends, "multipart");
+        assert_eq!(
+            advertised.fields,
+            vec!["extra".to_owned(), "file".to_owned()]
         );
-        let registry = McpRegistry::load(&broken, &Client::new());
+    }
+
+    #[test]
+    fn a_multipart_template_that_does_not_parse_is_caught_at_startup() {
+        let dir = write(
+            "hook-multipart-bad",
+            &one_action(
+                "              url: https://intake.internal/inputs\n              multipart:\n                file: '{{ unclosed'\n",
+            ),
+        );
+        let registry = McpRegistry::load(&dir, &Client::new());
+
         assert_eq!(registry.issues().len(), 1);
-        assert!(registry.issues()[0].message.contains("`files`"));
-        assert!(registry.issues()[0].message.contains("*.pdf"));
+        assert!(registry.issues()[0].message.contains("multipart.file"));
+    }
+
+    #[test]
+    fn a_body_and_a_form_together_are_refused_rather_than_ranked() {
+        // Whichever one this picked, it would be the other one somebody meant.
+        let dir = write(
+            "hook-two-bodies",
+            &one_action(
+                "              url: https://audit.internal/e\n              json:\n                tool: '{{ tool }}'\n              multipart:\n                file: report.pdf\n",
+            ),
+        );
+        let registry = McpRegistry::load(&dir, &Client::new());
+
+        assert_eq!(registry.issues().len(), 1);
+        assert!(registry.issues()[0].message.contains("`json`"));
+        assert!(registry.issues()[0].message.contains("`multipart`"));
+    }
+
+    #[test]
+    fn an_issue_names_which_action_of_which_hook_it_was() {
+        // "hook `audit`" is not an answer when the hook makes three calls and
+        // one of them has the typo.
+        let dir = write(
+            "hook-action-number",
+            r"
+servers:
+  - name: files
+    url: https://mcp.internal/mcp
+    hooks:
+      - name: audit
+        on:
+          - before
+        actions:
+          - http:
+              url: https://one.internal/e
+          - http:
+              url: two.internal/e
+",
+        );
+        let registry = McpRegistry::load(&dir, &Client::new());
+
+        assert_eq!(registry.issues().len(), 1);
+        assert!(
+            registry.issues()[0].message.contains("action 2"),
+            "{:?}",
+            registry.issues()
+        );
     }
 
     #[test]
     fn a_tool_pattern_that_is_not_a_regex_is_caught_at_startup_too() {
         let dir = write(
             "hook-tools",
-            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      - name: gate\n        on: [before]\n        tools:\n          - 'write_('\n        action:\n          kind: http\n          url: https://policy.internal/decide\n",
+            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      - name: gate\n        on:\n          - before\n        tools:\n          - 'write_('\n        actions:\n          - http:\n              url: https://policy.internal/decide\n",
         );
         let registry = McpRegistry::load(&dir, &Client::new());
 
@@ -758,7 +1067,9 @@ servers:
     fn a_method_that_is_not_one_is_caught_too() {
         let dir = write(
             "hook-method",
-            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      - name: audit\n        on: [before]\n        action:\n          kind: http\n          url: https://audit.internal/e\n          method: 'not a verb'\n",
+            &one_action(
+                "              url: https://audit.internal/e\n              method: 'not a verb'\n",
+            ),
         );
         let registry = McpRegistry::load(&dir, &Client::new());
 
@@ -770,7 +1081,7 @@ servers:
     fn an_action_kind_nobody_implements_names_itself() {
         let dir = write(
             "hook-kind",
-            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      - name: audit\n        on: [before]\n        action:\n          kind: carrier_pigeon\n",
+            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      - name: audit\n        on:\n          - before\n        actions:\n          - carrier_pigeon:\n              url: https://audit.internal/e\n",
         );
         let registry = McpRegistry::load(&dir, &Client::new());
 

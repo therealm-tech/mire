@@ -247,7 +247,7 @@ fn explain(error: &minijinja::Error, template: &str, context: &Context) -> Strin
 /// provider that renders as undefined and is then reported as one — never a
 /// silently empty credential.
 ///
-/// `pub(super)` so a hook's `url:` and `body:` can name their missing variables
+/// `pub(super)` so a hook's `url:` and `json:` can name their missing variables
 /// the same way, rather than growing a second scanner that finds slightly
 /// different names.
 pub(super) fn lookups<'a>(template: &'a str, root: &str) -> Vec<&'a str> {
