@@ -38,7 +38,7 @@ export function Button({
   const shape = size === 'md' ? 'rounded-lg px-4 py-1.5 text-sm' : 'rounded px-2 py-1 text-xs'
   const weight =
     variant === 'primary'
-      ? 'bg-brand font-medium text-on-brand enabled:hover:opacity-90'
+      ? 'bg-brand font-medium text-on-brand enabled:hover:opacity-90 selection:bg-on-brand selection:text-brand'
       : 'border border-line-strong enabled:hover:bg-well'
 
   return (
