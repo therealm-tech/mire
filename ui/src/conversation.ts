@@ -95,12 +95,17 @@ export function activityItem(turn: number, exchanges: Exchange[]): ActivityItem 
  *
  * The trace keeps the two apart — a hook is traffic to a third address, not a
  * tool call — and the reading a person wants puts them back together: the gate,
- * the call it let through, the audit that followed. Which hook wrapped which
- * call is not something to guess at from the tool's name, because the same tool
- * can be called twice in one turn: a turn fires every `before` hook, makes the
- * call, then fires every `after` hook, and only then moves on. So the hooks are
- * consumed from the front in that order, and the phase says which side of the
- * call in hand each one belongs to.
+ * the call it let through, the audit that followed. A turn fires every `before`
+ * hook, makes the call, then fires every `after` hook, and only then moves on,
+ * so the hooks are consumed from the front in that order.
+ *
+ * The phase alone is not enough to say where one call's hooks end, and the
+ * failure is quiet: two calls with an `after`-only hook each produce
+ * `[after, after]`, and taking every consecutive `after` files the second call's
+ * hook under the first. So a hook is only taken for the call it *names*, and a
+ * hook whose name has already been taken for the call in hand is the next call's
+ * traffic — which is what settles the case the tool name cannot, the same tool
+ * called twice in one turn.
  *
  * A hook left over at the end fired around a call the turn does not carry, which
  * should not happen — and if it ever does, it is shown rather than dropped.
@@ -108,17 +113,29 @@ export function activityItem(turn: number, exchanges: Exchange[]): ActivityItem 
 function around(tools: ToolExchange[], hooks: HookExchange[]): Array<ToolExchange | HookExchange> {
   const steps: Array<ToolExchange | HookExchange> = []
   let next = 0
-  const take = (phase: 'before' | 'after') => {
-    for (let hook = hooks[next]; hook?.record.phase === phase; hook = hooks[next]) {
+  const take = (phase: 'before' | 'after', tool: string) => {
+    const taken = new Set<string>()
+    for (let hook = hooks[next]; hook !== undefined; hook = hooks[next]) {
+      const record = hook.record
+      if (record.phase !== phase || record.tool !== tool) {
+        return
+      }
+      // One firing per action per call, so a name coming round again is the
+      // next call's.
+      const name = `${record.server}·${record.hook}·${record.step}`
+      if (taken.has(name)) {
+        return
+      }
+      taken.add(name)
       steps.push(hook)
       next += 1
     }
   }
 
   for (const tool of tools) {
-    take('before')
+    take('before', tool.invocation.call.name)
     steps.push(tool)
-    take('after')
+    take('after', tool.invocation.call.name)
   }
   return [...steps, ...hooks.slice(next)]
 }

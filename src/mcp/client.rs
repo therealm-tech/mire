@@ -171,7 +171,7 @@ impl McpClient {
     ///
     /// Per run rather than per client, like the journals and for the same
     /// reason: the registry's clients are shared, and the files belong to one
-    /// call. A hook's `files:` selects from these; a run that attached nothing
+    /// call. A hook's `multipart:` names these; a run that attached nothing
     /// leaves every hook with nothing to attach, which is not an error.
     #[must_use]
     pub fn carrying(&self, uploads: Arc<[UploadRef]>) -> Self {

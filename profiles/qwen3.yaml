@@ -155,7 +155,7 @@ agent:
   #
   # Simulated and live tools capture alike, the paths compile when this file
   # loads, and every tool card in the trace says what it set. They are then read
-  # as `vars` by a hook's `url:`, `body:` and `headers:`, and by a server's own
+  # as `vars` by a hook's `url:`, `json:` and `headers:`, and by a server's own
   # `headers:` — see mcp.yaml.
   #
   # A rule that covers a tool and captures nothing from it warns, naming the

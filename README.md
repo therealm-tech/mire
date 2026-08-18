@@ -1183,9 +1183,9 @@ checking claims rather than trusting them.
 
 Calling a live tool is the one thing `mire` does that has effects outside this
 process, which makes it the one thing somebody else usually wants to know about
-— an audit trail, a policy service, a webhook that pages whoever owns the server
-being poked. `hooks:` on a server declares that, fired `before` the call goes
-out, `after` it comes back, or both:
+— an audit trail, a policy service, an upload endpoint that has to be handed
+the inputs before a task runs. `hooks:` on a server declares that, fired `before`
+the call goes out, `after` it comes back, or both:
 
 ```yaml
 servers:
@@ -1196,16 +1196,51 @@ servers:
         on:
           - before
           - after
-        action:
-          kind: http
-          url: https://audit.internal/tool-calls
-          auth: keycloak-workload
+        actions:
+          - http:
+              url: https://audit.internal/tool-calls
+              auth: keycloak-workload
+              json:
+                ran: '{{ tool }}'
+                arguments: '{{ arguments }}'
 ```
 
-`kind: http` is the only action so far. It is tagged anyway, because a `kind:`
-added after the fact is a breaking change to every file that already exists.
+`actions:` is a list because one event is usually two calls to two different
+people: the file goes to the API about to run it, the line goes to the audit
+sink. They go out in the order written, each with its own address, credential
+and body, and each lands in the trace as its own record. `- http:` is the only
+kind so far; the kind is the key it is written under, so the next one is an
+addition rather than a break.
 
-With no `body:`, the payload is the call itself:
+**An action sends what it says it sends, and nothing otherwise.** With neither
+`json:` nor `multipart:`, the request carries no body at all. That is the point
+of the shape: a payload nobody wrote is a request the endpoint never agreed to
+read, and the first thing you learn about it is a `422` naming a field your
+configuration never mentioned.
+
+`json:` is a document, not a string — written as YAML, sent as JSON, with every
+string in it a template:
+
+```yaml
+          - http:
+              url: https://chat.internal/webhook
+              json:
+                text: '{{ tool }} on {{ server }} by {{ env.USER }}'
+                arguments: '{{ arguments }}'
+                attempt: 1
+```
+
+A string that is one `{{ … }}` and nothing else keeps the type of what it names,
+so `arguments` above is the arguments *object* and `attempt` is a number. Text
+around the expression makes it a string again, because that is what interpolation
+is for. Without that rule `'{{ arguments }}'` would arrive as a quoted rendering
+of a map: valid JSON, wrong type, and the endpoint is the one that finds out.
+
+`{{ call }}` is the whole call in one line, for the sink that wants exactly that:
+
+```yaml
+              json: '{{ call }}'
+```
 
 ```json
 {
@@ -1219,26 +1254,20 @@ With no `body:`, the payload is the call itself:
 
 `result` appears on the way back only, and it appears even when the call failed
 — with `error` naming what went wrong instead. An audit trail that only records
-the calls that worked is not one.
+the calls that worked is not one. `env` and `vars` are never in there: a hook
+shipping a run's whole variable bag to a third party because somebody wrote
+`{{ call }}` is a decision nobody made. Ask for them by name and they are yours.
 
-A `body:` template replaces the payload and sees the same fields by name, plus
-`env` and [`vars`](#keeping-something-a-tool-call-answered):
-
-```yaml
-        action:
-          kind: http
-          url: https://chat.internal/webhook
-          body: '{"text": "{{ tool }} on {{ server }} by {{ env.USER }}"}'
-```
-
-Undefined is an error there, exactly as it is in a header template, and the
-template is compiled when `mcp.yaml` loads — so a typo names the hook at startup
-rather than twenty minutes into a run. `auth` is deliberately **not** in scope:
-a credential belongs in a header, where the redactor is.
+Undefined is an error in all of this, exactly as it is in a header template, and
+every template is compiled when `mcp.yaml` loads — so a typo names the hook and
+the action at startup rather than twenty minutes into a run. `auth` is
+deliberately **not** in scope: a credential belongs in a header, where the
+redactor is.
 
 **A hook can stop a call.** `on_error: fail` — the default — means a hook that
 could not be run, or whose endpoint answered outside `2xx`, fails the tool call
-it belongs to. On a `before` hook that is a policy gate for free: the
+it belongs to, and nothing after it runs: neither the hook's remaining actions
+nor the hooks behind it. On a `before` hook that is a policy gate for free: the
 `tools/call` never goes out, and the model is told why so it has a chance to
 recover. On an `after` hook it is a report rather than an undo — the tool has
 already run, and nothing here can take that back.
@@ -1251,15 +1280,16 @@ already run, and nothing here can take that back.
           - write_file
           - delete_file
         on_error: fail
-        action:
-          kind: http
-          url: https://policy.internal/decide
+        actions:
+          - http:
+              url: https://policy.internal/decide
 ```
 
-`on_error: continue` records the failure and gets out of the way, which is what
-you want from an audit sink you would rather not have gating your runs. The
-default is the loud one on purpose: a hook is something you asked for, and a
-harness that quietly skipped it would be answering a question you did not ask.
+`on_error: continue` records the failure and gets out of the way — moving on to
+the next action, then to the next hook — which is what you want from an audit
+sink you would rather not have gating your runs. The default is the loud one on
+purpose: a hook is something you asked for, and a harness that quietly skipped it
+would be answering a question you did not ask.
 
 `tools:` narrows a hook to the calls it cares about. Each entry is a regex
 matched against the **whole** tool name, so a plain `write_file` still means that
@@ -1275,49 +1305,61 @@ Anchoring is the conservative half of the choice. A gate written as `write_file`
 must not quietly grow to cover `overwrite_file_backup` because the matcher got
 cleverer, so widening is something you ask for — `write_.*`, or `.*` for
 everything. Empty — the default — is every tool. Patterns compile when
-`mcp.yaml` loads, like the body template: a `tools:` entry that is not a regex
-names its hook at startup rather than covering nothing in silence.
+`mcp.yaml` loads, like the templates beside them: a `tools:` entry that is not a
+regex names its hook at startup rather than covering nothing in silence.
 
-**It can carry the run's files.** `files:` names uploads the way `tools:` names
-tools, and what it names goes out for real: the request becomes a
-`multipart/form-data` with the body demoted to a `payload` part and one `file`
-part per attachment, filename and media type included.
-
-```yaml
-        action:
-          kind: http
-          url: https://audit.internal/tool-calls
-          files:
-            - .*\.pdf
-```
-
-Empty — the default — attaches **nothing**, which is the opposite of what an
-empty `tools:` means. The asymmetry is on purpose: a hook covering every tool is
-merely wide, while a hook shipping every file somebody attached to a third
-address is a leak. `.*` asks for all of them, out loud.
-
-The same files reach a `body:` template as `uploads`, whole — `base64`,
-`dataUrl`, `text`, the entries a model template gets from the same run — so a
-webhook wanting the bytes inline can have them:
+**It can send the run's files.** `multipart:` is one entry per form field, each
+naming uploads of the run. The request becomes a `multipart/form-data` carrying
+exactly those, under exactly those field names — which is what an upload endpoint
+asking for `file` is actually asking for, filename and media type included.
 
 ```yaml
-          body: '{"file": "{{ uploads[0].base64 }}"}'
+          - http:
+              url: https://intake.internal/jobs/{{ arguments.job_id }}/inputs
+              multipart:
+                file: '{{ uploads[0].path }}'
 ```
 
-The default payload describes them instead, by `id`, `name`, `size` and
-`contentType`. The bytes are already going out as parts, and putting them in the
-body as well would send every file twice. The trace makes the same choice: it
-names what was attached and carries none of it, because 25 MB of base64 in a
-panel costs everything and tells nobody anything.
+Each entry names **one** upload — the object itself, or a string matching its
+`path`, `name` or `id`. A field can carry several: write a list, or an expression
+that produces one, and they go out as several parts under the same name, which is
+what every server-side upload handler already reads.
+
+```yaml
+              multipart:
+                file: '{{ uploads }}'          # everything the run is carrying
+                reference: '{{ vars.baseline }}'
+```
+
+A field that names a file the run is not carrying **fails the hook**, and so does
+one that resolves to nothing at all. Both are the same accident — a form going
+out with the part missing — and both are worth stopping for, because the
+alternative is an endpoint explaining your own configuration back to you.
+
+`json:` and `multipart:` are two bodies, and declaring both is refused when
+`mcp.yaml` loads: whichever one `mire` picked would be the other one you meant.
+For a webhook that wants the bytes inline instead, the files reach a `json:`
+template as `uploads`, whole — `base64`, `dataUrl`, `text`, the entries a model
+template gets from the same run:
+
+```yaml
+              json:
+                file: '{{ uploads[0].base64 }}'
+```
+
+The trace never repeats them. It names the field, the file, its size and its
+media type, because 25 MB of base64 in a panel costs everything and tells nobody
+anything.
 
 **It authenticates like everything else.** `auth:` names a provider and the
 credential goes where that provider says; `headers:` takes the same MiniJinja
 templates a server's own headers take, `{{ auth["…"] }}` included. Two details
 are the hook's own:
 
-- The credential is resolved against the **hook's** URL, not the server's, so a
+- The credential is resolved against the **action's** URL, not the server's, so a
   provider's `allowed_hosts` means what it says. A rule written to keep a token
-  off the public internet is not satisfied by the MCP server being internal.
+  off the public internet is not satisfied by the MCP server being internal — and
+  two actions of one hook are two different addresses.
 - It is resolved **only when the hook fires**. A `tools/list`, or a call to a
   tool this hook does not cover, never pays for a token exchange it has no use
   for.
@@ -1325,13 +1367,14 @@ are the hook's own:
 Every firing lands in the trace, next to the JSON-RPC rather than inside it: a
 hook talks to a third address over plain HTTP, and filing a webhook's `POST`
 among the MCP methods would make both unreadable. Each turn carries a `hooks`
-array, the **Hooks** lens in the traffic panel shows nothing else, the
-conversation puts a row where the firing happened, and a record that failed says
-whether that is also why the tool never ran:
+array — one record per action — the **Hooks** lens in the traffic panel shows
+nothing else, the conversation puts a row where the firing happened, and a record
+that failed says whether that is also why the tool never ran:
 
 ```json
 {
   "hook": "gate",
+  "step": 1,
   "phase": "before",
   "tool": "write_file",
   "url": "https://policy.internal/decide",
@@ -1341,12 +1384,16 @@ whether that is also why the tool never ran:
 }
 ```
 
-Credentials are masked there exactly as they are everywhere else, and only the
-header *names* appear in `GET /api/mcp`.
+`step` says which action of the hook spoke, counting from one — two actions can
+differ only by what they send, and two cards with the same title would be two
+cards you cannot tell apart. Credentials are masked there exactly as they are
+everywhere else, and only the header *names* appear in `GET /api/mcp`, beside
+what each action sends (`json`, `multipart`, or `nothing`) and the fields it
+fills.
 
-Other knobs: `method:` (`POST` by default, because a hook carries a payload) and
-`timeout_ms:` (10 s, shorter than a tool's — a slow audit sink must not look like
-a slow tool).
+Other knobs: `method:` (`POST` by default, because a hook usually carries
+something) and `timeout_ms:` (10 s, shorter than a tool's — a slow audit sink must
+not look like a slow tool).
 
 ### Keeping something a tool call answered
 
@@ -1362,19 +1409,21 @@ agent:
         session: [$.sessionId]
 ```
 
-and a hook reads them back as `vars` — in its `url:`, its `body:` and its
-`headers:`:
+and a hook reads them back as `vars` — in its `url:`, its `json:`, its
+`multipart:` and its `headers:`:
 
 ```yaml
       - name: audit
         on:
           - after
-        action:
-          kind: http
-          url: https://audit.internal/sessions/{{ vars.session }}/tool-calls
-          body: '{"session": "{{ vars.session }}", "ran": "{{ tool }}"}'
-          headers:
-            x-session: '{{ vars.session }}'
+        actions:
+          - http:
+              url: https://audit.internal/sessions/{{ vars.session }}/tool-calls
+              json:
+                session: '{{ vars.session }}'
+                ran: '{{ tool }}'
+              headers:
+                x-session: '{{ vars.session }}'
 ```
 
 A **server's** own `headers:` see them too, which is the other half of the point:
@@ -1400,7 +1449,7 @@ fires around a call, so anything captured before that call is already there.
 stays that: a template is only a template when it contains one, so a typo in a
 scheme is still a startup issue rather than a string that renders beautifully and
 fails on the first tool call. When it *is* a template it sees exactly what
-`body:` sees — one context, so there is no second vocabulary to look up.
+`json:` sees — one context, so there is no second vocabulary to look up.
 
 **A templated URL is resolved before the credential is.** `allowed_hosts` is a
 statement about where a credential may go, so it is checked against the address
@@ -1483,13 +1532,13 @@ is not there **yet** — a session that a tool opens partway through a run —
           - after
         when_defined:
           - session
-        action:
-          kind: http
-          url: https://audit.internal/sessions/{{ vars.session }}/tool-calls
+        actions:
+          - http:
+              url: https://audit.internal/sessions/{{ vars.session }}/tool-calls
 ```
 
 Plain names, not patterns: this asks whether a value exists, and the place to
-*use* it is `url:`, `body:` or `headers:`. Every name listed has to be there;
+*use* it is `url:`, `json:` or `headers:`. Every name listed has to be there;
 empty — the default — is no condition at all.
 
 The pairing is the point. Without `when_defined:`, that URL fails every call made
@@ -1501,7 +1550,7 @@ credential is resolved, and the tool call proceeds untouched — the model gets 
 real answer. The skip is recorded all the same, naming what it waited for:
 
 ```json
-{ "hook": "session-audit", "phase": "after", "skipped": "session", "status": 0 }
+{ "hook": "session-audit", "step": 1, "phase": "after", "skipped": "session", "status": 0 }
 ```
 
 A hook that quietly never ran and a hook that was never declared must not look
