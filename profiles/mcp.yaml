@@ -325,20 +325,30 @@ servers:
   #     # `/sessions//tool-calls`, which is a different endpoint that may well
   #     # answer 200.
   #     #
-  #     # `when_defined:` names variables that must have been captured for the
-  #     # hook to fire at all. Without it, the URL below fails every call made
-  #     # before a session exists; with it, the hook sits those out and starts
-  #     # firing once one does.
+  #     # `if:` is a MiniJinja expression asked once per firing: true and the
+  #     # hook fires, false and it sits the call out. Without it, the URL below
+  #     # fails every call made before a session exists; with it, the hook sits
+  #     # those out and starts firing once one does.
+  #     #
+  #     # It sees exactly what `url:`, `json:` and `headers:` see, so the whole
+  #     # call is fair game — `{{ result.is_error == false }}` audits only what
+  #     # worked, `{{ arguments.size > 1048576 }}` asks about the big ones,
+  #     # `{{ env.STAGE == "prod" }}` keeps a hook off your laptop.
+  #     #
+  #     # Undefined is false here rather than an error — the one place in a hook
+  #     # where it is, because a condition is *asking* whether something is
+  #     # there. Truthiness is MiniJinja's, so a variable captured as `null` is
+  #     # false too: write `is defined` when presence is the question you meant.
   #     #
   #     # Not firing is not failing: `on_error` does not apply, nothing is sent,
-  #     # and the tool call is untouched. The skip is still recorded, naming the
-  #     # variable it waited for — a hook that quietly never ran and a hook that
-  #     # was never declared must not look the same in a trace.
+  #     # and the tool call is untouched. The skip is still recorded, quoting the
+  #     # condition that came back false — a hook that quietly never ran and a
+  #     # hook that was never declared must not look the same in a trace. A
+  #     # condition that cannot be *evaluated* is a hook failure like any other.
   #     - name: session-audit
   #       on:
   #         - after
-  #       when_defined:
-  #         - session
+  #       if: '{{ vars.session is defined }}'
   #       actions:
   #         - http:
   #             url: https://audit.internal/sessions/{{ vars.session }}/tool-calls

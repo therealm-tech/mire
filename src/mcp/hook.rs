@@ -65,13 +65,14 @@
 //!
 //! # Which calls it has enough to fire on
 //!
-//! `when_defined:` names variables that must have been captured for the hook to
-//! fire at all — plain names, not templates, because this asks whether a value
-//! exists and the place to *use* it is `url:`, `json:` or `headers:`.
+//! `if:` is a `MiniJinja` expression asked once per firing. True and the hook
+//! fires; false and it sits the call out. It sees exactly what `url:`, `json:`
+//! and `headers:` see — `phase`, `tool`, `arguments`, `result`, `env`, `vars`,
+//! `uploads` — because a condition about a call and a body about the same call
+//! should not need two vocabularies.
 //!
 //! ```yaml
-//!     when_defined:
-//!       - session
+//!     if: '{{ vars.session is defined }}'
 //!     actions:
 //!       - http:
 //!           url: https://audit.internal/sessions/{{ vars.session }}/tool-calls
@@ -81,17 +82,37 @@
 //! is the point: without it, that URL fails every call made before a session
 //! exists; with it, the hook simply waits and starts firing once one does.
 //!
+//! Being an expression rather than a list of names is what makes the rest
+//! reachable — the audit that only cares about writes that actually worked, the
+//! gate that only asks about the big files:
+//!
+//! ```yaml
+//!     if: '{{ result.is_error == false }}'
+//!     if: '{{ arguments.size > 1048576 }}'
+//!     if: '{{ vars.session is defined and env.STAGE == "prod" }}'
+//! ```
+//!
+//! **Undefined is false here, not an error** — the one place in a hook where it
+//! is. Everywhere else a template names something absent, the request would go
+//! out with a hole in it, so it fails loudly; a condition is *asking* whether
+//! something is there, and it has to be able to hear "no" without falling over.
+//! Lookups chain, so `{{ vars.job.id }}` on a run with no `job` is false rather
+//! than a failure about `id`. A condition that cannot be evaluated at all — an
+//! unknown filter, a call to something that is not callable — is still a hook
+//! failure, and `on_error` decides what that does to the call.
+//!
 //! **Not firing is not failing.** `on_error` does not apply, nothing is sent, no
 //! credential is resolved, and the tool call proceeds untouched. The skip is
-//! recorded all the same, once per action, naming the variable it waited for —
-//! see [`HookRecord::skipped`]. A hook that quietly never ran and a hook that was
-//! never declared must not look the same in a trace.
+//! recorded all the same, once per action, quoting the condition that came back
+//! false — see [`HookRecord::skipped`]. A hook that quietly never ran and a hook
+//! that was never declared must not look the same in a trace.
 //!
-//! Names are matched against what the run has captured and nothing else. There
-//! is deliberately no check at load that some profile captures them: `mcp.yaml`
-//! does not know which profiles will use the server, and a name nothing ever
-//! fills shows up as a skip naming it rather than as a startup error about a
-//! file that may be perfectly correct.
+//! The expression is compiled when `mcp.yaml` loads, so a typo in its syntax is
+//! a startup issue naming the hook. What it *reads* is checked against nothing:
+//! `mcp.yaml` does not know which profiles will use the server, so a condition
+//! naming a variable no profile ever captures shows up as a skip quoting it, run
+//! after run, rather than as a startup error about a file that may be perfectly
+//! correct.
 //!
 //! # What it sends
 //!
@@ -221,6 +242,21 @@ static ENVIRONMENT: std::sync::LazyLock<Environment<'static>> = std::sync::LazyL
     environment
 });
 
+/// `if:` renders leniently, for the opposite reason — and it is the only place
+/// in a hook that does.
+///
+/// Strictness above protects a request that is about to go out: a body missing
+/// the field it promised is worse than no request at all. A condition is the
+/// question of whether that request should exist, and `{{ vars.session is
+/// defined }}` has to be answerable on the run where it is not. Chainable, so
+/// `{{ vars.job.id }}` on a run carrying no `job` is false rather than a failure
+/// about `id` — the question was about the job, and the answer is no.
+static CONDITIONS: std::sync::LazyLock<Environment<'static>> = std::sync::LazyLock::new(|| {
+    let mut environment = Environment::new();
+    environment.set_undefined_behavior(UndefinedBehavior::Chainable);
+    environment
+});
+
 /// When a hook fires, relative to the `tools/call` it is attached to.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
@@ -278,12 +314,9 @@ pub struct Hook {
     /// Tools it applies to, as patterns. Empty — the default — is every tool the
     /// server offers.
     pub tools: Vec<NamePattern>,
-    /// Variables that must have been captured for it to fire at all. Empty —
-    /// the default — is no condition.
-    ///
-    /// Names, not templates: this asks whether a value exists, and the place to
-    /// use it is `url:`, `json:` or `headers:`.
-    pub when_defined: Vec<String>,
+    /// What has to hold for it to fire at all. `None` — the default — is no
+    /// condition, and a hook that fires on every call it covers.
+    pub condition: Option<HookCondition>,
     /// What its failure does to the call.
     pub on_error: OnError,
     /// What it actually does, in declaration order.
@@ -298,28 +331,109 @@ pub struct Hook {
 impl Hook {
     /// Whether this hook has anything to say about `tool` at `phase`.
     ///
-    /// Only what the file says — [`waiting_for`](Self::waiting_for) is the half
-    /// that depends on what the run has done so far.
+    /// Only what the file says — `if:` is the half that depends on the call
+    /// itself and on what the run has done so far, and it is asked separately
+    /// for exactly that reason: a hook can be right about the tool and still
+    /// have nothing to address itself with.
     #[must_use]
     pub fn fires(&self, phase: HookPhase, tool: &str) -> bool {
         self.phases.contains(&phase) && NamePattern::any_matches(&self.tools, tool)
     }
+}
 
-    /// The first `when_defined:` variable this run has not captured yet.
+/// A hook's `if:`, compiled when `mcp.yaml` loaded.
+///
+/// One expression, evaluated per firing against the same context every other
+/// template of the hook sees. Kept as text rather than as a compiled `MiniJinja`
+/// expression, which would borrow its environment — and the source is wanted
+/// anyway: it is what the trace quotes when the answer is no, and what
+/// `GET /api/mcp` advertises before a run even starts.
+#[derive(Debug, Clone)]
+pub struct HookCondition {
+    /// What `mcp.yaml` wrote, `{{ … }}` and all.
+    source: String,
+    /// The expression alone, with the delimiters — when there were any —
+    /// removed. What actually gets compiled.
+    expression: String,
+}
+
+impl HookCondition {
+    /// Compiles `source`, or says why it is not a condition.
     ///
-    /// `Some` means the hook does not fire *this time*, which is a different
-    /// thing from failing: a hook waiting for a session to be opened is a hook
-    /// working as declared, and a run where the session never opens is a run
-    /// where it correctly never fired.
+    /// Both spellings are accepted, and they mean the same thing: `{{ vars.x }}`
+    /// is how every other template in this file is written, and a bare `vars.x`
+    /// is what an expression looks like once you stop rendering it. What is
+    /// refused is the third shape — text with an expression somewhere in it, or
+    /// a `{% … %}` block. Those are *templates*, they produce a string, and a
+    /// string that is not empty is truthy, so `{% if vars.x %}yes{% endif %}`
+    /// would be a condition that holds on every call including the ones it was
+    /// written to exclude.
     ///
-    /// The first rather than all of them, because the answer to "why did my
-    /// hook not fire" is one name, and a list would only be longer.
+    /// # Errors
+    ///
+    /// The shape refusal, or `MiniJinja`'s own message for an expression that
+    /// does not parse — at load, so it names the hook rather than surfacing on
+    /// the first tool call twenty minutes into a run.
+    pub fn compile(source: &str) -> Result<Self, String> {
+        let trimmed = source.trim();
+        if trimmed.is_empty() {
+            return Err("is empty; leave it out to fire on every call".to_owned());
+        }
+
+        let expression = match lone_expression(trimmed) {
+            Some(inner) => inner.trim(),
+            None if trimmed.contains("{{") || trimmed.contains("{%") => {
+                return Err(
+                    "must be one `{{ … }}` expression, not a template around one: a template \
+                     produces text, and text that is not empty is true on every call"
+                        .to_owned(),
+                );
+            }
+            None => trimmed,
+        };
+
+        CONDITIONS
+            .compile_expression(expression)
+            .map_err(|error| root(&error))?;
+
+        Ok(Self {
+            source: trimmed.to_owned(),
+            expression: expression.to_owned(),
+        })
+    }
+
+    /// What `mcp.yaml` wrote, for the trace and the descriptor.
     #[must_use]
-    pub fn waiting_for(&self, vars: &Captured) -> Option<&str> {
-        self.when_defined
-            .iter()
-            .find(|name| !vars.contains_key(*name))
-            .map(String::as_str)
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// Whether this firing should happen.
+    ///
+    /// Truthiness is `MiniJinja`'s own, so an empty string, `0`, an empty list
+    /// and an absent variable are all no — and a captured `null` is no as well.
+    /// That last one is a deliberate departure from what `when_defined:` used to
+    /// say: a list of names could only ask about presence, an expression is read
+    /// as a question about a value, and `null` is not much of a value. Ask for
+    /// presence when presence is the point — `{{ vars.session is defined }}`
+    /// says so in as many words.
+    ///
+    /// # Errors
+    ///
+    /// `MiniJinja`'s message for an expression that could not be evaluated —
+    /// which, undefined being false here, means a genuine mistake: an unknown
+    /// filter, a call to something that is not callable.
+    fn holds(&self, rendering: &Rendering<'_>) -> Result<bool, String> {
+        CONDITIONS
+            .compile_expression(&self.expression)
+            .and_then(|compiled| compiled.eval(rendering))
+            .map(|value| value.is_true())
+            .map_err(|error| {
+                format!(
+                    "the `if` condition could not be evaluated: {}",
+                    root(&error)
+                )
+            })
     }
 }
 
@@ -555,14 +669,15 @@ pub struct HookRecord {
     /// which is the difference between "the tool never ran" and "the tool ran and
     /// nobody was told".
     pub stopped_the_call: bool,
-    /// The `when_defined:` variable that was not captured, when that is why
-    /// nothing was sent.
+    /// The `if:` condition that came back false, when that is why nothing was
+    /// sent.
     ///
     /// Filed rather than passed over in silence. A hook that did not fire is a
-    /// question somebody will ask sooner or later, and "it was waiting for
-    /// `session`" is the whole answer; a trace that simply omitted it would make
-    /// a declared hook and a hook that never ran look identical. Not an error —
-    /// `error` stays empty and `on_error` does not apply.
+    /// question somebody will ask sooner or later, and the condition quoted back
+    /// is the whole answer; a trace that simply omitted it would make a declared
+    /// hook and a hook that never ran look identical. Not an error — `error`
+    /// stays empty and `on_error` does not apply. A condition that could not be
+    /// *evaluated* is the other case, and it fills `error` instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skipped: Option<String>,
 }
@@ -677,7 +792,13 @@ struct Rendering<'a> {
     /// configuration of an audit sink, and the thing `mire` used to send whether
     /// anybody had asked for it or not.
     call: &'a Payload<'a>,
-    /// The process environment, read fresh on every render.
+    /// The process environment, read fresh on every firing.
+    ///
+    /// Once per `tools/call` rather than once per template: a rotated token is
+    /// picked up without a restart either way, and every template of a firing
+    /// reading the same environment is the weaker promise worth keeping — an
+    /// `if:` that said yes and a `url:` that then disagreed about `env.STAGE`
+    /// would be a request nobody asked for.
     env: BTreeMap<String, String>,
     /// What the run's tool calls have captured so far.
     ///
@@ -711,35 +832,57 @@ pub(super) async fn fire(
     credentials: &McpCredentials<'_>,
     file: impl Fn(HookRecord),
 ) -> Result<(), McpError> {
+    // Most tool calls have no hook on them at all, and the context below reads
+    // the whole process environment. Asked first, so the ordinary call pays for
+    // nothing.
+    if !hooks
+        .iter()
+        .any(|hook| hook.fires(payload.phase, payload.tool))
+    {
+        return Ok(());
+    }
+
+    // Built once, and shared by the condition and by every action behind it:
+    // one firing is one set of facts about one call, and two actions of a hook
+    // disagreeing about what `env` said would be a bug nobody could reproduce.
+    let rendering = Rendering {
+        payload,
+        call: payload,
+        env: std::env::vars().collect(),
+        vars,
+        uploads,
+    };
+
     for hook in hooks {
         if !hook.fires(payload.phase, payload.tool) {
             continue;
         }
 
-        // Asked for by `when_defined:`, and answered before anything is built:
-        // a hook waiting on a variable pays for no credential, renders no
-        // template, and sends nothing. Every one of its actions is filed all the
-        // same — see [`HookRecord::skipped`] for why a non-event belongs in a
-        // trace, and once per action because each names its own address.
-        if let Some(missing) = hook.waiting_for(vars) {
-            debug!(
-                server = %payload.server,
-                hook = %hook.name,
-                phase = %payload.phase,
-                tool = %payload.tool,
-                %missing,
-                "hook skipped: the variable it waits for is not captured yet"
-            );
-            for (step, action) in hook.actions.iter().enumerate() {
-                file(skipped(hook, action, step, payload, missing));
+        // Asked by `if:`, and answered before anything is built: a hook whose
+        // condition says no pays for no credential, renders no template, and
+        // sends nothing.
+        match qualifies(hook, payload, &rendering, &file) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            // The condition could not be asked at all, which is a broken file
+            // rather than a call that did not qualify. Its records are already
+            // filed; what is left is what `on_error` says it means.
+            Err(message) => {
+                if hook.on_error == OnError::Fail {
+                    return Err(McpError::Hook {
+                        server: payload.server.to_owned(),
+                        hook: hook.name.clone(),
+                        phase: payload.phase,
+                        message,
+                    });
+                }
+                continue;
             }
-            continue;
         }
 
         for (step, action) in hook.actions.iter().enumerate() {
             let firing = Firing { hook, action, step };
-            let (mut record, outcome) =
-                run(http, firing, payload, uploads, vars, credentials).await;
+            let (mut record, outcome) = run(http, firing, &rendering, credentials).await;
 
             let Err(message) = outcome else {
                 debug!(
@@ -783,24 +926,85 @@ pub(super) async fn fire(
     Ok(())
 }
 
+/// Whether `if:` lets this hook fire, with the trail filed when it does not.
+///
+/// Both no-answers leave a record per action rather than a silence — see
+/// [`HookRecord::skipped`] for why a non-event belongs in a trace, and once per
+/// action because each names its own address. They are not the same answer,
+/// though: a condition that came back false is the hook working as declared,
+/// and one that could not be evaluated is a mistake in `mcp.yaml`.
+///
+/// # Errors
+///
+/// The condition's own failure, once its records are filed. Whether that stops
+/// the tool call is `on_error`'s to say, and the caller's to act on.
+fn qualifies(
+    hook: &Hook,
+    payload: &Payload<'_>,
+    rendering: &Rendering<'_>,
+    file: &impl Fn(HookRecord),
+) -> Result<bool, String> {
+    let Some(condition) = hook.condition.as_ref() else {
+        return Ok(true);
+    };
+
+    match condition.holds(rendering) {
+        Ok(true) => Ok(true),
+        Ok(false) => {
+            debug!(
+                server = %payload.server,
+                hook = %hook.name,
+                phase = %payload.phase,
+                tool = %payload.tool,
+                condition = condition.source(),
+                "hook skipped: its `if` condition does not hold for this call"
+            );
+            for (step, action) in hook.actions.iter().enumerate() {
+                let mut record = unfired(hook, action, step, payload);
+                record.skipped = Some(condition.source().to_owned());
+                file(record);
+            }
+            Ok(false)
+        }
+        Err(message) => {
+            let stopped = hook.on_error == OnError::Fail;
+            warn!(
+                server = %payload.server,
+                hook = %hook.name,
+                phase = %payload.phase,
+                tool = %payload.tool,
+                stopped_the_call = stopped,
+                %message,
+                "hook failed"
+            );
+            for (step, action) in hook.actions.iter().enumerate() {
+                let mut record = unfired(hook, action, step, payload);
+                record.error = Some(message.clone());
+                record.stopped_the_call = stopped;
+                file(record);
+            }
+            Err(message)
+        }
+    }
+}
+
 /// Which action of its hook this is, as a person counts.
 fn step_of(index: usize) -> u32 {
     u32::try_from(index + 1).unwrap_or(u32::MAX)
 }
 
-/// The record for an action `when_defined:` held back.
+/// The record for an action that never got as far as a request.
 ///
-/// Everything a firing would have said about *which* action this was, and
-/// nothing about a request: there was none. `url` is what the file says rather
-/// than a rendered address, because rendering it is exactly what did not happen
-/// — and on the hook this is written for, could not have.
-fn skipped(
-    hook: &Hook,
-    action: &HookAction,
-    step: usize,
-    payload: &Payload<'_>,
-    missing: &str,
-) -> HookRecord {
+/// Both things `if:` can do to an action end here — the condition that came back
+/// false, and the one that could not be evaluated at all. Everything a firing
+/// would have said about *which* action this was, and nothing about a request:
+/// there was none. `url` is what the file says rather than a rendered address,
+/// because rendering it is exactly what did not happen — and on the hooks this
+/// is written for, could not have.
+///
+/// The caller fills in which of the two it was: `skipped` for the answer that
+/// was no, `error` and `stopped_the_call` for the question that broke.
+fn unfired(hook: &Hook, action: &HookAction, step: usize, payload: &Payload<'_>) -> HookRecord {
     let HookAction::Http(http) = action;
     HookRecord {
         server: payload.server.to_owned(),
@@ -819,7 +1023,7 @@ fn skipped(
         latency_ms: 0,
         error: None,
         stopped_the_call: false,
-        skipped: Some(missing.to_owned()),
+        skipped: None,
     }
 }
 
@@ -837,13 +1041,12 @@ struct Firing<'a> {
 async fn run(
     http: &Client,
     firing: Firing<'_>,
-    payload: &Payload<'_>,
-    uploads: &[UploadRef],
-    vars: &Captured,
+    rendering: &Rendering<'_>,
     credentials: &McpCredentials<'_>,
 ) -> (HookRecord, Result<(), String>) {
     let Firing { hook, action, step } = firing;
     let HookAction::Http(http_action) = action;
+    let payload = rendering.payload;
 
     let mut record = HookRecord {
         server: payload.server.to_owned(),
@@ -868,19 +1071,11 @@ async fn run(
         skipped: None,
     };
 
-    let rendering = Rendering {
-        payload,
-        call: payload,
-        env: std::env::vars().collect(),
-        vars,
-        uploads,
-    };
-
     // Before the credential, and this order is not an accident: the provider
     // decides what to hand over by looking at where it is going, so the address
     // has to exist first. A template that renders to somewhere `allowed_hosts`
     // refuses is refused, which is the check doing its job.
-    let url = match http_action.url.resolve(&rendering) {
+    let url = match http_action.url.resolve(rendering) {
         Ok(url) => url,
         Err(message) => return (record, Err(message)),
     };
@@ -895,7 +1090,7 @@ async fn run(
         Err(error) => return (record, Err(error.to_string())),
     };
 
-    let sent = match render_body(http_action, &rendering) {
+    let sent = match render_body(http_action, rendering) {
         Ok(sent) => sent,
         Err(message) => return (record, Err(message)),
     };
@@ -913,7 +1108,7 @@ async fn run(
         &url,
         &resolved,
         payload.server,
-        vars,
+        rendering.vars,
         sent.is_json(),
     )
     .await
@@ -1434,18 +1629,48 @@ mod tests {
                 .iter()
                 .map(|tool| NamePattern::compile(tool).expect("pattern"))
                 .collect(),
-            when_defined: Vec::new(),
+            condition: None,
             on_error: OnError::Fail,
             actions: vec![HookAction::Http(action())],
         }
     }
 
-    /// A hook that waits for `waits_for` before firing.
-    fn waiting(name: &str, waits_for: &[&str]) -> Hook {
+    /// A hook fired under `condition`.
+    fn conditional(name: &str, condition: &str) -> Hook {
         Hook {
-            when_defined: waits_for.iter().map(|v| (*v).to_owned()).collect(),
+            condition: Some(HookCondition::compile(condition).expect("condition")),
             ..hook(name, &[HookPhase::After], &[])
         }
+    }
+
+    /// Whether `condition` holds for an `after` call carrying `vars`.
+    fn holds(condition: &str, vars: &Captured) -> Result<bool, String> {
+        let arguments = json!({ "path": "/etc/hosts", "size": 2048 });
+        let result = ToolOutcome {
+            text: "ok".to_owned(),
+            structured: None,
+            is_error: false,
+            latency_ms: 3,
+            error: None,
+        };
+        let payload = Payload {
+            phase: HookPhase::After,
+            server: "files",
+            tool: "read_file",
+            arguments: &arguments,
+            result: Some(result),
+        };
+        let rendering = Rendering {
+            payload: &payload,
+            call: &payload,
+            env: std::env::vars().collect(),
+            vars,
+            uploads: &[],
+        };
+
+        HookCondition::compile(condition)
+            .expect("condition")
+            .holds(&rendering)
     }
 
     /// An action sending the JSON document `body`.
@@ -2105,58 +2330,137 @@ mod tests {
     fn a_hook_with_no_condition_fires_whatever_the_run_captured() {
         let hook = hook("audit", &[HookPhase::After], &[]);
 
-        assert!(hook.waiting_for(&Captured::new()).is_none());
+        assert!(hook.condition.is_none());
     }
 
     #[test]
-    fn a_hook_waits_for_the_variable_it_names() {
-        let hook = waiting("audit", &["session"]);
-
-        assert_eq!(hook.waiting_for(&Captured::new()), Some("session"));
+    fn a_condition_reads_what_the_run_has_captured() {
+        let empty = Captured::new();
+        assert_eq!(holds("{{ vars.session is defined }}", &empty), Ok(false));
 
         let captured = Captured::from([("session".to_owned(), json!("abc-123"))]);
-        assert!(hook.waiting_for(&captured).is_none());
+        assert_eq!(holds("{{ vars.session is defined }}", &captured), Ok(true));
     }
 
     #[test]
-    fn every_named_variable_has_to_be_there() {
-        let hook = waiting("audit", &["session", "job"]);
-        let half = Captured::from([("session".to_owned(), json!("abc-123"))]);
+    fn an_absent_variable_is_false_rather_than_a_failure() {
+        // The one place in a hook where undefined is not an error. Everywhere
+        // else a template names something absent, a request would go out with a
+        // hole in it; here the question *is* whether it is there.
+        let empty = Captured::new();
 
-        // Named in declaration order, so "why did it not fire" has one answer.
-        assert_eq!(hook.waiting_for(&half), Some("job"));
+        assert_eq!(holds("{{ vars.session }}", &empty), Ok(false));
+        // And it chains, so asking about a field of something absent is still a
+        // question about the something, not a failure about the field.
+        assert_eq!(holds("{{ vars.job.id }}", &empty), Ok(false));
+    }
 
-        let both = Captured::from([
+    #[test]
+    fn a_condition_can_ask_about_more_than_presence() {
+        let captured = Captured::from([
             ("session".to_owned(), json!("abc-123")),
-            ("job".to_owned(), json!(7)),
+            ("attempts".to_owned(), json!(3)),
         ]);
-        assert!(hook.waiting_for(&both).is_none());
+
+        // The whole reason this is an expression: a list of names could only ever
+        // have asked the first of these.
+        assert_eq!(holds("{{ vars.attempts > 2 }}", &captured), Ok(true));
+        assert_eq!(holds("{{ vars.attempts > 5 }}", &captured), Ok(false));
+        assert_eq!(
+            holds(
+                "{{ vars.session is defined and vars.attempts > 2 }}",
+                &captured
+            ),
+            Ok(true)
+        );
     }
 
     #[test]
-    fn a_variable_captured_as_null_still_counts_as_captured() {
-        // Presence, not truthiness: a path that resolved to `null` resolved, and
-        // second-guessing that here would be a different rule from the one the
-        // capture applied.
-        let hook = waiting("audit", &["session"]);
+    fn a_condition_sees_the_call_it_is_asked_about() {
+        let empty = Captured::new();
+
+        // Same context as `url:`, `json:` and `headers:` — one vocabulary.
+        assert_eq!(holds("{{ tool == 'read_file' }}", &empty), Ok(true));
+        assert_eq!(holds("{{ phase == 'after' }}", &empty), Ok(true));
+        assert_eq!(holds("{{ arguments.size > 1024 }}", &empty), Ok(true));
+        // Which is what makes "audit the calls that actually worked" writable.
+        assert_eq!(holds("{{ not result.is_error }}", &empty), Ok(true));
+    }
+
+    #[test]
+    fn a_variable_captured_as_null_does_not_hold_but_is_still_defined() {
+        // A departure from `when_defined:`, which could only ask about presence.
+        // An expression is read as a question about a value, and `null` is not
+        // much of a value — so say which question you meant.
         let captured = Captured::from([("session".to_owned(), Value::Null)]);
 
-        assert!(hook.waiting_for(&captured).is_none());
+        assert_eq!(holds("{{ vars.session }}", &captured), Ok(false));
+        assert_eq!(holds("{{ vars.session is defined }}", &captured), Ok(true));
     }
 
     #[test]
-    fn waiting_is_decided_apart_from_the_phase_and_the_tool() {
-        // Two questions, two methods: `fires` is what the file says, and this is
-        // what the run has done. A hook can be right about the tool and still
-        // have nothing to address itself with.
-        let hook = waiting("audit", &["session"]);
+    fn a_condition_that_cannot_be_evaluated_is_a_failure_rather_than_a_skip() {
+        // Undefined being false here does not make every mistake silent: an
+        // unknown filter is a broken file, not a call that did not qualify.
+        let error = holds("{{ vars.session | teleport }}", &Captured::new())
+            .expect_err("an unknown filter cannot be evaluated");
+
+        assert!(error.contains("`if`"), "{error}");
+        assert!(error.contains("teleport"), "{error}");
+    }
+
+    #[test]
+    fn a_condition_is_decided_apart_from_the_phase_and_the_tool() {
+        // Two questions, two places: `fires` is what the file says, and `if:` is
+        // what this call and this run amount to. A hook can be right about the
+        // tool and still have nothing to address itself with.
+        let hook = conditional("audit", "{{ vars.session is defined }}");
 
         assert!(hook.fires(HookPhase::After, "read_file"));
-        assert_eq!(hook.waiting_for(&Captured::new()), Some("session"));
+        assert_eq!(
+            holds("{{ vars.session is defined }}", &Captured::new()),
+            Ok(false)
+        );
     }
 
     #[test]
-    fn a_skipped_hook_is_recorded_as_a_non_event_rather_than_a_failure() {
+    fn a_condition_may_be_written_bare_or_wrapped() {
+        let captured = Captured::from([("session".to_owned(), json!("abc-123"))]);
+
+        assert_eq!(holds("vars.session is defined", &captured), Ok(true));
+        assert_eq!(holds("{{ vars.session is defined }}", &captured), Ok(true));
+    }
+
+    #[test]
+    fn a_condition_keeps_the_spelling_it_was_written_with() {
+        // Because that is what the trace quotes back when the answer is no, and
+        // a reader matching it against `mcp.yaml` should find it verbatim.
+        let condition = HookCondition::compile("  {{ vars.session is defined }}  ").expect("valid");
+
+        assert_eq!(condition.source(), "{{ vars.session is defined }}");
+    }
+
+    #[test]
+    fn a_template_is_not_a_condition() {
+        // It renders to `yes` or to the empty string, and only one of those is
+        // falsy by accident. Refused, with the reason.
+        let error = HookCondition::compile("{% if vars.session %}yes{% endif %}")
+            .expect_err("a block is not an expression");
+        assert!(error.contains("expression"), "{error}");
+
+        // Same for an expression with text around it: `session: {{ vars.x }}` is
+        // a non-empty string whatever `x` turns out to be.
+        let error = HookCondition::compile("session: {{ vars.session }}")
+            .expect_err("interpolation is not an expression");
+        assert!(error.contains("expression"), "{error}");
+
+        // And an empty one says what to do instead.
+        let error = HookCondition::compile("   ").expect_err("nothing is not a condition");
+        assert!(error.contains("empty"), "{error}");
+    }
+
+    /// Runs `hook`'s condition against an empty run, collecting what it filed.
+    fn gate(hook: &Hook) -> (Result<bool, String>, Vec<HookRecord>) {
         let arguments = json!({});
         let payload = Payload {
             phase: HookPhase::After,
@@ -2165,11 +2469,111 @@ mod tests {
             arguments: &arguments,
             result: None,
         };
-        let hook = waiting("audit", &["session"]);
+        let vars = Captured::new();
+        let rendering = Rendering {
+            payload: &payload,
+            call: &payload,
+            env: std::env::vars().collect(),
+            vars: &vars,
+            uploads: &[],
+        };
 
-        let record = skipped(&hook, &hook.actions[0], 0, &payload, "session");
+        let filed = Mutex::new(Vec::new());
+        let outcome = qualifies(hook, &payload, &rendering, &|record| {
+            filed.lock().expect("journal").push(record);
+        });
 
-        assert_eq!(record.skipped.as_deref(), Some("session"));
+        (outcome, filed.into_inner().expect("journal"))
+    }
+
+    #[test]
+    fn a_condition_that_does_not_hold_files_one_record_per_action_and_no_more() {
+        let mut hook = conditional("audit", "{{ vars.session is defined }}");
+        // Two actions, because a hook that sits a call out sits out all of it,
+        // and each of its addresses is its own line in the trace.
+        hook.actions.push(HookAction::Http(action()));
+
+        let (outcome, filed) = gate(&hook);
+
+        assert_eq!(outcome, Ok(false));
+        assert_eq!(filed.len(), 2);
+        assert_eq!(filed[0].step, 1);
+        assert_eq!(filed[1].step, 2);
+        for record in &filed {
+            assert_eq!(
+                record.skipped.as_deref(),
+                Some("{{ vars.session is defined }}")
+            );
+            assert!(record.error.is_none());
+            assert!(!record.stopped_the_call);
+        }
+    }
+
+    #[test]
+    fn a_condition_that_holds_files_nothing_and_lets_the_hook_through() {
+        let hook = conditional("audit", "{{ tool == 'read_file' }}");
+
+        let (outcome, filed) = gate(&hook);
+
+        assert_eq!(outcome, Ok(true));
+        assert!(filed.is_empty(), "{filed:#?}");
+    }
+
+    #[test]
+    fn a_hook_with_no_condition_never_asks_anything() {
+        let hook = hook("audit", &[HookPhase::After], &[]);
+
+        let (outcome, filed) = gate(&hook);
+
+        assert_eq!(outcome, Ok(true));
+        assert!(filed.is_empty(), "{filed:#?}");
+    }
+
+    #[test]
+    fn a_broken_condition_is_a_failure_the_on_error_setting_decides_about() {
+        let hook = conditional("audit", "{{ vars.session | teleport }}");
+
+        let (outcome, filed) = gate(&hook);
+
+        // Filed as a failure rather than as a skip: nothing was sent either way,
+        // but only one of the two is the hook working as declared.
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(filed.len(), 1);
+        assert!(filed[0].skipped.is_none());
+        assert!(filed[0].error.is_some());
+        assert!(filed[0].stopped_the_call);
+
+        // And `on_error: continue` is the same record with the call left alone.
+        let lenient = Hook {
+            on_error: OnError::Continue,
+            ..conditional("audit", "{{ vars.session | teleport }}")
+        };
+        let (outcome, filed) = gate(&lenient);
+
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert!(filed[0].error.is_some());
+        assert!(!filed[0].stopped_the_call);
+    }
+
+    #[test]
+    fn an_unfired_hook_is_recorded_as_a_non_event_rather_than_a_failure() {
+        let arguments = json!({});
+        let payload = Payload {
+            phase: HookPhase::After,
+            server: "files",
+            tool: "read_file",
+            arguments: &arguments,
+            result: None,
+        };
+        let hook = conditional("audit", "{{ vars.session is defined }}");
+
+        let mut record = unfired(&hook, &hook.actions[0], 0, &payload);
+        record.skipped = hook.condition.as_ref().map(|c| c.source().to_owned());
+
+        assert_eq!(
+            record.skipped.as_deref(),
+            Some("{{ vars.session is defined }}")
+        );
         // Not a failure, and nothing went out.
         assert!(record.error.is_none());
         assert!(!record.stopped_the_call);

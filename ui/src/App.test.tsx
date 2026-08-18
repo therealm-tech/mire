@@ -1026,11 +1026,12 @@ describe('agent mode', () => {
     expect(within(panel('Traffic')).getByText(/x-api-key: \*\*\*/)).toBeInTheDocument()
   })
 
-  it('says a hook sat a call out, and what it was waiting for', async () => {
+  it('says a hook sat a call out, and what it was asked', async () => {
     const user = userEvent.setup()
     const turn = turnFixture()
-    // `when_defined: [session]` on a run where no call has opened one yet: the
-    // hook is doing what it was told, and the tool call went ahead untouched.
+    // `if: '{{ vars.session is defined }}'` on a run where no call has opened one
+    // yet: the hook is doing what it was told, and the tool call went ahead
+    // untouched.
     turn.hooks = [
       {
         server: 'weather',
@@ -1048,7 +1049,7 @@ describe('agent mode', () => {
         response: '',
         latencyMs: 0,
         stoppedTheCall: false,
-        skipped: 'session',
+        skipped: '{{ vars.session is defined }}',
       },
     ]
     vi.stubGlobal('fetch', toolRunApi([turn]))
@@ -1062,7 +1063,10 @@ describe('agent mode', () => {
       expect(conversation.getByRole('button', { name: 'session-audit' })).toBeInTheDocument()
     })
     expect(conversation.getByText(/sat out/)).toBeInTheDocument()
-    expect(conversation.getByText(/waiting for/)).toBeInTheDocument()
+    // The condition, quoted back: "why did my hook not fire" has one answer and
+    // this is it.
+    expect(conversation.getByText('{{ vars.session is defined }}')).toBeInTheDocument()
+    expect(conversation.getByText(/was false/)).toBeInTheDocument()
 
     // Not firing is not failing: no status in red, and the run reads as clean.
     const traffic = within(panel('Traffic'))

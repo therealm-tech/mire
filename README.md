@@ -1523,48 +1523,71 @@ server that run talks to, and last write wins.
 #### A hook that waits for one
 
 Failing loudly is right when the variable *should* be there. When it legitimately
-is not there **yet** — a session that a tool opens partway through a run —
-`when_defined:` says so:
+is not there **yet** — a session that a tool opens partway through a run — `if:`
+says so:
 
 ```yaml
       - name: session-audit
         on:
           - after
-        when_defined:
-          - session
+        if: '{{ vars.session is defined }}'
         actions:
           - http:
               url: https://audit.internal/sessions/{{ vars.session }}/tool-calls
 ```
 
-Plain names, not patterns: this asks whether a value exists, and the place to
-*use* it is `url:`, `json:` or `headers:`. Every name listed has to be there;
-empty — the default — is no condition at all.
+`if:` is a MiniJinja expression, asked once per firing. True and the hook fires;
+false and it sits the call out. It sees exactly what `url:`, `json:` and
+`headers:` see — `phase`, `tool`, `arguments`, `result`, `env`, `vars`,
+`uploads` — because a condition about a call and a body about the same call
+should not need two vocabularies. Leaving it out is no condition at all.
 
-The pairing is the point. Without `when_defined:`, that URL fails every call made
-before a session exists. With it, the hook sits those out and starts firing once
-one does.
+The pairing is the point. Without `if:`, that URL fails every call made before a
+session exists. With it, the hook sits those out and starts firing once one does.
+
+Being an expression is what makes the rest reachable — the audit that only cares
+about the writes that actually worked, the gate that only asks about the big
+files, the hook that is for staging only:
+
+```yaml
+        if: '{{ result.is_error == false }}'
+        if: '{{ arguments.size > 1048576 }}'
+        if: '{{ vars.session is defined and env.STAGE == "prod" }}'
+```
+
+**Undefined is false here, not an error** — the one place in a hook where it is.
+Everywhere else a template names something absent, the request would go out with
+a hole in it, so it fails loudly; a condition is *asking* whether something is
+there, and it has to be able to hear "no" without falling over. Lookups chain, so
+`{{ vars.job.id }}` on a run carrying no `job` is false rather than a failure
+about `id`. Truthiness is MiniJinja's, so a variable captured as `null` is false
+— write `is defined` when presence is the question you meant.
 
 **Not firing is not failing.** `on_error` does not apply, nothing is sent, no
 credential is resolved, and the tool call proceeds untouched — the model gets the
-real answer. The skip is recorded all the same, naming what it waited for:
+real answer. The skip is recorded all the same, quoting what was asked:
 
 ```json
-{ "hook": "session-audit", "step": 1, "phase": "after", "skipped": "session", "status": 0 }
+{
+  "hook": "session-audit", "step": 1, "phase": "after",
+  "skipped": "{{ vars.session is defined }}", "status": 0
+}
 ```
 
 A hook that quietly never ran and a hook that was never declared must not look
 the same in a trace, and neither must a hook that sat a call out and a hook that
-failed: the transcript says `sat out get_weather, waiting for session`, the card
-is badged **did not fire** rather than a red status it never got, and **Failed**
-leaves it alone. Note that presence is the test, not truthiness: a path that
-resolved to `null` resolved, and `when_defined:` does not second-guess the
-capture that accepted it.
+failed: the transcript says `sat out get_weather: {{ vars.session is defined }}
+was false`, the card is badged **did not fire** rather than a red status it never
+got, and **Failed** leaves it alone.
 
-Names are checked against what the run captured and nothing else — there is no
-startup check that some profile fills them, because `mcp.yaml` does not know
-which profiles will use the server. A name nothing ever captures shows up as a
-skip naming it, run after run, which is the readable version of that mistake.
+A condition that cannot be *evaluated* at all — an unknown filter, a call to
+something that is not callable — is a different thing, and it is a hook failure
+like any other: `on_error` decides what it does to the call. The expression
+itself is compiled when `mcp.yaml` loads, so a syntax error is a startup issue
+naming the hook rather than a surprise on the first tool call. What it *reads* is
+checked against nothing — `mcp.yaml` does not know which profiles will use the
+server — so a condition naming a variable no profile ever captures shows up as a
+skip quoting it, run after run, which is the readable version of that mistake.
 
 ## Streaming, and the number everybody actually wants
 

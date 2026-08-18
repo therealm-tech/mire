@@ -675,9 +675,9 @@ function HookCard({
         </p>
         {skipped === undefined ? null : (
           <p className="text-muted text-sm">
-            Nothing was sent: this hook waits for <span className="font-mono">{skipped}</span>, and
-            nothing had captured one yet. No credential was resolved, and the tool call went ahead
-            untouched — the address above is the template it would have rendered.
+            Nothing was sent: this hook fires under <span className="font-mono">{skipped}</span>,
+            and that came back false for this call. No credential was resolved, and the tool call
+            went ahead untouched — the address above is the template it would have rendered.
           </p>
         )}
         <ul className="space-y-0.5 break-all font-mono text-[11px] text-muted">
