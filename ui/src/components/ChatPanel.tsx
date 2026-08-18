@@ -297,10 +297,19 @@ function Bubble({
         </button>
       </div>
 
+      {/*
+        `selection:`, because the highlight is the brand colour and this is the
+        one surface printed in the brand colour: dragging over your own question
+        selected it and nothing on screen changed, which is a poor way to learn
+        that the copy worked. The pair is flipped back here — the sheet
+        highlights, the ink writes — so a selection reads inside the bubble the
+        way it reads everywhere else. The variant carries to the children too,
+        so the tool-call lines under the text come with it.
+      */}
       <div
         className={`max-w-[85%] rounded-2xl px-3 py-2 text-sm ${
           mine
-            ? 'bg-brand text-on-brand'
+            ? 'bg-brand text-on-brand selection:bg-on-brand selection:text-brand'
             : aside
               ? 'border border-warn/30 bg-warn-soft'
               : 'border border-line bg-paper'

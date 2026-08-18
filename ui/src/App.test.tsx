@@ -2238,6 +2238,32 @@ describe('conversation', () => {
     expect(conversation.getByText('a question').className).not.toContain('select-none')
   })
 
+  it('shows the highlight on a question, which is printed in the highlight colour', async () => {
+    const { fetchMock, sent } = recordingApi(['pong'])
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await type(user, 'a question')
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(sent).toHaveLength(1))
+
+    const conversation = within(panel('Conversation'))
+
+    // jsdom paints nothing, so what is asserted is the rule again: the bubble
+    // you typed into is the one surface wearing the brand colour, and a
+    // highlight in that same colour is a selection nobody can see. The pair is
+    // flipped back on the bubble; the answer beside it keeps the page's.
+    const asked = conversation.getByText('a question').parentElement?.className ?? ''
+    expect(asked).toContain('bg-brand')
+    expect(asked).toContain('selection:bg-on-brand')
+    expect(asked).toContain('selection:text-brand')
+
+    const answered = conversation.getByText('pong').closest('div')?.className ?? ''
+    expect(answered).not.toContain('selection:')
+  })
+
   it('never offers a conversation for an embedding profile', async () => {
     const { fetchMock } = recordingApi(['pong'])
     vi.stubGlobal('fetch', fetchMock)
