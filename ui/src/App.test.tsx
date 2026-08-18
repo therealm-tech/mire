@@ -924,6 +924,121 @@ describe('agent mode', () => {
     expect(conversation.getByText(/asked for no more tools/i)).toBeInTheDocument()
   })
 
+  it('shows a hook in the transcript, on the side of the call it fired on', async () => {
+    const user = userEvent.setup()
+    const turn = turnFixture()
+    // A gate in front of the call and an audit behind it — the order they fired
+    // in, which is the only order they can be read in.
+    turn.hooks = [
+      {
+        server: 'weather',
+        hook: 'gate',
+        phase: 'before',
+        tool: 'get_weather',
+        action: 'http',
+        url: 'https://policy.internal/decide',
+        method: 'POST',
+        headers: { 'x-api-key': '***' },
+        request: '{"phase":"before","tool":"get_weather"}',
+        files: [],
+        status: 204,
+        response: '',
+        latencyMs: 8,
+        stoppedTheCall: false,
+      },
+      {
+        server: 'weather',
+        hook: 'audit',
+        phase: 'after',
+        tool: 'get_weather',
+        action: 'http',
+        url: 'https://audit.internal/tool-calls',
+        method: 'POST',
+        headers: {},
+        request: '{"phase":"after","tool":"get_weather"}',
+        files: [],
+        status: 200,
+        response: 'ok',
+        latencyMs: 12,
+        stoppedTheCall: false,
+      },
+    ]
+    vi.stubGlobal('fetch', toolRunApi([turn]))
+
+    render(<App />)
+    await agentMode(user)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    const conversation = within(panel('Conversation'))
+    await waitFor(() => {
+      expect(conversation.getByRole('button', { name: 'gate' })).toBeInTheDocument()
+    })
+    expect(conversation.getByText(/fired before/)).toBeInTheDocument()
+    expect(conversation.getByText(/fired after/)).toBeInTheDocument()
+
+    // Around the call, not in a list of their own: the gate is above the tool it
+    // let through and the audit is below it.
+    const gate = conversation.getByRole('button', { name: 'gate' })
+    const tool = conversation.getByRole('button', { name: 'get_weather' })
+    const audit = conversation.getByRole('button', { name: 'audit' })
+    expect(gate.compareDocumentPosition(tool) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(tool.compareDocumentPosition(audit) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    // And the row is a way to its own card, like every other row here.
+    await user.click(gate)
+    expect(within(panel('Traffic')).getByText(/x-api-key: \*\*\*/)).toBeInTheDocument()
+  })
+
+  it('says a hook sat a call out, and what it was waiting for', async () => {
+    const user = userEvent.setup()
+    const turn = turnFixture()
+    // `when_defined: [session]` on a run where no call has opened one yet: the
+    // hook is doing what it was told, and the tool call went ahead untouched.
+    turn.hooks = [
+      {
+        server: 'weather',
+        hook: 'session-audit',
+        phase: 'after',
+        tool: 'get_weather',
+        action: 'http',
+        url: 'https://audit.internal/sessions/{{ vars.session }}/tool-calls',
+        method: 'POST',
+        headers: {},
+        request: '',
+        files: [],
+        status: 0,
+        response: '',
+        latencyMs: 0,
+        stoppedTheCall: false,
+        skipped: 'session',
+      },
+    ]
+    vi.stubGlobal('fetch', toolRunApi([turn]))
+
+    render(<App />)
+    await agentMode(user)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    const conversation = within(panel('Conversation'))
+    await waitFor(() => {
+      expect(conversation.getByRole('button', { name: 'session-audit' })).toBeInTheDocument()
+    })
+    expect(conversation.getByText(/sat out/)).toBeInTheDocument()
+    expect(conversation.getByText(/waiting for/)).toBeInTheDocument()
+
+    // Not firing is not failing: no status in red, and the run reads as clean.
+    const traffic = within(panel('Traffic'))
+    expect(traffic.queryByText('never answered')).not.toBeInTheDocument()
+    expect(traffic.getByRole('button', { name: 'Nothing failed' })).toBeDisabled()
+
+    const hook = within(await openCard(user, /Turn 1 · session-audit \(after\)/))
+    expect(hook.getByText('did not fire')).toBeInTheDocument()
+    expect(hook.getByText(/Nothing was sent/)).toBeInTheDocument()
+    // The address it would have rendered, template and all: on the folded
+    // summary line, and on the request line under it.
+    expect(hook.getAllByText(/{{ vars.session }}/)).toHaveLength(2)
+  })
+
   it('shows what the endpoint said when it refused the turn', async () => {
     const user = userEvent.setup()
     const refused = {
