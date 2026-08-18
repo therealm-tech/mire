@@ -405,7 +405,7 @@ function ToolRow({
       </button>
       {tool.source === 'mcp' ? (
         <span className="text-muted">
-          called for real via <span className="font-mono">{tool.server}</span>
+          via <span className="font-mono">{tool.server}</span>
           {tool.latencyMs === undefined ? null : ` · ${tool.latencyMs} ms`}
         </span>
       ) : (
