@@ -39,6 +39,7 @@ import {
   type ChatItem,
   callExchange,
   type Exchange,
+  type Live,
   messageItem,
   setupExchanges,
   turnExchanges,
@@ -202,7 +203,10 @@ export function App() {
   // Stable, because the traffic reads it from an effect: a fresh arrow every
   // render would be a fresh dependency every render.
   const clearReveal = useCallback(() => setRevealed(null), [])
-  const [live, setLive] = useState<string | null>(null)
+  // Text and status together rather than side by side: they are one answer, and
+  // two states would let the badge say `complete` over the previous call's
+  // status for as long as it took the second to land.
+  const [live, setLive] = useState<Live | null>(null)
   const [embedding, setEmbedding] = useState<Embedding | null>(null)
   const [exchanges, setExchanges] = useState<Exchange[]>([])
   const [callError, setCallError] = useState<ApiError | null>(null)
@@ -519,7 +523,7 @@ export function App() {
       setEmbedding(null)
       // Empty rather than null: the bubble appears immediately, so a stream that
       // never produces a token is visibly a stream that never produced a token.
-      setLive('')
+      setLive({ text: '', status: null })
 
       const body: CallRequest = { profile: profile.name, messages: sent }
       if (token.length > 0) {
@@ -537,7 +541,10 @@ export function App() {
               logger.debug('stream.open', { status: event.status })
               break
             case 'delta':
-              setLive((current) => (current ?? '') + event.text)
+              setLive((current) => ({
+                text: (current?.text ?? '') + event.text,
+                status: null,
+              }))
               break
             case 'done': {
               setExchanges((current) => [...current, callExchange(event)])
@@ -550,6 +557,14 @@ export function App() {
               if (answer) {
                 setTimeline((current) => [...current, messageItem(answer)])
                 setLive(null)
+              } else {
+                // Nothing to promote to a bubble, so the live one stays — and
+                // it says what the endpoint actually answered rather than that
+                // the request is over.
+                setLive((current) => ({
+                  text: current?.text ?? '',
+                  status: event.response.http.status,
+                }))
               }
               logger.info('stream.done', {
                 status: event.response?.http.status ?? null,
@@ -938,6 +953,7 @@ export function App() {
               items={timeline}
               live={live}
               busy={busy}
+              expectUnauthorized={expectUnauthorized}
               stopped={stopped}
               prompt={prompt}
               prompts={prompts}

@@ -69,6 +69,23 @@ export interface VerdictItem {
   stop: StopOutcome
   turns: number
   durationMs: number
+  /**
+   * The call the run ended on, because how the loop stopped is only half of how
+   * it went: a `400` decodes to no tool calls, which the loop reads as a model
+   * with nothing left to ask for. Null when the run never made a call.
+   */
+  call: CallOutcome | null
+}
+
+/**
+ * The answer as it is being read, and what the endpoint said about it.
+ *
+ * `status` stays null until the stream ends — and after it, a null means the
+ * stream broke before the `done` event ever landed.
+ */
+export interface Live {
+  text: string
+  status: number | null
 }
 
 export type ChatItem = MessageItem | ActivityItem | VerdictItem
@@ -147,6 +164,7 @@ export function verdictItem(trace: Trace): VerdictItem {
     stop: trace.stop,
     turns: trace.turns.length,
     durationMs: trace.durationMs,
+    call: trace.turns.at(-1)?.call ?? null,
   }
 }
 
@@ -356,4 +374,62 @@ export function describeStop(stop: StopOutcome): { tone: Tone; text: string } {
         text: `\`${stop.predicate}\` could never be evaluated in ${stop.turns} turns — the endpoint never reported one. The loop was not slow, it was unfalsifiable.`,
       }
   }
+}
+
+/**
+ * How the run ended, with the endpoint's own answer in front of it.
+ *
+ * The loop's account of itself is not the whole verdict: a `400` carries no
+ * tool calls, so the loop stops on "the model asked for no more tools" and the
+ * run reads green while the endpoint was refusing it. So the status comes first
+ * and settles the colour, and the loop still gets to say why it stopped.
+ */
+export function describeVerdict(
+  item: VerdictItem,
+  expectUnauthorized: boolean,
+): { tone: Tone; text: string } {
+  const stopped = describeStop(item.stop)
+  const response = item.call?.response
+  if (response === undefined) {
+    return stopped
+  }
+  const status = response.http.status
+  if (statusTone(status, expectUnauthorized) !== 'good') {
+    return { tone: 'bad', text: `The endpoint answered ${status}. ${stopped.text}` }
+  }
+  // A gateway that answers `200` over an upstream failure has still failed, and
+  // a verdict that called that one green would be the same lie a status short.
+  if (response.error !== undefined) {
+    return {
+      tone: 'bad',
+      text: `The endpoint answered ${status} with an error in the body. ${stopped.text}`,
+    }
+  }
+  return stopped
+}
+
+/**
+ * What the badge over a streaming answer says, while it arrives and once it has.
+ *
+ * `complete` is a claim about the endpoint, not about the request finishing, so
+ * it is only ever said over a status that earned it: a stream that opened `400`
+ * and wrote nothing is a run that failed, however tidily it ended. A run called
+ * off from this tab is neither — nobody was refused, the question was withdrawn.
+ */
+export function describeLive(
+  live: Live,
+  run: { busy: boolean; stopped: boolean },
+  expectUnauthorized: boolean,
+): { tone: Tone; label: string } {
+  if (run.busy) {
+    return { tone: 'neutral', label: 'receiving…' }
+  }
+  if (run.stopped) {
+    return { tone: 'warn', label: 'called off' }
+  }
+  if (live.status === null) {
+    return { tone: 'bad', label: 'never answered' }
+  }
+  const tone = statusTone(live.status, expectUnauthorized)
+  return tone === 'good' ? { tone, label: 'complete' } : { tone, label: `answered ${live.status}` }
 }

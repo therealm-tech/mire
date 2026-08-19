@@ -2,8 +2,14 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from './App'
-import type { HookRecord } from './api'
-import { describeStop, statusTone } from './conversation'
+import type { CallOutcome, HookRecord } from './api'
+import {
+  describeLive,
+  describeStop,
+  describeVerdict,
+  statusTone,
+  type VerdictItem,
+} from './conversation'
 
 const PROFILES = {
   profiles: [
@@ -783,6 +789,88 @@ describe('describeStop', () => {
   })
 })
 
+describe('describeVerdict', () => {
+  const stopped = { outcome: 'stopped', reason: { predicate: 'noToolCalls' } } as const
+
+  function verdict(call: CallOutcome | null): VerdictItem {
+    return { kind: 'verdict', id: 'verdict-1', stop: stopped, turns: 1, durationMs: 120, call }
+  }
+
+  it('reads a clean run as the loop described it', () => {
+    const { tone, text } = describeVerdict(verdict(completion(200) as CallOutcome), false)
+    expect(tone).toBe('good')
+    expect(text).toMatch(/asked for no more tools/)
+  })
+
+  it('refuses to call a run green when the endpoint refused it', () => {
+    const { tone, text } = describeVerdict(verdict(completion(400) as CallOutcome), false)
+    expect(tone).toBe('bad')
+    expect(text).toMatch(/^The endpoint answered 400\./)
+  })
+
+  it('keeps an expected 401 green, since being refused is what it went to prove', () => {
+    expect(describeVerdict(verdict(completion(401) as CallOutcome), true).tone).toBe('good')
+    expect(describeVerdict(verdict(completion(401) as CallOutcome), false).tone).toBe('bad')
+  })
+
+  it('sees through a 200 that carries an error in its body', () => {
+    const swallowed = completion(200)
+    const call = {
+      ...swallowed,
+      response: {
+        ...swallowed.response,
+        error: {
+          message: 'no capacity upstream',
+          type: 'service_unavailable',
+          code: null,
+          raw: null,
+        },
+      },
+    } as CallOutcome
+    const { tone, text } = describeVerdict(verdict(call), false)
+    expect(tone).toBe('bad')
+    expect(text).toMatch(/error in the body/)
+  })
+
+  it("falls back to the loop's own account when no call was ever made", () => {
+    expect(describeVerdict(verdict(null), false).tone).toBe('good')
+  })
+})
+
+describe('describeLive', () => {
+  const reading = { busy: true, stopped: false }
+  const over = { busy: false, stopped: false }
+
+  it('says nothing about the answer while it is still arriving', () => {
+    const { tone, label } = describeLive({ text: 'po', status: null }, reading, false)
+    expect(tone).toBe('neutral')
+    expect(label).toBe('receiving…')
+  })
+
+  it('only says complete over a status that earned it', () => {
+    expect(describeLive({ text: 'pong', status: 200 }, over, false).label).toBe('complete')
+    const refused = describeLive({ text: '', status: 400 }, over, false)
+    expect(refused.tone).toBe('bad')
+    expect(refused.label).toBe('answered 400')
+  })
+
+  it('calls a stream that never reached its end unanswered', () => {
+    const { tone, label } = describeLive({ text: '', status: null }, over, false)
+    expect(tone).toBe('bad')
+    expect(label).toBe('never answered')
+  })
+
+  it('does not blame the endpoint for a run this tab called off', () => {
+    const { tone, label } = describeLive(
+      { text: 'half a sen', status: null },
+      { busy: false, stopped: true },
+      false,
+    )
+    expect(tone).toBe('warn')
+    expect(label).toBe('called off')
+  })
+})
+
 describe('agent mode', () => {
   it('offers the loop controls for a chat profile and not for an embedding one', async () => {
     const user = userEvent.setup()
@@ -1006,6 +1094,43 @@ describe('agent mode', () => {
     expect(model.getByText(/stopped without ending/i)).toBeInTheDocument()
   })
 
+  it('says what a refused stream came back with instead of calling it complete', async () => {
+    const user = userEvent.setup()
+    // Nothing decodes out of a `400`, so no bubble is promoted and the live one
+    // is the only thing left saying how the call went.
+    const stream = [
+      'event: open',
+      `data: ${JSON.stringify({ event: 'open', status: 400, headers: {} })}`,
+      '',
+      'event: done',
+      `data: ${JSON.stringify({ event: 'done', ...completion(400) })}`,
+      '',
+      '',
+    ].join('\n')
+
+    vi.stubGlobal(
+      'fetch',
+      mockApi({
+        'api/profiles': PROFILES,
+        'api/auth': AUTH,
+        'api/mcp': MCP,
+        'api/prompts': PROMPTS,
+        'api/call/stream': stream,
+      }),
+    )
+
+    render(<App />)
+    await chatMode(user)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    const conversation = within(panel('Conversation'))
+    await waitFor(() => {
+      expect(conversation.getByText('answered 400')).toBeInTheDocument()
+    })
+    expect(conversation.getByText('answered 400')).toHaveClass('text-bad')
+    expect(conversation.queryByText('complete')).not.toBeInTheDocument()
+  })
+
   it('shows the tools a run called in the transcript and the verdict it ended on', async () => {
     const user = userEvent.setup()
     vi.stubGlobal('fetch', toolRunApi())
@@ -1022,6 +1147,53 @@ describe('agent mode', () => {
     })
     expect(conversation.getByText(/via/)).toHaveTextContent('via weather · 42 ms')
     expect(conversation.getByText(/asked for no more tools/i)).toBeInTheDocument()
+  })
+
+  it('does not call a run green when the endpoint refused the turn', async () => {
+    const user = userEvent.setup()
+    const refused = {
+      ...turnFixture(),
+      call: completion(400),
+      tools: [],
+      // A refusal decodes to nothing, so the loop reads it as a model with
+      // nothing left to ask for — which is exactly how a `400` used to end up
+      // wearing the same green badge as an answer.
+      decision: {
+        decision: 'stop',
+        stop: { outcome: 'stopped', reason: { predicate: 'noToolCalls' } },
+      },
+    }
+
+    vi.stubGlobal(
+      'fetch',
+      mockApi({
+        'api/profiles': PROFILES,
+        'api/auth': AUTH,
+        'api/mcp': MCP,
+        'api/prompts': PROMPTS,
+        'api/agent': [
+          'event: turn',
+          `data: ${JSON.stringify({ event: 'turn', ...refused })}`,
+          '',
+          'event: done',
+          `data: ${JSON.stringify({ event: 'done', ...traceFixture(), turns: [refused] })}`,
+          '',
+          '',
+        ].join('\n'),
+      }),
+    )
+
+    render(<App />)
+    await agentMode(user)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    const conversation = within(panel('Conversation'))
+    // The status comes first, and the loop still says why it stopped.
+    await waitFor(() => {
+      expect(conversation.getByText(/The endpoint answered 400/)).toBeInTheDocument()
+    })
+    expect(conversation.getByText(/asked for no more tools/i)).toBeInTheDocument()
+    expect(conversation.getByText('stopped')).toHaveClass('text-bad')
   })
 
   it('shows a hook in the transcript, on the side of the call it fired on', async () => {
