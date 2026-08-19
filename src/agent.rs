@@ -35,8 +35,8 @@ use crate::config::Config;
 use crate::decode::Decoded;
 use crate::exec::{CallInput, CallOutcome, ExecError, Runner};
 use crate::mcp::{
-    HookJournal, HookRecord, McpClient, McpCredentials, McpError, McpExchange, McpJournal, McpTool,
-    Revision,
+    HookJournal, HookRecord, McpClient, McpCredentials, McpError, McpExchange, McpJournal,
+    McpRegistry, McpTool, Revision,
 };
 use crate::message::{Message, Role, ToolCall};
 use crate::profile::{AgentSpec, Profile, ProfileKind, StopWhen, ToolResponse, ToolSpec};
@@ -241,14 +241,14 @@ pub struct AgentInput {
     pub call: CallInput,
     /// Turn budget, overriding the profile's.
     pub max_iterations: Option<u32>,
-    /// Which of the profile's MCP servers this run may reach.
+    /// Which of the declared MCP servers this run may reach.
     ///
-    /// `None` is all of them, which is what the profile said. A list narrows that
-    /// to the ones named — down to none at all, which is how you ask what the
-    /// model does when the tool it wants is not there. It only ever narrows: a
-    /// server the profile does not name is [`AgentError::NotOffered`], because
-    /// which servers a profile may reach is the file's decision and a run is not
-    /// a place to add one.
+    /// `None` is all of them: a server is declared once, in `mcp.yaml`, and every
+    /// `kind: chat` profile is offered the lot. A list narrows that to the ones
+    /// named — down to none at all, which is how you ask what the model does when
+    /// the tool it wants is not there. A name `mcp.yaml` does not declare is
+    /// [`McpError::UnknownServer`], because it is a typo rather than a server
+    /// this run gets to invent.
     pub mcp_servers: Option<Vec<String>>,
     /// Revision to speak to every MCP server this run touches, overriding both
     /// the negotiation and any `protocol_version:` in `mcp.yaml`.
@@ -274,21 +274,7 @@ pub enum AgentError {
     #[error(transparent)]
     Turn(#[from] ExecError),
 
-    /// The run asked for a server its profile does not name.
-    ///
-    /// Switching one off is this run narrowing what the file offered; switching
-    /// one *on* would be a caller granting itself an effect outside the process
-    /// that no profile granted. `mcp:` is opt-in per profile, and that has to
-    /// hold for every route into the loop.
-    #[error("profile `{profile}` does not name the MCP server `{server}`")]
-    NotOffered {
-        /// The profile that was run.
-        profile: String,
-        /// The server that was asked for.
-        server: String,
-    },
-
-    /// The profile's MCP servers could not be resolved before the loop started.
+    /// The run's MCP servers could not be resolved before the loop started.
     ///
     /// Only setup failures land here — a tool that fails *during* the loop is fed
     /// back to the model, because recovering from it is what is being tested.
@@ -581,38 +567,34 @@ impl Tools {
 
 /// The MCP servers a run will actually set up.
 ///
-/// `requested` is what the caller asked for, and it may only ever be a subset of
-/// what the profile names — see [`AgentInput::mcp_servers`]. Shared by the API
-/// handler, which wants the refusal before it opens a stream, and by [`prepare`],
-/// which is the one that acts on it: two readings of the same rule are two
-/// readings that can disagree.
+/// `None` is every server `mcp.yaml` declares — the file is the opt-in, and it
+/// grants the lot to every `kind: chat` profile. `requested` narrows that to the
+/// ones named. Shared by the API handler, which wants the refusal before it opens
+/// a stream, and by [`prepare`], which is the one that acts on it: two readings of
+/// the same rule are two readings that can disagree.
 ///
 /// # Errors
 ///
-/// Fails when `requested` names a server the profile does not.
+/// Fails when `requested` names a server `mcp.yaml` does not declare.
 pub fn selected_servers(
-    profile: &Profile,
+    registry: &McpRegistry,
     requested: Option<&[String]>,
-) -> Result<Vec<String>, AgentError> {
+) -> Result<Vec<String>, McpError> {
+    let declared = registry.names();
     let Some(asked) = requested else {
-        return Ok(profile.mcp.clone());
+        return Ok(declared);
     };
 
     for server in asked {
-        if !profile.mcp.contains(server) {
-            return Err(AgentError::NotOffered {
-                profile: profile.name.clone(),
-                server: server.clone(),
-            });
+        if !declared.contains(server) {
+            return Err(McpError::UnknownServer(server.clone()));
         }
     }
-    // The profile's order, not the caller's: the setup traffic reads better when
-    // the same profile always lists its servers the same way round.
-    Ok(profile
-        .mcp
-        .iter()
+    // The registry's order, not the caller's: the setup traffic reads better when
+    // a run always lists its servers the same way round.
+    Ok(declared
+        .into_iter()
         .filter(|server| asked.contains(server))
-        .cloned()
         .collect())
 }
 
@@ -649,13 +631,15 @@ async fn prepare(runner: &Runner, input: &mut AgentInput) -> Result<Prepared, Ag
 
     let mut live = Vec::new();
     let mut clients = BTreeMap::new();
-    let servers = selected_servers(&profile, input.mcp_servers.as_deref())?;
-    if servers.len() != profile.mcp.len() {
-        // Worth a line of its own: a run offering the model fewer tools than the
-        // profile declares is the first thing to check when it stops calling one.
+    let servers = selected_servers(&config.mcp, input.mcp_servers.as_deref())?;
+    let declared = config.mcp.descriptors().len();
+    if servers.len() != declared {
+        // Worth a line of its own: a run offering the model fewer tools than
+        // `mcp.yaml` declares is the first thing to check when it stops calling
+        // one.
         info!(
             profile = %profile.name,
-            declared = profile.mcp.len(),
+            declared,
             reaching = servers.len(),
             "MCP servers narrowed for this run"
         );

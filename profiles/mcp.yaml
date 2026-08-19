@@ -1,8 +1,10 @@
-# MCP servers, referenced by name from a profile's `mcp:` list.
+# MCP servers. Every one declared here is offered to every `kind: chat` profile.
 #
-# This is the one place in `mire` where a run has effects outside the process:
-# a tool the model calls here is really executed, on a real server. It is opt-in
-# per profile and never implied.
+# This is the one place in `mire` where a run has effects outside the process: a
+# tool the model calls here is really executed, on a real server. Which is why
+# declaring a server *is* the opt-in — this file is the whole of it, and a
+# profile has no say. Untick one in the composer's Servers row, or send
+# `mcpServers:` on the request, to leave it out of a single run.
 #
 # `mire` speaks three revisions of the Streamable HTTP transport — 2026-07-28
 # (no handshake, no session, mirrored headers), 2025-06-18 and 2025-03-26 (an

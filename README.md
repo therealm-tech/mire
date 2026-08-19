@@ -306,25 +306,24 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   hold: a credential typed into this tab, and a browser session somebody has to
   go and fetch — **Sign in**, then who you are and a countdown.
 
-  Under it, in its own section, the same panel lists the identities the profile's
-  **MCP servers** will use. A separate question answered in a separate file: the
-  model's identity comes from the profile, a server's from `mcp.yaml`, and
-  neither follows the other. Each row names the provider (or `anonymous`), says
-  when it comes from a header template rather than `auth:`, and warns when it is
-  a browser provider nobody has signed in to — that call answers
-  `409 not_signed_in` and sends nothing, so the **Sign in** button for it is on
-  the row itself. Once somebody has been through, the row says who, and carries
-  the **Sign out** that drops that identity again — a server's provider is often
-  not the profile's, so this row is the only place it appears. A profile naming a
-  server `mcp.yaml` does not declare is called out there too.
+  Under it, in its own section, the same panel lists the identities the
+  **MCP servers** this run would set up will use. A separate question answered in
+  a separate file: the model's identity comes from the profile, a server's from
+  `mcp.yaml`, and neither follows the other. Each row names the provider (or
+  `anonymous`), says when it comes from a header template rather than `auth:`,
+  and warns when it is a browser provider nobody has signed in to — that call
+  answers `409 not_signed_in` and sends nothing, so the **Sign in** button for it
+  is on the row itself. Once somebody has been through, the row says who, and
+  carries the **Sign out** that drops that identity again — a server's provider
+  is often not the profile's, so this row is the only place it appears.
 
   That whole section is there in **Agent** mode and gone in **Chat**, along with
   the servers on the bar above and any refusal they would have caused. A chat is
-  one turn: it discovers nothing, lists nothing and calls nothing, so the
-  profile's servers are not idle during it — they are not in the run at all, and
-  neither are the sign-ins they would have needed. A server unticked in
-  **Servers** leaves the same way and for the same reason: this run does not
-  reach it, so it needs nothing from you.
+  one turn: it discovers nothing, lists nothing and calls nothing, so the servers
+  are not idle during it — they are not in the run at all, and neither are the
+  sign-ins they would have needed. A server unticked in **Servers** leaves the
+  same way and for the same reason: this run does not reach it, so it needs
+  nothing from you.
 - **Conversation**, for chat profiles. A transcript: your question on the right,
   the answer on the left, the tools the run called in between, and a composer at
   the bottom. `Enter` sends, `Shift`+`Enter` starts a line. There is one button,
@@ -336,10 +335,12 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   arrives, the only way to see time to first token. **max turns** is shown as
   inert on **Chat**, because a stream has no second turn to cap, and **Servers**
   and **Protocol** go away entirely, because there is no server for either of
-  them to be about. **Servers** is a checkbox per server the profile names:
+  them to be about. **Servers** is a checkbox per server `mcp.yaml` declares:
   untick one and this run does not set it up, does not sign in to it and is not
-  offered its tools — the file still names it, and the run
-  [says so](#switching-one-off-for-a-run) rather than shrinking quietly.
+  offered its tools — the file still declares it, and the run
+  [says so](#switching-one-off-for-a-run) rather than shrinking quietly. **All**
+  and **None** ask the same of the whole list in one press, which is what makes
+  "what does the loop do with none of these?" a question rather than six clicks.
   While a run is in flight, **Stop** drops the request where it stands and
   whatever had arrived stays on the page — a stream cut off after four tokens
   produced four tokens, and that is a finding rather than a mess to clear up.
@@ -1076,14 +1077,14 @@ servers:
     auth: keycloak-workload
 ```
 
-and opt a profile into it:
+That is the whole opt-in. Every server declared there is offered to every
+`kind: chat` profile — there is no second list to keep in step, and a server
+added to this file is reachable from the profile you were already running.
+Declaring it is the deliberate act, because a tool call here really runs
+somewhere; leaving one out of a single run is what the composer's **Servers** row
+and `mcpServers:` are [for](#switching-one-off-for-a-run).
 
-```yaml
-mcp:
-  - files
-```
-
-At the start of a run, `mire` asks the server what it offers, declares those
+At the start of a run, `mire` asks each server what it offers, declares those
 tools to the model, and when the model calls one, **calls it for real**. The
 trace says which: every tool card carries `simulated` or `mcp`, the server name
 and the round trip.
@@ -1191,41 +1192,43 @@ plumbing. Twice in a row is reported, because at that point it is not plumbing.
 
 ### Switching one off for a run
 
-Which servers a profile *may* reach is the profile's business: `mcp:` is opt-in,
+Which servers exist at all is `mcp.yaml`'s business: declaring one is opt-in,
 never implied, because a tool call here really runs somewhere. Which of them
 **this** run reaches is a different question, and it comes up constantly — does
 the model still get there without the search tool, is that server the thing that
 has been failing for ten minutes, what does the loop do when the tool it wants is
-not there. All three used to be a profile edit, a run, and a profile edit back.
+not there. All three used to be a config edit, a run, and a config edit back.
 
 The **Servers** row in the composer, above **Protocol**, is one checkbox per
-server the profile names. Untick one and this run does not set it up: nothing is
-discovered, nothing is listed, no credential is fetched, and its tools are not
-offered to the model. `POST /api/agent` takes the same thing:
+declared server, plus **All** and **None** for the whole list at once. Untick one
+and this run does not set it up: nothing is discovered, nothing is listed, no
+credential is fetched, and its tools are not offered to the model.
+`POST /api/agent` takes the same thing:
 
 ```json
 { "profile": "chat", "prompt": "weather in Paris?", "mcpServers": ["files"] }
 ```
 
-Leave the field out — the default — and the run reaches every server the profile
-names, which is what the file says. Send a list and it reaches those, `[]`
-included: a loop with nothing set up, offered the profile's own simulated
-`tools:` and nothing else. That empty list is not the same as saying nothing, on
-purpose — "none of them" is an answer, and it should not be spelled the same way
-as "whatever the file says".
+Leave the field out — the default — and the run reaches every declared server,
+which is what the file says. Send a list and it reaches those, `[]` included: a
+loop with nothing set up, offered the profile's own simulated `tools:` and
+nothing else. That empty list is not the same as saying nothing, on purpose —
+"none of them" is an answer, and it should not be spelled the same way as
+"whatever the file says". It is also one press of **None**, which is why the pair
+of buttons is there: the interesting extreme is worth asking for in one gesture
+rather than six.
 
-**It only ever narrows.** Naming a server the profile does not is a `422`
-(`mcp_server_not_offered`) before anything is sent, not a server this request
-gets to add — the opt-in lives in a file somebody wrote and reviewed, and a
-request body is not where it is granted. So the file stays the authority on what
-a profile may touch, and the checkbox decides what this run actually did.
+**It only ever narrows.** Naming a server `mcp.yaml` does not declare is a `404`
+(`unknown_mcp_server`) before anything is sent — a typo, not a server this
+request gets to invent. The file stays the authority on what exists, and the
+checkbox decides what this run actually did.
 
 Switching one off takes its blockers with it. A server whose browser identity
 nobody has signed in to would have refused the first tool call with a `409`; off,
 it is not in the run, so the preflight bar goes green and the sign-in it was
 asking for disappears from the auth panel — the same way both vanish in **Chat**
 mode. What stays is a line naming what was left out, because a run reaching fewer
-servers than its profile declares is a fact you want in front of you rather than
+servers than `mcp.yaml` declares is a fact you want in front of you rather than
 one to reconstruct from the traffic afterwards.
 
 ### A token that does not fit
@@ -1875,8 +1878,8 @@ how the answer arrives, not about which of two mechanisms the profile is for.
 
 The one thing that does not carry over is the servers. Only the loop sets an MCP
 server up, so **Chat** speaks to none of them — `POST /api/call` and `POST
-/api/call/stream` never discover, list or call a tool, whatever the profile's
-`mcp:` says, and the UI drops their identities and their revision from the page
+/api/call/stream` never discover, list or call a tool, whatever `mcp.yaml`
+declares, and the UI drops their identities and their revision from the page
 while that is the mode. The tool list the model is offered is then the profile's
 own `tools:` and nothing else — which is also what a loop reaching
 [no server](#switching-one-off-for-a-run) is offered, and the reason switching

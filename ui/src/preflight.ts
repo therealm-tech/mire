@@ -82,13 +82,13 @@ export function preflight({
    *
    * They are out of the picture exactly as the whole set is on a chat: no
    * discovery, no listing, no sign-in — so nothing about them can block a call
-   * they are not part of. It is still said out loud, in a note: a profile
-   * reaching fewer servers than its file declares is a fact about the run, and
-   * finding out by reading the traffic afterwards is finding out too late.
+   * they are not part of. It is still said out loud, in a note: a run reaching
+   * fewer servers than `mcp.yaml` declares is a fact about the run, and finding
+   * out by reading the traffic afterwards is finding out too late.
    */
   mcpOff?: string[]
   /**
-   * Whether this run will speak to the profile's servers at all.
+   * Whether this run will speak to a server at all.
    *
    * False in chat mode, which is one turn and calls no tool. Their credentials
    * are then not blockers of anything: reporting "tool calls answer 409" about a
@@ -99,10 +99,12 @@ export function preflight({
 }): Preflight {
   const blockers: Blocker[] = []
   const notes: string[] = []
-  // Named by the file, but only set up by a run that can call one — and only
-  // the ones this run has left switched on.
-  const declared = usesMcp ? profile.mcp.filter((name) => !mcpOff.includes(name)) : []
-  const off = usesMcp ? profile.mcp.filter((name) => mcpOff.includes(name)) : []
+  // Every declared server is offered to every chat profile, so the registry is
+  // the whole list — minus the ones this run has switched off, and minus all of
+  // them on a mode that sets none up.
+  const names = servers.map((server) => server.name)
+  const declared = usesMcp ? names.filter((name) => !mcpOff.includes(name)) : []
+  const off = usesMcp ? names.filter((name) => mcpOff.includes(name)) : []
 
   if (provider === undefined) {
     blockers.push({
@@ -128,15 +130,8 @@ export function preflight({
     }
   }
 
-  for (const name of declared) {
-    const server = servers.find((candidate) => candidate.name === name)
-    if (!server) {
-      blockers.push({
-        message: `This profile names the MCP server ${name}, which no mcp.yaml entry declares.`,
-      })
-      continue
-    }
-
+  for (const server of servers.filter(({ name }) => declared.includes(name))) {
+    const name = server.name
     // The named provider and the ones its header templates read: any of them
     // being a browser flow with no session is a `409` on the first tool call.
     const used = [server.auth, ...server.usesAuth].filter(

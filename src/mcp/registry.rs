@@ -271,6 +271,19 @@ impl McpRegistry {
         &self.descriptors
     }
 
+    /// Every server's name, in the order the descriptors are listed.
+    ///
+    /// This is the set a chat run may reach: a server is declared once, in
+    /// `mcp.yaml`, and every `kind: chat` profile is offered all of it. Declaring
+    /// it there is the opt-in — there is no second one per profile.
+    #[must_use]
+    pub fn names(&self) -> Vec<String> {
+        self.descriptors
+            .iter()
+            .map(|descriptor| descriptor.name.clone())
+            .collect()
+    }
+
     /// Entries that could not be loaded, and why.
     #[must_use]
     pub fn issues(&self) -> &[LoadIssue] {

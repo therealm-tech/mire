@@ -3410,6 +3410,9 @@ fn weather_tool() -> Value {
 }
 
 /// A chat profile whose tools come from an MCP server rather than its own YAML.
+///
+/// It says nothing about MCP, and does not have to: every server `mcp.yaml`
+/// declares is offered to every `kind: chat` profile.
 fn mcp_profile(url: &str) -> String {
     format!(
         r#"
@@ -3428,8 +3431,6 @@ agent:
   stop_when:
     no_tool_calls: true
   max_iterations: 4
-mcp:
-  - weather
 "#
     )
 }
@@ -3520,16 +3521,16 @@ async fn the_agent_really_calls_an_mcp_tool_and_feeds_the_result_back() {
     );
 }
 
-/// One turn sets nothing up, whatever the profile declares.
+/// One turn sets nothing up, whatever `mcp.yaml` declares.
 ///
 /// The loop is what discovers a server, lists its tools and calls them; a single
 /// call has no second turn to feed a result into, so it opens no connection at
-/// all. The profile here declares `mcp:` and both single-turn endpoints are
-/// asked to run it — a spent credential, a session prompt, or a line in
-/// somebody's audit log for a tool that was never going to be called is a
-/// side effect nobody asked this endpoint for.
+/// all. A server is declared here and both single-turn endpoints are asked to run
+/// the profile — a spent credential, a session prompt, or a line in somebody's
+/// audit log for a tool that was never going to be called is a side effect nobody
+/// asked this endpoint for.
 #[tokio::test]
-async fn a_single_turn_never_speaks_to_the_profiles_mcp_servers() {
+async fn a_single_turn_never_speaks_to_an_mcp_server() {
     let mcp = mcp_server(weather_tool(), vec![]).await;
     let endpoint = MockServer::start().await;
     Mock::given(method("POST"))
@@ -3611,13 +3612,13 @@ fn tools_offered(turn: &Value) -> Vec<String> {
         .collect()
 }
 
-/// One run reaching fewer servers than its profile names.
+/// One run reaching fewer servers than `mcp.yaml` declares.
 ///
-/// The file still names both — which servers a profile *may* reach is the
-/// profile's decision, and no request edits it. What a run gets to say is which
-/// of them this one does, so that "does the model still get there without the
-/// weather tool?" and "is that server what has been failing for ten minutes?"
-/// stop being a profile edit, a restart and a profile edit back.
+/// The file still declares both — declaring a server is the opt-in, and no
+/// request edits it. What a run gets to say is which of them this one reaches, so
+/// that "does the model still get there without the weather tool?" and "is that
+/// server what has been failing for ten minutes?" stop being a config edit, a
+/// restart and a config edit back.
 ///
 /// The one left out is not idle: it is never discovered, never listed, and its
 /// tools never reach the model.
@@ -3639,11 +3640,7 @@ async fn a_run_reaches_only_the_servers_it_names() {
         ),
         (
             "chat.yaml",
-            // The profile names `weather`; `stocks` is appended to the same list.
-            format!(
-                "{}  - stocks\n",
-                mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri()))
-            ),
+            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
@@ -3716,16 +3713,15 @@ async fn a_run_can_name_no_server_at_all() {
     );
 }
 
-/// A run may narrow what the profile offers. It may not widen it.
+/// Saying nothing reaches every declared server, on a profile that mentions none.
 ///
-/// `mcp:` is opt-in per profile because it is the one thing here with effects
-/// outside the process, and that opt-in lives in a file somebody wrote — not in
-/// a request body. Naming a server the profile does not is a `422` before
-/// anything is sent, rather than a tool call nobody authorised.
+/// `mcp.yaml` is the opt-in and the only one: a server declared there is offered
+/// to every `kind: chat` profile, so a profile that says nothing about MCP still
+/// gets the lot. This is the default the two tests above narrow away from.
 #[tokio::test]
-async fn a_run_cannot_reach_a_server_its_profile_does_not_name() {
-    let mcp = mcp_server(weather_tool(), vec![]).await;
-    let other = mcp_server(stock_tool(), vec![]).await;
+async fn a_run_that_names_no_server_reaches_every_declared_one() {
+    let weather = mcp_server(weather_tool(), vec![]).await;
+    let stocks = mcp_server(stock_tool(), vec![]).await;
     let endpoint = MockServer::start().await;
     model_answering_plainly(&endpoint).await;
 
@@ -3734,9 +3730,46 @@ async fn a_run_cannot_reach_a_server_its_profile_does_not_name() {
             "mcp.yaml",
             format!(
                 "servers:\n  - name: weather\n    url: {}/mcp\n  - name: stocks\n    url: {}/mcp\n",
-                mcp.uri(),
-                other.uri()
+                weather.uri(),
+                stocks.uri()
             ),
+        ),
+        (
+            "chat.yaml",
+            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+        ),
+    ])
+    .await;
+
+    let (status, events) = harness
+        .agent(json!({"profile": "chat", "prompt": "ping"}))
+        .await;
+    assert_eq!(status, 200, "{events:?}");
+
+    let turns: Vec<_> = events.iter().filter(|(name, _)| name == "turn").collect();
+    // The registry's order, which is alphabetical, not the file's.
+    assert_eq!(
+        tools_offered(&turns[0].1),
+        vec!["get_stock".to_owned(), "get_weather".to_owned()],
+        "a profile naming no server should still be offered both"
+    );
+}
+
+/// A name `mcp.yaml` does not declare is a typo, and gets a status code.
+///
+/// The request no longer has a per-profile list to overstep, so the only way to
+/// get this wrong is to name something that does not exist — which is a `404`
+/// before anything is sent, rather than a stream that opens and fails.
+#[tokio::test]
+async fn a_run_cannot_reach_a_server_nobody_declared() {
+    let mcp = mcp_server(weather_tool(), vec![]).await;
+    let endpoint = MockServer::start().await;
+    model_answering_plainly(&endpoint).await;
+
+    let harness = Harness::start(&[
+        (
+            "mcp.yaml",
+            format!("servers:\n  - name: weather\n    url: {}/mcp\n", mcp.uri()),
         ),
         (
             "chat.yaml",
@@ -3751,19 +3784,13 @@ async fn a_run_cannot_reach_a_server_its_profile_does_not_name() {
             json!({"profile": "chat", "prompt": "ping", "mcpServers": ["stocks"]}),
         )
         .await;
-    assert_eq!(status, 422, "{body}");
-    assert_eq!(body["code"], "mcp_server_not_offered");
-    // Both names, because either half alone leaves you guessing which is wrong.
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["code"], "unknown_mcp_server");
     assert!(body["message"].as_str().unwrap().contains("stocks"));
-    assert!(body["message"].as_str().unwrap().contains("chat"));
 
     assert!(
-        other
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .is_empty(),
-        "a server no profile offered was spoken to"
+        mcp.received_requests().await.unwrap_or_default().is_empty(),
+        "a run refused before it started spoke to a server anyway"
     );
 }
 
@@ -4084,8 +4111,6 @@ agent:
     - tools: [get_weather]
       vars:
         session: [$.sessionId]
-mcp:
-  - weather
 "#
     )
 }
@@ -5141,23 +5166,6 @@ async fn an_unreachable_server_fails_the_run_before_a_prompt_is_spent() {
     let failed = &events[0].1;
     assert_eq!(failed["code"], "mcp_unreachable");
     assert_eq!(endpoint.received_requests().await.unwrap().len(), before);
-}
-
-#[tokio::test]
-async fn a_profile_naming_an_undeclared_server_is_a_404_rather_than_a_stream() {
-    let endpoint = MockServer::start().await;
-    let harness = Harness::start(&[(
-        "chat.yaml",
-        mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
-    )])
-    .await;
-
-    let (status, events) = harness
-        .agent(json!({"profile": "chat", "prompt": "go"}))
-        .await;
-
-    assert_eq!(status, 404);
-    assert!(events.is_empty(), "a typo should not open a stream");
 }
 
 #[tokio::test]

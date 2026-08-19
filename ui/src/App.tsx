@@ -175,11 +175,11 @@ export function App() {
     z.string().nullable(),
     null,
   )
-  // The servers switched off, rather than the ones left on: a profile is a file
+  // The servers switched off, rather than the ones left on: `mcp.yaml` is a file
   // somebody edits, and remembering the *on* set would quietly leave a server
   // added this morning out of every run until somebody noticed. Names are
-  // `mcp.yaml`'s and so global to the tab — switching `dev` off means off, on
-  // whichever profile reaches it.
+  // `mcp.yaml`'s and so global to the tab — which is also all they can be now
+  // that every declared server is offered to every profile.
   const [mcpOff, setMcpOff] = usePersisted<string[]>('mcpOff', z.array(z.string()), [])
 
   const [signingIn, setSigningIn] = useState<string | null>(null)
@@ -304,27 +304,34 @@ export function App() {
   const provider = auth?.providers.find((entry) => entry.name === (profile?.auth ?? ANONYMOUS))
 
   /**
-   * Whether the profile's MCP servers are part of the run that is about to
-   * happen.
+   * Whether the declared MCP servers are part of the run that is about to happen.
    *
    * Only agent mode ever speaks to one: a chat is a single turn, and `POST
    * /api/call/stream` sets nothing up and calls no tool. So on **Chat** the
    * servers are not merely idle, they are not in the picture — and neither are
    * their credentials, their revision, or the sign-ins they would need.
+   *
+   * And only on a chat profile. Agent mode *is* a chat profile run in a loop, so
+   * `kind: embedding` has no loop to be in — the server refuses one outright, and
+   * the `mode` this tab remembers is about the profile you were on before, not
+   * about this one.
    */
-  const usesMcp = mode === 'agent' && (profile?.mcp.length ?? 0) > 0
+  const usesMcp = mode === 'agent' && profile?.kind === 'chat' && (mcp?.servers.length ?? 0) > 0
+
+  /** Every declared server, which is what a chat profile is offered. */
+  const declaredMcp = useMemo(() => (mcp ? mcp.servers.map((server) => server.name) : []), [mcp])
 
   /**
    * The servers this run will actually set up.
    *
-   * The profile's, minus whatever the composer has switched off — and empty when
-   * the run speaks to none of them at all. Everything that describes the run
-   * reads this rather than `profile.mcp`: the bar above the box, the identities
-   * in the auth panel, and the list that goes out with the request.
+   * Every declared one, minus whatever the composer has switched off — and empty
+   * when the run speaks to none of them at all. Everything that describes the run
+   * reads this rather than the registry: the bar above the box, the identities in
+   * the auth panel, and the list that goes out with the request.
    */
   const activeMcp = useMemo(
-    () => (usesMcp && profile ? profile.mcp.filter((name) => !mcpOff.includes(name)) : []),
-    [usesMcp, profile, mcpOff],
+    () => (usesMcp ? declaredMcp.filter((name) => !mcpOff.includes(name)) : []),
+    [usesMcp, declaredMcp, mcpOff],
   )
 
   /** What the next call would do, and what would stop it. */
@@ -355,6 +362,28 @@ export function App() {
       })
     },
     [setMcpOff],
+  )
+
+  /**
+   * Every server in, or every server out, in one go.
+   *
+   * With every declared server offered to every profile there can be a good few
+   * of them, and the two questions worth a single click are the extremes: "what
+   * does the loop do with none of these?" and "put them all back". Ticking six
+   * boxes twice to ask that is how you stop asking it.
+   *
+   * Only the declared ones are touched. `mcpOff` is remembered across reloads and
+   * a server that has since been deleted from `mcp.yaml` has no business being
+   * revived — or dropped — by a button about the ones that are there.
+   */
+  const toggleAllMcp = useCallback(
+    (on: boolean) => {
+      setMcpOff((current) => {
+        const untouched = current.filter((name) => !declaredMcp.includes(name))
+        return on ? untouched : [...untouched, ...declaredMcp]
+      })
+    },
+    [setMcpOff, declaredMcp],
   )
 
   // One kind of blocker is fixed by a field inside the panel rather than by a
@@ -582,12 +611,12 @@ export function App() {
       if (attachments.length > 0) {
         body.uploads = attachments.map((file) => file.id)
       }
-      // Left out while every server is on, for the same reason: the profile
+      // Left out while every server is on, for the same reason: `mcp.yaml`
       // already says which ones, and a copy travelling alongside is a second
       // thing that can disagree with it. Sent the moment one is switched off —
       // including as an empty list, which is a run reaching none of them and not
       // the same as saying nothing.
-      if (activeMcp.length !== profile.mcp.length) {
+      if (activeMcp.length !== declaredMcp.length) {
         body.mcpServers = activeMcp
       }
       // Left out entirely on auto: the field's absence is what tells the server
@@ -654,7 +683,17 @@ export function App() {
         })
         .finally(settle)
     },
-    [profile, token, attachments, maxIterations, mcpProtocol, activeMcp, begin, settle],
+    [
+      profile,
+      token,
+      attachments,
+      maxIterations,
+      mcpProtocol,
+      activeMcp,
+      declaredMcp,
+      begin,
+      settle,
+    ],
   )
 
   /**
@@ -907,7 +946,7 @@ export function App() {
               error={callError ? callError.body : null}
               revisions={mcp.revisions}
               mcpProtocol={usesMcp ? mcpProtocol : null}
-              mcpServers={usesMcp ? profile.mcp : []}
+              mcpServers={usesMcp ? declaredMcp : []}
               mcpOff={mcpOff}
               showProtocol={usesMcp}
               attachments={attachments}
@@ -918,6 +957,7 @@ export function App() {
               onMode={setMode}
               onMcpProtocol={setMcpProtocol}
               onMcpServer={toggleMcp}
+              onMcpServers={toggleAllMcp}
               onAttach={attach}
               onDetach={detach}
               onSend={send}

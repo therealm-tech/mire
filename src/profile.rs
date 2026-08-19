@@ -478,14 +478,6 @@ pub struct Profile {
     #[serde(default)]
     #[validate(nested)]
     pub tools: Vec<ToolSpec>,
-    /// MCP servers whose tools are offered to the model **and really called**.
-    ///
-    /// Names refer to `mcp.yaml`. This is the one place in `mire` where a run has
-    /// effects outside this process, so it is opt-in per profile and never
-    /// implied. A simulated tool of the same name wins, which is how you stub one
-    /// tool of an otherwise live server.
-    #[serde(default)]
-    pub mcp: Vec<String>,
     /// Expected response shape.
     #[serde(default)]
     pub expect: ExpectSpec,

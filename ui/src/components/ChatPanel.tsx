@@ -81,6 +81,7 @@ export function ChatPanel({
   onMode,
   onMcpProtocol,
   onMcpServer,
+  onMcpServers,
   onAttach,
   onDetach,
   onSend,
@@ -120,6 +121,7 @@ export function ChatPanel({
   onMode: (value: RunMode) => void
   onMcpProtocol: (revision: string | null) => void
   onMcpServer: (name: string, on: boolean) => void
+  onMcpServers: (on: boolean) => void
   onAttach: (files: File[]) => void
   onDetach: (id: string) => void
   onSend: () => void
@@ -223,6 +225,7 @@ export function ChatPanel({
           onMode={onMode}
           onMcpProtocol={onMcpProtocol}
           onMcpServer={onMcpServer}
+          onMcpServers={onMcpServers}
           onAttach={onAttach}
           onDetach={onDetach}
           onSend={onSend}
@@ -660,6 +663,7 @@ function Composer({
   onMode,
   onMcpProtocol,
   onMcpServer,
+  onMcpServers,
   onAttach,
   onDetach,
   onSend,
@@ -684,6 +688,7 @@ function Composer({
   onMode: (value: RunMode) => void
   onMcpProtocol: (revision: string | null) => void
   onMcpServer: (name: string, on: boolean) => void
+  onMcpServers: (on: boolean) => void
   onAttach: (files: File[]) => void
   onDetach: (id: string) => void
   onSend: () => void
@@ -867,7 +872,13 @@ function Composer({
             a revision to be spoken to at all — and because "which of these am I
             reaching?" is the coarser question of the two.
           */}
-          <McpServers names={mcpServers} off={mcpOff} disabled={busy} onToggle={onMcpServer} />
+          <McpServers
+            names={mcpServers}
+            off={mcpOff}
+            disabled={busy}
+            onToggle={onMcpServer}
+            onToggleAll={onMcpServers}
+          />
           <McpProtocol
             revisions={revisions}
             selected={mcpProtocol}
