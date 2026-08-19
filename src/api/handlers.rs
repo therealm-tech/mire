@@ -25,7 +25,7 @@ use crate::agent::{self, AgentError, AgentInput};
 use crate::auth::{Auth, AuthError, CALLBACK_PATH, OidcBrowserAuth};
 use crate::config::Config;
 use crate::error::ApiError;
-use crate::exec::{CallInput, CallOutcome};
+use crate::exec::{self, CallInput, CallOutcome};
 use crate::mcp::{McpCredentials, McpError, Revision};
 use crate::profile::{Profile, ProfileKind};
 use crate::uploads::UploadError;
@@ -595,8 +595,11 @@ pub async fn call_stream(
         ));
     }
     // Before the stream opens, so a file that will not load is a status code
-    // rather than a stream that opens and immediately fails.
+    // rather than a stream that opens and immediately fails. The profile asking
+    // for one and getting none is settled here for the same reason — the runner
+    // refuses it either way, but a `422` beats a stream whose first event is one.
     let uploads = resolve_uploads(&state, &request.uploads).await?;
+    exec::check_uploads(&profile, &uploads)?;
 
     let (sender, mut receiver) = mpsc::unbounded_channel::<StreamEvent>();
     let runner = state.runner.clone();
@@ -704,6 +707,7 @@ pub async fn agent(
 
     // Same reasoning as the streamed call: settled before the stream opens.
     let uploads = resolve_uploads(&state, &request.call.uploads).await?;
+    exec::check_uploads(&profile, &uploads)?;
 
     let (sender, mut receiver) = mpsc::unbounded_channel::<AgentEvent>();
     let runner = state.runner.clone();

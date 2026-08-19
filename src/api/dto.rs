@@ -41,6 +41,10 @@ pub struct ProfileSummary {
     /// `false` when the profile has no `decode:` block yet, so the UI can offer
     /// the assisted discovery flow instead of showing an empty result.
     pub has_decode: bool,
+    /// `true` when the profile declares `requires_upload:`, so the composer can
+    /// say so before **Send** rather than after the `422` — the refusal is the
+    /// server's either way.
+    pub requires_upload: bool,
 }
 
 impl From<&Profile> for ProfileSummary {
@@ -53,6 +57,7 @@ impl From<&Profile> for ProfileSummary {
             auth: profile.auth.clone(),
             source: profile.source.display().to_string(),
             has_decode: !profile.decode.is_empty(),
+            requires_upload: profile.requires_upload,
         }
     }
 }

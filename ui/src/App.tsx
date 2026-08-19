@@ -362,10 +362,11 @@ export function App() {
             servers: mcp.servers,
             token,
             usesMcp,
+            uploads: attachments.length,
             mcpOff,
           })
         : null,
-    [profile, provider, auth, mcp, token, usesMcp, mcpOff],
+    [profile, provider, auth, mcp, token, usesMcp, attachments, mcpOff],
   )
 
   /** Puts one server in or out of the next run. */
@@ -412,6 +413,13 @@ export function App() {
       setAuthOpen(true)
     }
   }, [blockedOnAField])
+
+  // The one blocker the composer acts on rather than only reports. Every other
+  // one is a credential the server will refuse, and refusing it is how you find
+  // out that it does; this one has no call in it at all — a `requires_upload:`
+  // profile with nothing attached renders a request around a file that is not
+  // there — so **Send** is shut until **Attach** has been pressed.
+  const needsUpload = ready?.blockers.some((blocker) => blocker.needsUpload) ?? false
 
   const signIn = useCallback((provider: string, prompt?: string) => {
     // Opened *before* awaiting anything: a popup opened after an await has lost
@@ -926,6 +934,7 @@ export function App() {
               showProtocol={usesMcp}
               attachments={attachments}
               attaching={attaching}
+              needsUpload={needsUpload}
               attachError={attachError ? attachError.body : null}
               onPrompt={setPrompt}
               onMaxIterations={setMaxIterations}

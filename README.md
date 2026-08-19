@@ -546,6 +546,57 @@ one place `mire` writes anything:
   Deleting things off a disk because a browser tab said so is not a thing this
   process does; the directory is yours to empty.
 
+#### When the profile cannot work without one
+
+Some profiles have no call in them without a file. A transcriber, a diariser, an
+OCR service: the file *is* the question, and pressing **Send** with nothing
+attached renders a request built around something that is not there. Say so, and
+the refusal happens here rather than at the endpoint:
+
+```yaml
+name: whisper
+kind: chat
+url: http://127.0.0.1:9000/v1/audio/transcriptions
+requires_upload: true
+```
+
+**Send** is then shut until **Attach** has been pressed — and so is **Retry**,
+which is a send like any other — with the reason on the preflight bar beside every
+other thing that would stop the call:
+
+```
+whisper needs a file: attach one, since the request is built around it.
+```
+
+The button is the courtesy; the rule is the server's. A call arriving at
+`POST /api/call`, `/api/call/stream` or `/api/agent` with nothing attached is
+refused before a body is rendered, whatever sent it:
+
+```json
+{
+  "code": "upload_required",
+  "message": "profile `whisper` needs a file attached, and this call carries none"
+}
+```
+
+It says the call must carry *a* file, not which one, and not what becomes of it.
+Which upload the template reads is still the template's decision — a profile that
+asks for a file and then never mentions `uploads` is asking for one it throws
+away, and that is visible in the same file, two lines down. This is a rule about
+whether there is a call to make at all.
+
+It is not the same check as a `multipart:` field naming a file nobody attached
+— see [When the endpoint takes a form, not
+JSON](#when-the-endpoint-takes-a-form-not-json). That one fires while the form is
+being built, and only for the profiles that build one; this one fires before any
+of that, for a `template:` and a `script:` too, and is what greys the button.
+
+It pairs with [`has_prompt: false`](#a-profile-with-nothing-to-type), which is
+what `profiles/whisper.yaml` declares: no box to type in, and the file the only
+thing left holding **Send** back. The two are independent — a vision endpoint
+asking a question *about* an attachment wants a box and a required file both —
+but on the profiles whose input is bytes they travel together.
+
 ### Saving a prompt
 
 A profile says how to reach an endpoint. A prompt says what to send it, and that
@@ -1185,6 +1236,12 @@ That refusal is the whole point of the shape. A form missing the one part the
 endpoint asked for goes out looking perfectly well-formed and comes back a `422`
 about a field nobody in the profile ever mentioned, which costs an afternoon.
 
+It fires while the form is being built, though, which is after **Send**. Add
+`requires_upload: true` beside `kind:` and the same profile refuses earlier and
+in the UI as well — the button greys rather than producing a failure to read. See
+[When the profile cannot work without
+one](#when-the-profile-cannot-work-without-one).
+
 You never write the `content-type`: the encoder settles it at send time, boundary
 included, and a `headers.content-type` in the profile is dropped with a warning
 rather than sent beside the real one.
@@ -1241,6 +1298,10 @@ and no more: the message box and the saved-prompt picker go away, and **Send**
 goes out with an empty conversation instead of waiting. **Attach**, **stream**,
 **max turns**, the servers, the traffic and the `401` replay are all unchanged —
 this is a statement about the composer, not about the wire.
+
+"Instead of waiting" is about the box only. A profile also declaring
+[`requires_upload: true`](#when-the-profile-cannot-work-without-one) still waits
+— for the file, which on an endpoint like this one is the whole of the input.
 
 Nothing else is special-cased. A template on such a profile still renders, now
 against an empty `messages`, which is the same rule `uploads` and `stream`

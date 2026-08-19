@@ -840,6 +840,22 @@ pub struct Profile {
     /// Request timeout in milliseconds.
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
+    /// Refuse a call that attaches no file.
+    ///
+    /// For the profiles whose input *is* the file — a transcriber, a diariser, an
+    /// OCR service — where a call with nothing attached has no question in it at
+    /// all. The refusal happens here, before anything leaves the process, and it
+    /// names this profile: an endpoint asked to read a form with no file in it
+    /// answers `422` about a field of its own, and reading that back costs an
+    /// afternoon.
+    ///
+    /// It says the call must carry *a* file, not which one. What the template or
+    /// the form does with `uploads` is still the profile's business, and a
+    /// `request:` that never mentions them is a profile asking for a file it then
+    /// throws away — which this does not check, because the recipe is the thing
+    /// that decides and it is right there in the same file.
+    #[serde(default)]
+    pub requires_upload: bool,
     /// How the body is built.
     #[validate(nested)]
     pub request: RequestSpec,
@@ -930,6 +946,22 @@ tools:
         assert_eq!(profile.tools[0].name, "get_weather");
         // Declared without `repeated_call`, so the loop does not watch for one.
         assert!(!profile.agent.as_ref().unwrap().stop_when.repeated_call);
+        // Nor with `requires_upload`, so a call with nothing attached is a call.
+        assert!(!profile.requires_upload);
+        profile.validate().unwrap();
+    }
+
+    /// The one profile-level rule about the *call* rather than about the wire:
+    /// off unless the file says otherwise, and a plain boolean when it does.
+    #[test]
+    fn requiring_a_file_is_opt_in() {
+        let yaml = CHAT_YAML.replace(
+            "timeout_ms: 30000",
+            "timeout_ms: 30000\nrequires_upload: true",
+        );
+
+        let profile: Profile = serde_yaml_ng::from_str(&yaml).unwrap();
+        assert!(profile.requires_upload);
         profile.validate().unwrap();
     }
 

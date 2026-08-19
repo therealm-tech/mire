@@ -60,6 +60,7 @@ export function ChatPanel({
   attachments,
   attaching,
   attachError,
+  needsUpload,
   onPrompt,
   onMaxIterations,
   onStreaming,
@@ -115,6 +116,14 @@ export function ChatPanel({
   /** A file is on its way up. */
   attaching: boolean
   attachError: { code: string; message: string; detail?: unknown } | null
+  /**
+   * The profile declares `requires_upload:` and nothing is attached yet.
+   *
+   * **Send** stays shut until something is: the server refuses this call before
+   * it renders a body, and a button that only produces a `422` is a button that
+   * lies about what it does.
+   */
+  needsUpload: boolean
   onPrompt: (value: string) => void
   onMaxIterations: (value: number) => void
   onStreaming: (value: boolean) => void
@@ -178,6 +187,7 @@ export function ChatPanel({
                 position={positions.get(item.id) ?? 0}
                 turns={turns}
                 busy={busy}
+                blocked={needsUpload}
                 onRetry={() => onRetry(item.id)}
               />
             ) : item.kind === 'activity' ? (
@@ -229,6 +239,7 @@ export function ChatPanel({
           attachments={attachments}
           attaching={attaching}
           attachError={attachError}
+          needsUpload={needsUpload}
           onPrompt={onPrompt}
           onMaxIterations={onMaxIterations}
           onStreaming={onStreaming}
@@ -258,6 +269,7 @@ function Bubble({
   position,
   turns,
   busy,
+  blocked,
   onRetry,
 }: {
   message: Message
@@ -265,6 +277,12 @@ function Bubble({
   /** How many turns there are in all, which is what says how much a retry costs. */
   turns: number
   busy: boolean
+  /**
+   * Nothing can be sent at all — a `requires_upload:` profile with the file since
+   * detached. A retry is a send, so it goes the same way **Send** does rather
+   * than being the one door left open onto a `422`.
+   */
+  blocked: boolean
   onRetry: () => void
 }) {
   const mine = message.role === 'user'
@@ -295,13 +313,15 @@ function Bubble({
         <span className="text-faint text-xs">{ROLE_LABELS[message.role]}</span>
         <button
           type="button"
-          disabled={busy}
+          disabled={busy || blocked}
           onClick={onRetry}
           aria-label={`Retry turn ${position}`}
           title={
-            (mine
-              ? 'Send the conversation again, ending on this message.'
-              : 'Drop this answer and ask the same question again.') + cost
+            blocked
+              ? 'This profile is built around a file, and none is attached.'
+              : (mine
+                  ? 'Send the conversation again, ending on this message.'
+                  : 'Drop this answer and ask the same question again.') + cost
           }
           className="text-faint text-xs disabled:opacity-50 hover:text-ink hover:underline"
         >
@@ -685,6 +705,7 @@ function Composer({
   attachments,
   attaching,
   attachError,
+  needsUpload,
   onPrompt,
   onMaxIterations,
   onStreaming,
@@ -711,6 +732,14 @@ function Composer({
   attachments: UploadedFile[]
   attaching: boolean
   attachError: { code: string; message: string; detail?: unknown } | null
+  /**
+   * The profile declares `requires_upload:` and nothing is attached yet.
+   *
+   * **Send** stays shut until something is: the server refuses this call before
+   * it renders a body, and a button that only produces a `422` is a button that
+   * lies about what it does.
+   */
+  needsUpload: boolean
   onPrompt: (value: string) => void
   onMaxIterations: (value: number) => void
   onStreaming: (value: boolean) => void
@@ -728,6 +757,13 @@ function Composer({
   // input never was a sentence, so there is nothing to wait for and **Send** is
   // live from the start.
   const empty = hasPrompt && prompt.trim().length === 0
+
+  // Every reason **Send** does not go, in one place, because Enter has to obey
+  // the same list the button does. The last is the one worth pointing at: a
+  // missing file is fixed by **Attach**, right there two buttons along, rather
+  // than by anything in the box — which on a `has_prompt: false` profile is not
+  // even there.
+  const stuck = busy || empty || needsUpload
 
   // The real control is the input; the button is what you can see. Styling a
   // file input into something that matches the rest of the page is a fight
@@ -762,7 +798,7 @@ function Composer({
               // Enter sends, Shift+Enter starts a line — which is what
               // everybody's fingers already do. The modifier still sends, for
               // the pasted system prompt that arrives with its own newlines.
-              if (event.key !== 'Enter' || busy || empty) {
+              if (event.key !== 'Enter' || stuck) {
                 return
               }
               if (event.shiftKey) {
@@ -803,12 +839,14 @@ function Composer({
         <Button
           variant="primary"
           size="md"
-          disabled={busy || empty}
+          disabled={stuck}
           onClick={onSend}
           title={
-            single
-              ? 'One turn of this profile, and no second one: a tool call comes back unanswered.'
-              : 'Run the profile in a loop, answering its tools. A profile with none stops on turn one.'
+            needsUpload
+              ? 'This profile is built around a file. Attach one, and Send comes back.'
+              : single
+                ? 'One turn of this profile, and no second one: a tool call comes back unanswered.'
+                : 'Run the profile in a loop, answering its tools. A profile with none stops on turn one.'
           }
         >
           Send

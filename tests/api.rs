@@ -7185,6 +7185,145 @@ async fn a_call_cannot_name_a_file_outside_the_upload_directory() {
     assert_eq!(body["code"], "invalid_upload_id");
 }
 
+/// A profile whose request is built around the file, and says so.
+///
+/// A `template:` rather than a `multipart:`, deliberately: the rule is about
+/// whether there is a call to make, and it holds for every request source.
+fn requires_upload_profile(url: &str) -> String {
+    format!(
+        r#"
+name: transcribe
+kind: chat
+url: {url}
+timeout_ms: 5000
+requires_upload: true
+request:
+  template: |
+    {{"model": "m", "audio": "{{{{ uploads[0].base64 }}}}"}}
+decode:
+  content: ["$.choices[0].message.content"]
+"#
+    )
+}
+
+/// The refusal is the point: an endpoint asked to read a form with no file in it
+/// answers about a field of its own, and this one answers about the profile.
+#[tokio::test]
+async fn a_profile_that_requires_a_file_refuses_a_call_carrying_none() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_response()))
+        .mount(&server)
+        .await;
+
+    let mire = Harness::start(&[(
+        "transcribe.yaml",
+        requires_upload_profile(&format!("{}/v1/chat/completions", server.uri())),
+    )])
+    .await;
+
+    let (status, _, body) = mire
+        .call(json!({"profile": "transcribe", "prompt": "transcribe this"}))
+        .await;
+
+    assert_eq!(status, 422);
+    assert_eq!(body["code"], "upload_required");
+    assert!(
+        body["message"]
+            .as_str()
+            .expect("message")
+            .contains("transcribe")
+    );
+    // Nothing left the process, which is the half of the claim worth checking.
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+/// Any file clears it. The profile asked for one, not for a particular one —
+/// which of them the template reads is still the template's decision.
+#[tokio::test]
+async fn a_required_file_is_satisfied_by_attaching_one() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_response()))
+        .mount(&server)
+        .await;
+
+    let mire = Harness::start(&[(
+        "transcribe.yaml",
+        requires_upload_profile(&format!("{}/v1/chat/completions", server.uri())),
+    )])
+    .await;
+
+    let (_, stored) = mire.upload("clip.wav", b"RIFF").await;
+
+    let (status, _, body) = mire
+        .call(json!({
+            "profile": "transcribe",
+            "prompt": "transcribe this",
+            "uploads": [stored["id"].as_str().expect("id")],
+        }))
+        .await;
+
+    assert_eq!(status, 200);
+    assert_eq!(
+        serde_json::from_str::<Value>(body["request"]["body"].as_str().unwrap()).unwrap(),
+        json!({"model": "m", "audio": "UklGRg=="})
+    );
+}
+
+/// Both streaming endpoints settle it before the stream opens: a `422` is more
+/// use than a stream whose first event is a failure.
+#[tokio::test]
+async fn a_required_file_is_a_status_code_rather_than_a_stream_that_fails() {
+    let mire = Harness::start(&[(
+        "transcribe.yaml",
+        requires_upload_profile("https://models.internal/v1/chat/completions"),
+    )])
+    .await;
+
+    let (status, events) = mire
+        .stream(json!({"profile": "transcribe", "prompt": "ping"}))
+        .await;
+    assert_eq!(status, 422);
+    assert!(events.is_empty());
+
+    let (status, events) = mire
+        .agent(json!({"profile": "transcribe", "prompt": "ping"}))
+        .await;
+    assert_eq!(status, 422);
+    assert!(events.is_empty());
+}
+
+/// The composer greys **Send** rather than letting it produce a `422`, and this
+/// is the field it reads to know.
+#[tokio::test]
+async fn the_profile_listing_says_which_profiles_need_a_file() {
+    let mire = Harness::start(&[
+        (
+            "transcribe.yaml",
+            requires_upload_profile("https://models.internal/v1/chat/completions"),
+        ),
+        ("chat.yaml", openai_profile("https://models.internal/v1")),
+    ])
+    .await;
+
+    let listed = mire.get("/api/profiles").await;
+    let profiles = listed["profiles"].as_array().expect("profiles");
+    let of = |name: &str| {
+        profiles
+            .iter()
+            .find(|profile| profile["name"] == name)
+            .expect("profile")["requiresUpload"]
+            .clone()
+    };
+
+    assert_eq!(of("transcribe"), json!(true));
+    // Absent from the file is `false`, not missing: the UI reads a boolean.
+    assert_eq!(of("chat"), json!(false));
+}
+
 /// Agent mode re-renders the whole body every turn, so a file the first turn
 /// carried is a file the second one carries too.
 #[tokio::test]
