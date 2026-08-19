@@ -19,6 +19,7 @@ const PROFILES = {
       url: 'https://models.internal/v1/chat/completions',
       auth: null,
       source: '/tmp/chat.yaml',
+      hasPrompt: true,
       hasDecode: true,
     },
     {
@@ -27,6 +28,7 @@ const PROFILES = {
       url: 'https://models.internal/v1/embeddings',
       auth: null,
       source: '/tmp/embed.yaml',
+      hasPrompt: true,
       hasDecode: true,
     },
     // Names a credential this tab has to be asked for.
@@ -36,6 +38,7 @@ const PROFILES = {
       url: 'http://127.0.0.1:11435/v1/messages',
       auth: 'pasted',
       source: '/tmp/guarded.yaml',
+      hasPrompt: true,
       hasDecode: true,
     },
     // Calls as a human, which is the one identity nobody can put in a file.
@@ -45,6 +48,18 @@ const PROFILES = {
       url: 'https://models.internal/v1/as-me',
       auth: 'me',
       source: '/tmp/as-me.yaml',
+      hasPrompt: true,
+      hasDecode: true,
+    },
+    // Reads a file rather than a sentence, and says so: `has_prompt: false` in
+    // its YAML, which is the composer's cue to drop its box.
+    {
+      name: 'transcribe',
+      kind: 'chat',
+      url: 'https://models.internal/v1/audio/transcriptions',
+      auth: null,
+      source: '/tmp/transcribe.yaml',
+      hasPrompt: false,
       hasDecode: true,
     },
     // Broken on purpose: `gateway` may only be sent to 127.0.0.1, and this
@@ -55,6 +70,7 @@ const PROFILES = {
       url: 'https://models.internal/v1/pinned',
       auth: 'gateway',
       source: '/tmp/pinned.yaml',
+      hasPrompt: true,
       hasDecode: true,
     },
   ],
@@ -2580,6 +2596,33 @@ describe('conversation', () => {
 
     await user.type(screen.getByRole('textbox', { name: /message/i }), '{Enter}')
     expect(sent).toHaveLength(1)
+  })
+
+  it('drops the box on a profile that takes no message, and sends without one', async () => {
+    const { fetchMock, sent } = recordingApi(['hello there'])
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    // Something typed against a profile that does have a box, so what follows is
+    // about the profile rather than about an empty tab.
+    await type(user, 'the speakers are French')
+
+    await user.click(screen.getByRole('button', { name: /transcribe/ }))
+
+    expect(screen.queryByRole('textbox', { name: /message/i })).not.toBeInTheDocument()
+    expect(screen.getByText(/takes no message/i)).toBeInTheDocument()
+
+    // Live rather than greyed out: there is nothing to wait for.
+    const send = screen.getByRole('button', { name: 'Send' })
+    expect(send).toBeEnabled()
+    await user.click(send)
+    await waitFor(() => expect(sent).toHaveLength(1))
+
+    // And the sentence typed against the other profile stays where it was: a box
+    // nobody can see is not a box that quietly rides along.
+    expect(sent[0]?.messages).toEqual([])
   })
 
   it('asks the last answer again without it', async () => {

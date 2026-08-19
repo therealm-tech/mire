@@ -8,6 +8,7 @@ const PROFILE: ProfileSummary = {
   url: 'https://models.internal/v1/chat/completions',
   auth: 'token',
   source: '/tmp/chat.yaml',
+  hasPrompt: true,
   hasDecode: true,
 }
 

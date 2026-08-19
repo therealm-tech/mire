@@ -812,6 +812,20 @@ pub struct Profile {
     pub name: String,
     /// What the endpoint does.
     pub kind: ProfileKind,
+    /// Whether a call to this profile carries something somebody typed.
+    ///
+    /// True by default, because a chat endpoint's input is a question. `false`
+    /// is for the endpoints whose input is not text at all — a transcriber
+    /// reading bytes, a classifier reading a form: the composer then hides the
+    /// message box, and **Send** goes out with an empty conversation rather than
+    /// staying greyed out waiting for words nobody has to write.
+    ///
+    /// It says nothing about the wire. What goes out is still whatever the
+    /// template asks for, and a template reading `messages` on a profile
+    /// declaring `has_prompt: false` renders against an empty list — which is
+    /// the same rule `uploads` and `stream` follow.
+    #[serde(default = "default_true")]
+    pub has_prompt: bool,
     /// Full endpoint URL. Pointing anywhere is the feature, not an oversight.
     pub url: Url,
     /// HTTP method.
@@ -928,6 +942,31 @@ tools:
 
         let profile: Profile = serde_yaml_ng::from_str(&yaml).unwrap();
         assert!(profile.agent.unwrap().stop_when.repeated_call);
+    }
+
+    #[test]
+    fn a_profile_takes_a_prompt_unless_it_says_otherwise() {
+        let profile: Profile = serde_yaml_ng::from_str(CHAT_YAML).unwrap();
+        assert!(
+            profile.has_prompt,
+            "a profile saying nothing about it is a profile with a question to ask"
+        );
+
+        // What a transcriber declares: the input is the file, so there is nothing
+        // to type and nothing for the composer to hold **Send** back for.
+        let yaml = r"
+name: transcribe
+kind: chat
+has_prompt: false
+url: https://models.internal/v1/audio/transcriptions
+request:
+  multipart:
+    file:
+      upload: '{{ uploads[0] }}'
+";
+        let profile: Profile = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(!profile.has_prompt);
+        profile.validate().unwrap();
     }
 
     #[test]

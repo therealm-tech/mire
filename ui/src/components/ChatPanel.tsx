@@ -48,6 +48,7 @@ export function ChatPanel({
   stopped,
   prompt,
   prompts,
+  hasPrompt,
   maxIterations,
   streaming,
   error,
@@ -84,6 +85,15 @@ export function ChatPanel({
   prompt: string
   /** The library `prompts.yaml` declares, offered above the box. */
   prompts: PromptsResponse
+  /**
+   * Whether this profile takes a message at all.
+   *
+   * False on a profile declaring `has_prompt: false` — a transcriber, a
+   * classifier, anything whose input is the attachment rather than a sentence.
+   * The box and the prompt library go with it, and **Send** stops waiting for
+   * words nobody has to write.
+   */
+  hasPrompt: boolean
   /**
    * The turn budget, which is also what says whether there is a loop at all:
    * `1` is one turn with no second one to answer a tool call in.
@@ -154,7 +164,9 @@ export function ChatPanel({
         >
           {items.length === 0 && live === null ? (
             <p className="py-8 text-center text-muted text-sm">
-              Nothing said yet. Ask something below.
+              {hasPrompt
+                ? 'Nothing said yet. Ask something below.'
+                : 'Nothing sent yet. Attach what this profile reads, and send.'}
             </p>
           ) : null}
 
@@ -204,6 +216,7 @@ export function ChatPanel({
         <Composer
           prompt={prompt}
           prompts={prompts}
+          hasPrompt={hasPrompt}
           turns={turns}
           busy={busy}
           maxIterations={maxIterations}
@@ -659,6 +672,7 @@ export function formatBytes(bytes: number): string {
 function Composer({
   prompt,
   prompts,
+  hasPrompt,
   turns,
   busy,
   maxIterations,
@@ -684,6 +698,7 @@ function Composer({
 }: {
   prompt: string
   prompts: PromptsResponse
+  hasPrompt: boolean
   turns: number
   busy: boolean
   maxIterations: number
@@ -709,7 +724,10 @@ function Composer({
 }) {
   // An empty box is nothing to say, not an instruction to send the history
   // again — that is what **Retry** is for, and it says which turn it repeats.
-  const empty = prompt.trim().length === 0
+  // Unless there is no box: a profile declaring `has_prompt: false` is one whose
+  // input never was a sentence, so there is nothing to wait for and **Send** is
+  // live from the start.
+  const empty = hasPrompt && prompt.trim().length === 0
 
   // The real control is the input; the button is what you can see. Styling a
   // file input into something that matches the rest of the page is a fight
@@ -723,42 +741,57 @@ function Composer({
 
   return (
     <div className="space-y-2 border-line border-t pt-3">
-      {/*
-        Above the box rather than beside **Send**: it fills the box, so it
-        belongs on the same side of it as the thing it fills.
-      */}
-      <SavedPrompts
-        prompts={prompts.prompts}
-        issues={prompts.issues}
-        disabled={busy}
-        onPick={onPrompt}
-      />
+      {hasPrompt ? (
+        <>
+          {/*
+            Above the box rather than beside **Send**: it fills the box, so it
+            belongs on the same side of it as the thing it fills.
+          */}
+          <SavedPrompts
+            prompts={prompts.prompts}
+            issues={prompts.issues}
+            disabled={busy}
+            onPick={onPrompt}
+          />
 
-      <textarea
-        value={prompt}
-        aria-label="Message"
-        onChange={(event) => onPrompt(event.target.value)}
-        onKeyDown={(event) => {
-          // Enter sends, Shift+Enter starts a line — which is what everybody's
-          // fingers already do. The modifier still sends, for the pasted system
-          // prompt that arrives with its own newlines.
-          if (event.key !== 'Enter' || busy || empty) {
-            return
-          }
-          if (event.shiftKey) {
-            return
-          }
-          event.preventDefault()
-          onSend()
-        }}
-        rows={3}
-        placeholder={
-          turns === 0
-            ? 'Ask something. Enter sends, Shift+Enter starts a line.'
-            : 'Ask something else, or retry the last turn above.'
-        }
-        className={`${INPUT_CLASSES} w-full resize-y`}
-      />
+          <textarea
+            value={prompt}
+            aria-label="Message"
+            onChange={(event) => onPrompt(event.target.value)}
+            onKeyDown={(event) => {
+              // Enter sends, Shift+Enter starts a line — which is what
+              // everybody's fingers already do. The modifier still sends, for
+              // the pasted system prompt that arrives with its own newlines.
+              if (event.key !== 'Enter' || busy || empty) {
+                return
+              }
+              if (event.shiftKey) {
+                return
+              }
+              event.preventDefault()
+              onSend()
+            }}
+            rows={3}
+            placeholder={
+              turns === 0
+                ? 'Ask something. Enter sends, Shift+Enter starts a line.'
+                : 'Ask something else, or retry the last turn above.'
+            }
+            className={`${INPUT_CLASSES} w-full resize-y`}
+          />
+        </>
+      ) : (
+        /*
+          No box, because the profile says it has no question to ask: what goes
+          in is the attachment and whatever the request builds around it. Said
+          out loud rather than left as the gap where a box used to be — a
+          composer with nothing to type in reads as a bug otherwise.
+        */
+        <p className="text-muted text-sm">
+          This profile takes no message: what goes out is what its request builds — the file you
+          attach, and the fields around it.
+        </p>
+      )}
 
       <div className="flex flex-wrap items-center gap-2">
         {/*

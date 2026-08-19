@@ -19,6 +19,16 @@
 ---
 name: whisper
 kind: chat
+# Nothing to type. The signal going in is the audio, so the composer's message
+# box would be a box for a question this endpoint is never asked — and **Send**
+# would sit greyed out until somebody wrote something into it that changes
+# nothing. `has_prompt: false` takes the box away and lets the call go out with
+# an empty conversation; `true` is the default, and every other profile here
+# takes it.
+#
+# It changes nothing on the wire. The form below is still the whole request —
+# this only says that no part of it comes from a sentence somebody typed.
+has_prompt: false
 url: http://127.0.0.1:9000/v1/audio/transcriptions
 # Transcribing an hour of audio is not a 30-second request.
 timeout_ms: 600000
@@ -65,11 +75,18 @@ request:
     # up.
     response_format: json
     temperature: 0
-    # The prompt field is a real whisper knob: a hint at vocabulary and spelling,
-    # not an instruction. So the composer's message box is the natural place for
-    # it — type the names the recording is full of and they come back spelled
-    # right.
-    prompt: '{{ messages[-1].content }}'
+    # The prompt field is a real whisper knob, and it is not an instruction: it
+    # is a hint at vocabulary and spelling — the names the recording is full of,
+    # so they come back spelled right. A knob, in other words, which is what
+    # `params` is for, and why `has_prompt: false` above costs nothing:
+    #
+    #   POST /api/call -d '{"profile": "whisper", "uploads": ["<id>"],
+    #                       "params": {"prompt": "mire, Keycloak, speaches"}}'
+    #
+    # Unset, it renders empty and the endpoint hears no hint. Drop the
+    # `has_prompt: false` and put `{{ messages[-1].content }}` back here if you
+    # would rather type it into the composer than send it as a knob.
+    prompt: '{{ params.prompt | default("") }}'
 
 # `kind: chat` and a one-line cascade, because a transcript *is* a completion:
 # text in the answer, read out of wherever the endpoint put it. Nothing

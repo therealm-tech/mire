@@ -312,6 +312,16 @@ export function App() {
   const provider = auth?.providers.find((entry) => entry.name === (profile?.auth ?? ANONYMOUS))
 
   /**
+   * Whether this profile takes a message somebody types.
+   *
+   * The profile's own answer, so the composer follows the file rather than a
+   * setting in this tab: `has_prompt: false` is a transcriber or a classifier
+   * saying its input is the attachment, not a sentence. True while no profile is
+   * selected, which is the state where there is no composer to hide anything in.
+   */
+  const hasPrompt = profile?.hasPrompt !== false
+
+  /**
    * Whether the declared MCP servers are part of the run that is about to happen.
    *
    * Every send goes through the loop, so a declared server is in the picture
@@ -497,10 +507,14 @@ export function App() {
    * lands — waiting for the endpoint to say something before showing what was
    * asked is how a chat window feels broken. Sending the history as it stands is
    * **Retry**'s job, not an empty box's.
+   *
+   * A profile that takes no prompt sends the history untouched, whatever this
+   * tab happens to be remembering: the box is hidden, and a sentence typed
+   * against another profile must not ride along invisibly on this one.
    */
   const ask = useCallback((): Message[] => {
     const text = prompt.trim()
-    if (text.length === 0) {
+    if (!hasPrompt || text.length === 0) {
       return messages
     }
 
@@ -508,7 +522,7 @@ export function App() {
     setTimeline((current) => [...current, messageItem(asked)])
     setPrompt('')
     return [...messages, asked]
-  }, [messages, prompt, setPrompt])
+  }, [hasPrompt, messages, prompt, setPrompt])
 
   /**
    * Every send: a chat profile, run in a loop over the history it is handed.
@@ -901,6 +915,7 @@ export function App() {
               stopped={stopped}
               prompt={prompt}
               prompts={prompts}
+              hasPrompt={hasPrompt}
               maxIterations={maxIterations}
               streaming={streaming}
               error={callError ? callError.body : null}
