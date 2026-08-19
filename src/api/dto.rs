@@ -13,6 +13,7 @@ use validator::Validate;
 
 use crate::agent::{AgentInput, Trace, Turn};
 use crate::auth::registry::AuthDescriptor;
+use crate::capture::CaptureRegistry;
 use crate::exec::{CallEvent, CallInput, CallOutcome};
 use crate::issue::LoadIssue;
 use crate::message::Message;
@@ -59,14 +60,26 @@ pub struct ProfilesResponse {
     /// Profiles that parsed and validated.
     pub profiles: Vec<ProfileSummary>,
     /// Files that did not, with the reason and position.
+    ///
+    /// `captures.yaml` is in here too, and deliberately: it exists only to serve
+    /// a profile's `agent.capture:`, it has no panel of its own, and each issue
+    /// names its own file — so the place somebody reads about a profile that did
+    /// not load is the place to read about the set it was going to name.
     pub issues: Vec<LoadIssue>,
 }
 
-impl From<&ProfileSet> for ProfilesResponse {
-    fn from(set: &ProfileSet) -> Self {
+impl ProfilesResponse {
+    /// The profiles directory as the UI reads it, registry issues included.
+    #[must_use]
+    pub fn new(set: &ProfileSet, captures: &CaptureRegistry) -> Self {
         Self {
             profiles: set.iter().map(|profile| profile.as_ref().into()).collect(),
-            issues: set.issues().to_vec(),
+            issues: set
+                .issues()
+                .iter()
+                .chain(captures.issues())
+                .cloned()
+                .collect(),
         }
     }
 }

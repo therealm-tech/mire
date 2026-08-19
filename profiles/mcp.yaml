@@ -155,7 +155,7 @@ servers:
   # --- 7b. A session an earlier tool call opened -----------------------------
   #
   # `vars` is what this run's tool calls have captured, per the profile's
-  # `agent.capture:` — see qwen3.yaml. This is how a tool that opens a session
+  # `agent.capture:` — see captures.yaml. This is how a tool that opens a session
   # puts that session on every later request to the same server.
   #
   # The `| default('')` is **not** decoration here. These headers render on
@@ -318,7 +318,7 @@ servers:
   #               file: '{{ uploads[0].path }}'
   #
   #     # A hook addressed with what an earlier call answered. `vars` is filled
-  #     # by the profile's `agent.capture:` — see qwen3.yaml — and is in scope
+  #     # by the profile's `agent.capture:` — see captures.yaml — and is in scope
   #     # for `url:`, `headers:`, `json:` and `multipart:` alike.
   #     #
   #     # `url:` is a template only when it contains one, so every URL above is

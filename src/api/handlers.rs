@@ -37,7 +37,8 @@ pub async fn healthz() -> &'static str {
 
 /// Every profile, and every file that failed to load.
 pub async fn list_profiles(State(state): State<AppState>) -> Json<ProfilesResponse> {
-    Json((&state.runner.config().snapshot().profiles).into())
+    let config = state.runner.config().snapshot();
+    Json(ProfilesResponse::new(&config.profiles, &config.captures))
 }
 
 /// Every saved prompt, and every entry that failed to load.
@@ -700,6 +701,21 @@ pub async fn agent(
         &state.runner.config().snapshot().mcp,
         request.mcp_servers.as_deref(),
     )?;
+    // And again for a capture set nothing declares. Same function the run itself
+    // calls, so the two readings cannot disagree — this one just gets there
+    // before the stream opens.
+    if let Some(spec) = profile.agent.as_ref() {
+        state
+            .runner
+            .config()
+            .snapshot()
+            .captures
+            .resolve(&spec.capture)
+            .map_err(|missing| AgentError::UnknownCaptureSet {
+                profile: profile.name.clone(),
+                set: missing.0,
+            })?;
+    }
 
     // Same reasoning as the streamed call: settled before the stream opens.
     let uploads = resolve_uploads(&state, &request.call.uploads).await?;

@@ -280,6 +280,23 @@ pub enum AgentError {
     /// back to the model, because recovering from it is what is being tested.
     #[error(transparent)]
     Mcp(#[from] McpError),
+
+    /// The profile's `agent.capture:` names a set `captures.yaml` does not
+    /// declare.
+    ///
+    /// Stops the run rather than capturing less than the profile asked for: the
+    /// variables that set was meant to fill are read by hooks and by server
+    /// headers, and a run that goes ahead without them fails later, further away,
+    /// in a rendered URL.
+    #[error(
+        "profile `{profile}` names the capture set `{set}`, which `captures.yaml` does not declare"
+    )]
+    UnknownCaptureSet {
+        /// The profile that was run.
+        profile: String,
+        /// The set it asked for.
+        set: String,
+    },
 }
 
 /// Something worth reporting before the run is over.
@@ -625,9 +642,18 @@ async fn prepare(runner: &Runner, input: &mut AgentInput) -> Result<Prepared, Ag
     let attachments: Arc<[UploadRef]> = Arc::from(input.call.uploads.clone());
 
     // Resolved before the clients are built, because each of them is handed the
-    // bag its calls will fill.
+    // bag its calls will fill. The `use:` entries are expanded here rather than
+    // at load time, for the same reason an unknown server name is caught here: a
+    // profile is read on its own, and the registry beside it is a separate file
+    // with its own edits.
     let spec = profile.agent.clone().unwrap_or_else(default_spec);
-    let vars = Vars::new(spec.capture.clone());
+    let rules = config.captures.resolve(&spec.capture).map_err(|missing| {
+        AgentError::UnknownCaptureSet {
+            profile: profile.name.clone(),
+            set: missing.0,
+        }
+    })?;
+    let vars = Vars::new(rules);
 
     let mut live = Vec::new();
     let mut clients = BTreeMap::new();
@@ -1264,7 +1290,7 @@ tools:
 
     /// A bag filled by one rule on `get_weather`.
     fn weather_vars(name: &str, paths: &[&str]) -> std::sync::Arc<Vars> {
-        Vars::new(vec![crate::profile::CaptureRule {
+        Vars::new(vec![crate::capture::CaptureRule {
             tools: vec![crate::pattern::NamePattern::compile("get_weather").expect("pattern")],
             vars: BTreeMap::from([(
                 name.to_owned(),
