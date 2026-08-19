@@ -43,9 +43,27 @@ struct ScriptCompletion {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct ScriptEmbedding {
-    vectors: Vec<Vec<f64>>,
+    vectors: ScriptVectors,
     usage: Option<Value>,
     error: Option<Value>,
+}
+
+/// A script returns either one vector per input, or — for a multi-vector
+/// endpoint — a list of vectors per input. Neither reading fits the other's
+/// JSON, so the nesting alone says which one it is.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ScriptVectors {
+    /// One vector per item.
+    Flat(Vec<Vec<f64>>),
+    /// Several vectors per item.
+    Grouped(Vec<Vec<Vec<f64>>>),
+}
+
+impl Default for ScriptVectors {
+    fn default() -> Self {
+        Self::Flat(Vec::new())
+    }
 }
 
 /// Normalises whatever a script called an error, and traces it.
@@ -72,11 +90,23 @@ fn script_error(returned: Option<&Value>, trace: &mut DecodeTrace) -> Option<Dec
     clippy::cast_possible_truncation,
     reason = "embeddings are f32 on the wire; Rhai only has f64, so this narrows back to the real precision"
 )]
-fn narrow(vectors: Vec<Vec<f64>>) -> Vec<Vec<f32>> {
-    vectors
-        .into_iter()
-        .map(|vector| vector.into_iter().map(|value| value as f32).collect())
-        .collect()
+fn narrow(vector: Vec<f64>) -> Vec<f32> {
+    vector.into_iter().map(|value| value as f32).collect()
+}
+
+impl ScriptVectors {
+    /// Groups by item, narrowing to the `f32` the wire actually carries.
+    fn into_vectors(self) -> Vectors {
+        match self {
+            Self::Flat(vectors) => Vectors::new(vectors.into_iter().map(narrow).collect()),
+            Self::Grouped(items) => Vectors::grouped(
+                items
+                    .into_iter()
+                    .map(|item| item.into_iter().map(narrow).collect())
+                    .collect(),
+            ),
+        }
+    }
 }
 
 /// Runs a decode script with the response bound into scope.
@@ -178,8 +208,8 @@ pub fn decode_embedding(
     }
     let error = script_error(returned.error.as_ref(), &mut trace);
 
-    let vectors = Vectors::new(narrow(returned.vectors));
-    let encoding = if vectors.as_slice().is_empty() {
+    let vectors = returned.vectors.into_vectors();
+    let encoding = if vectors.items().is_empty() {
         trace.miss(DecodeField::Vectors, vec![ORIGIN.to_owned()]);
         VectorEncoding::None
     } else {
@@ -425,7 +455,7 @@ mod tests {
         assert_eq!(embedding.count, 2);
         assert_eq!(embedding.dimensions.uniform(), Some(2));
         assert!((embedding.vectors[1].norm - 2.0).abs() < 1e-6);
-        assert_eq!(vectors.as_slice()[0], vec![1.0, 0.0]);
+        assert_eq!(vectors.items()[0][0], vec![1.0, 0.0]);
         assert_eq!(trace.matched[&DecodeField::Vectors], ORIGIN);
         assert_eq!(embedding.full.unwrap().len(), 2);
     }

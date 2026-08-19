@@ -364,7 +364,8 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   thing it configures.
 - **Embedding.** Count, width, encoding, the five checks, and per vector its
   norm, a sample of the first values and a distribution histogram. Never a wall
-  of floats.
+  of floats. A multi-vector answer stays grouped under the input it belongs to,
+  with only the first few of each item's vectors drawn.
 
 A credential typed into the UI lives in that tab and nowhere else: it is sent
 with the call and never stored, never logged, never echoed back. A credential
@@ -1037,7 +1038,8 @@ A request script sees `messages`, `input`, `tools`, `model` and `params`, and
 returns the body — a string used verbatim, or a map or array that gets serialised
 for you. A decode script sees `raw`, `status` and `headers`, and returns a map:
 `content` / `tool_calls` / `finish_reason` / `usage` / `error` for a chat profile,
-`vectors` / `usage` / `error` for an embedding one. `error` is read like the
+`vectors` / `usage` / `error` for an embedding one — `vectors` being a list of
+vectors, or a list of *lists* of vectors for a multi-vector endpoint. `error` is read like the
 cascade reads one — a string is the message, a map is looked at for the usual
 keys — so a script can report a failure the body alone does not admit to:
 
@@ -1936,9 +1938,11 @@ curl -s localhost:8787/api/call \
 {
   "kind": "embedding",
   "count": 2,
+  "vectorCount": 2,
+  "vectorsPerItem": [1, 1],
   "dimensions": {"kind": "uniform", "value": 768},
   "encoding": "float",
-  "vectors": [{"index": 0, "dimensions": 768, "norm": 1.0, "sample": [...], "finite": true, "histogram": {...}}],
+  "vectors": [{"index": 0, "item": 0, "position": 0, "dimensions": 768, "norm": 1.0, "sample": [...], "finite": true, "histogram": {...}}],
   "checks": {
     "count": {"status": "pass"},
     "dimensions": {"status": "pass"},
@@ -1954,16 +1958,53 @@ read out of the response — an endpoint that claims 768 and returns 384 is
 exactly what this catches. Inconsistent widths surface as
 `{"kind": "ragged", "values": [...]}` rather than being averaged away.
 
+`count` is one per **input**, not one per vector: see
+[multi-vector answers](#multi-vector-answers) below.
+
 `repeat: 2` sends the request twice and compares: the same input must give the
 same vectors, within `tolerance` (default `1e-6`). This is the check that catches
 a replica quietly serving a different model from its siblings — everything else
 about its answer looks perfectly fine. Without `repeat`, the check reports
 `skipped` and says so, rather than passing by default.
 
-Three response shapes decode without a script: one node per vector
-(`$.data[*].embedding`), one node holding a list of vectors (`$.embeddings`), and
-a bare vector at the root. Base64 payloads — what `encoding_format: base64`
+Three response shapes decode without a script: one node per item
+(`$.data[*].embedding`), one node holding the whole batch (`$.embeddings`), and a
+bare vector at the root. Base64 payloads — what `encoding_format: base64`
 produces — are decoded as little-endian `f32` and counted like any other.
+
+### Multi-vector answers
+
+A late-interaction model, or any server with pooling turned off (`pooling: none`
+and friends), answers **one vector per token** rather than one per input:
+`data[0].embedding` is then a list of 1024-wide vectors, not a vector. That
+decodes without a script too, and stays grouped by input:
+
+```json
+{
+  "count": 2,
+  "vectorCount": 17,
+  "vectorsPerItem": [11, 6],
+  "dimensions": {"kind": "uniform", "value": 1024},
+  "vectors": [{"index": 0, "item": 0, "position": 0, "dimensions": 1024, ...}]
+}
+```
+
+`count` stays the number of **items** — one per input, which is what the `count`
+check compares against — and `vectorCount` is how many vectors that came to.
+`vectorsPerItem` is the shape itself, and it is also what the `full` payload, a
+flat list, is regrouped by.
+
+One shape is genuinely ambiguous: a single node holding a flat list of vectors is
+a *batch* of pooled vectors under `$.embeddings`, and byte for byte the same JSON
+is one input's token vectors. The number of inputs sent settles it — one input
+means they are all its own — and when it settles nothing the batch reading wins,
+so the `count` check is what reports the disagreement rather than a guess hiding
+it.
+
+Only the first few vectors of each item are summarised — five hundred histograms
+help nobody — and the panel says so (`first 8 shown`). The **checks still read
+every vector**: a hole in token 300 fails `finite` even though nothing drew it,
+and names it `0#300`.
 
 ### Vectors are never rendered whole
 

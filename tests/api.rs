@@ -1391,13 +1391,13 @@ async fn a_width_that_does_not_match_the_profile_is_reported() {
             .unwrap()
             .contains("expected 1024 dimensions, got 384")
     );
-    // Two inputs went out, one vector came back.
+    // Two inputs went out, one answer came back.
     assert_eq!(checks["count"]["status"], "fail");
     assert!(
         checks["count"]["detail"]
             .as_str()
             .unwrap()
-            .contains("sent 2 input(s), got 1 vector(s)")
+            .contains("sent 2 input(s), got 1 item(s)")
     );
 }
 
@@ -1434,6 +1434,75 @@ async fn a_hole_in_a_vector_fails_the_finiteness_check() {
             .unwrap()
             .contains("[1]")
     );
+}
+
+#[tokio::test]
+async fn a_multi_vector_endpoint_answers_one_item_per_input() {
+    let server = MockServer::start().await;
+    // One vector per token rather than one per input — what a late-interaction
+    // model, or a server with pooling turned off, answers.
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"index": 0, "embedding": [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]},
+                {"index": 1, "embedding": [[0.7, 0.8], [0.9, 1.0]]}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let harness = Harness::start(&[(
+        "embed.yaml",
+        embedding_profile(&format!("{}/v1/embeddings", server.uri()), Some(2)),
+    )])
+    .await;
+
+    let (status, _, body) = harness
+        .call(json!({"profile": "embed", "input": ["one", "two"]}))
+        .await;
+    assert_eq!(status, 200);
+
+    let decoded = &body["response"]["decoded"];
+    assert_eq!(decoded["count"], 2);
+    assert_eq!(decoded["vectorCount"], 5);
+    assert_eq!(decoded["vectorsPerItem"], json!([3, 2]));
+    assert_eq!(
+        decoded["dimensions"],
+        json!({"kind": "uniform", "value": 2})
+    );
+    // Two inputs, two answers: the count check is about inputs, not vectors.
+    assert_eq!(decoded["checks"]["count"]["status"], "pass");
+    assert_eq!(decoded["checks"]["dimensions"]["status"], "pass");
+    assert_eq!(decoded["checks"]["nonZeroNorm"]["status"], "pass");
+    // Each summary says which input it belongs to.
+    assert_eq!(decoded["vectors"][3]["item"], 1);
+    assert_eq!(decoded["vectors"][3]["position"], 0);
+}
+
+#[tokio::test]
+async fn one_input_worth_of_token_vectors_is_not_read_as_a_batch() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"index": 0, "embedding": [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]}]
+        })))
+        .mount(&server)
+        .await;
+
+    let harness = Harness::start(&[(
+        "embed.yaml",
+        embedding_profile(&format!("{}/v1/embeddings", server.uri()), None),
+    )])
+    .await;
+
+    let (_, _, body) = harness
+        .call(json!({"profile": "embed", "input": "one"}))
+        .await;
+
+    let decoded = &body["response"]["decoded"];
+    assert_eq!(decoded["count"], 1);
+    assert_eq!(decoded["vectorsPerItem"], json!([3]));
+    assert_eq!(decoded["checks"]["count"]["status"], "pass");
 }
 
 #[tokio::test]

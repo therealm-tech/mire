@@ -6,6 +6,14 @@
 //! replica quietly serving a different model than its siblings shows up as a
 //! determinism failure and nothing else.
 //!
+//! # One item per input, one or more vectors per item
+//!
+//! A pooled endpoint answers one vector per input. A multi-vector one — late
+//! interaction, or a server with `pooling: none` — answers one vector per
+//! *token*, so an input comes back as a list of vectors. Both decode into the
+//! same shape: `count` is the number of items and stays comparable to the number
+//! of inputs sent, and `vectors_per_item` says how many vectors each item holds.
+//!
 //! # Vectors are never rendered whole
 //!
 //! [`Embedding`] serialises per-vector *summaries*: width, norm, a short sample,
@@ -31,6 +39,14 @@ const HISTOGRAM_BUCKETS: usize = 24;
 
 /// The same count, pre-converted, so bucketing needs no `usize as f32`.
 const HISTOGRAM_BUCKETS_F: f32 = 24.0;
+
+/// How many of one item's vectors are summarised.
+///
+/// A multi-vector endpoint answers one vector per token, and five hundred
+/// histograms help nobody. The count itself stays exact in
+/// [`Embedding::vectors_per_item`], and the checks still read every vector —
+/// only the preview stops here.
+const MAX_SUMMARIES_PER_ITEM: usize = 8;
 
 /// How the endpoint encoded its vectors. Worth surfacing: a backend that
 /// silently switches to base64 is a change you want to see.
@@ -93,8 +109,12 @@ pub struct Histogram {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct VectorSummary {
-    /// Position in the response.
+    /// Position among all the vectors that came back, whatever their item.
     pub index: usize,
+    /// The item this vector belongs to — the input it answers.
+    pub item: usize,
+    /// Position within that item. Always `0` for a pooled endpoint.
+    pub position: usize,
     /// Width.
     pub dimensions: usize,
     /// L2 norm. Zero means the endpoint answered with nothing useful.
@@ -111,18 +131,27 @@ pub struct VectorSummary {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Embedding {
-    /// Number of vectors. Derived — this is what you compare to the number of
-    /// inputs you sent.
+    /// Number of items. Derived — this is what you compare to the number of
+    /// inputs you sent, and it stays one per input however many vectors a
+    /// multi-vector endpoint packs into each.
     pub count: usize,
+    /// Total number of vectors, across every item. Equal to `count` unless the
+    /// endpoint answered more than one vector per input.
+    pub vector_count: usize,
+    /// How many vectors each item holds, in order. All ones for a pooled
+    /// endpoint; anything else is the multi-vector shape — and it is also what
+    /// says how many vectors the capped summaries below stand for.
+    pub vectors_per_item: Vec<usize>,
     /// Vector width. Derived.
     pub dimensions: Dimensions,
     /// How the vectors arrived on the wire.
     pub encoding: VectorEncoding,
     /// Token accounting.
     pub usage: Option<Usage>,
-    /// One summary per vector.
+    /// One summary per vector, at most [`MAX_SUMMARIES_PER_ITEM`] per item.
     pub vectors: Vec<VectorSummary>,
-    /// The full vectors, present only when the caller explicitly asked.
+    /// The full vectors, flattened in wire order, present only when the caller
+    /// explicitly asked. `vectors_per_item` says how to group them back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub full: Option<Vec<Vec<f32>>>,
 }
@@ -193,11 +222,16 @@ pub struct EmbeddingChecks {
 impl EmbeddingChecks {
     /// Evaluates everything derivable from a single response.
     ///
+    /// The vectors are read here rather than the summaries: those are capped per
+    /// item, and a check that only looked at the preview would call a response
+    /// finite because its first eight vectors were.
+    ///
     /// Determinism starts [`CheckOutcome::Skipped`]; the caller fills it in if it
     /// sent the request more than once.
     #[must_use]
     pub fn evaluate(
         embedding: &Embedding,
+        vectors: &Vectors,
         inputs: usize,
         expected_dimensions: Option<usize>,
     ) -> Self {
@@ -206,7 +240,7 @@ impl EmbeddingChecks {
         } else {
             CheckOutcome::from(embedding.count == inputs, || {
                 format!(
-                    "sent {inputs} input(s), got {} vector(s) back",
+                    "sent {inputs} input(s), got {} item(s) back",
                     embedding.count
                 )
             })
@@ -231,24 +265,25 @@ impl EmbeddingChecks {
             },
         };
 
-        let ragged: Vec<usize> = embedding
-            .vectors
-            .iter()
-            .filter(|vector| !vector.finite)
-            .map(|vector| vector.index)
+        let holes: Vec<String> = vectors
+            .enumerated()
+            .filter(|(.., vector)| !vector.iter().all(|value| value.is_finite()))
+            .map(|(item, position, _)| vectors.label(item, position))
             .collect();
-        let finite = CheckOutcome::from(ragged.is_empty(), || {
-            format!("vector(s) {ragged:?} contain a value that is not a finite number")
+        let finite = CheckOutcome::from(holes.is_empty(), || {
+            format!(
+                "vector(s) [{}] contain a value that is not a finite number",
+                holes.join(", ")
+            )
         });
 
-        let zeroed: Vec<usize> = embedding
-            .vectors
-            .iter()
-            .filter(|vector| vector.norm == 0.0)
-            .map(|vector| vector.index)
+        let zeroed: Vec<String> = vectors
+            .enumerated()
+            .filter(|(.., vector)| norm(vector) == 0.0)
+            .map(|(item, position, _)| vectors.label(item, position))
             .collect();
         let non_zero_norm = CheckOutcome::from(zeroed.is_empty(), || {
-            format!("vector(s) {zeroed:?} have a zero norm")
+            format!("vector(s) [{}] have a zero norm", zeroed.join(", "))
         });
 
         Self {
@@ -317,25 +352,71 @@ pub fn elide(value: &Value) -> Value {
 
 /// The vectors themselves, kept out of [`Embedding`] so they cannot be
 /// serialised by accident.
+///
+/// Grouped by item, one item per input: a pooled endpoint puts a single vector
+/// in each, a multi-vector one puts one per token. Keeping the grouping is what
+/// lets `count` stay comparable to the number of inputs sent instead of
+/// collapsing into a pile of vectors nobody can attribute.
 #[derive(Debug, Clone, Default)]
-pub struct Vectors(Vec<Vec<f32>>);
+pub struct Vectors(Vec<Vec<Vec<f32>>>);
 
 impl Vectors {
-    /// Wraps vectors decoded some other way — by a script, typically.
+    /// Wraps one vector per item — a pooled response decoded some other way, by
+    /// a script typically.
     #[must_use]
     pub fn new(vectors: Vec<Vec<f32>>) -> Self {
-        Self(vectors)
+        Self(vectors.into_iter().map(|vector| vec![vector]).collect())
     }
 
-    /// The decoded vectors.
+    /// Wraps vectors already grouped by item.
     #[must_use]
-    pub fn as_slice(&self) -> &[Vec<f32>] {
+    pub fn grouped(items: Vec<Vec<Vec<f32>>>) -> Self {
+        Self(items)
+    }
+
+    /// The items, each holding its own vectors.
+    #[must_use]
+    pub fn items(&self) -> &[Vec<Vec<f32>>] {
         &self.0
+    }
+
+    /// Every vector in wire order, as `(item, position, vector)`.
+    pub fn enumerated(&self) -> impl Iterator<Item = (usize, usize, &Vec<f32>)> {
+        self.0.iter().enumerate().flat_map(|(item, vectors)| {
+            vectors
+                .iter()
+                .enumerate()
+                .map(move |(position, vector)| (item, position, vector))
+        })
+    }
+
+    /// Every vector in wire order, with the grouping flattened away.
+    pub fn flat(&self) -> impl Iterator<Item = &Vec<f32>> {
+        self.0.iter().flatten()
+    }
+
+    /// `true` when any item holds anything other than exactly one vector.
+    #[must_use]
+    pub fn multi(&self) -> bool {
+        self.0.iter().any(|item| item.len() != 1)
+    }
+
+    /// How a check names one vector: its item alone when there is one vector per
+    /// item, `item#position` when there are several and the item no longer
+    /// identifies it.
+    #[must_use]
+    fn label(&self, item: usize, position: usize) -> String {
+        if self.multi() {
+            format!("{item}#{position}")
+        } else {
+            item.to_string()
+        }
     }
 
     /// Largest absolute difference against another set of vectors.
     ///
-    /// `None` when the two do not have the same shape, which is itself a
+    /// `None` when the two do not have the same shape — a different number of
+    /// items, of vectors within an item, or of dimensions — which is itself a
     /// determinism failure.
     #[must_use]
     pub fn max_deviation(&self, other: &Self) -> Option<f32> {
@@ -347,8 +428,13 @@ impl Vectors {
             if left.len() != right.len() {
                 return None;
             }
-            for (a, b) in left.iter().zip(right) {
-                worst = worst.max((a - b).abs());
+            for (left, right) in left.iter().zip(right) {
+                if left.len() != right.len() {
+                    return None;
+                }
+                for (a, b) in left.iter().zip(right) {
+                    worst = worst.max((a - b).abs());
+                }
             }
         }
         Some(worst)
@@ -357,17 +443,22 @@ impl Vectors {
 
 /// Decodes `raw` according to `spec`.
 ///
+/// `inputs` is how many texts were sent. It is not read as a truth — the checks
+/// exist precisely to catch a response that disagrees with it — but it is what
+/// tells one list of vectors apart from another: see [`split_batch`].
+///
 /// Never fails, for the same reason chat decoding does not: an unfamiliar shape
 /// is something to look at, not something to hide behind an error.
 #[must_use]
 pub fn decode(
     raw: &Value,
     spec: &DecodeSpec,
+    inputs: usize,
     include_vectors: bool,
 ) -> (Embedding, Vectors, DecodeTrace) {
     let mut trace = DecodeTrace::default();
 
-    let (vectors, encoding) = decode_vectors(raw, spec, &mut trace);
+    let (vectors, encoding) = decode_vectors(raw, spec, inputs, &mut trace);
     let usage = decode_usage(raw, spec, &mut trace);
 
     let embedding = summarise_all(&vectors, encoding, usage, include_vectors);
@@ -385,29 +476,35 @@ pub fn summarise_all(
     usage: Option<Usage>,
     include_vectors: bool,
 ) -> Embedding {
+    let widths: Vec<usize> = vectors.flat().map(Vec::len).collect();
+
     Embedding {
-        count: vectors.0.len(),
-        dimensions: dimensions(&vectors.0),
+        count: vectors.items().len(),
+        vector_count: widths.len(),
+        vectors_per_item: vectors.items().iter().map(Vec::len).collect(),
+        dimensions: dimensions(&widths),
         encoding,
         usage,
-        full: include_vectors.then(|| vectors.0.clone()),
+        full: include_vectors.then(|| vectors.flat().cloned().collect()),
         vectors: vectors
-            .0
-            .iter()
+            .enumerated()
             .enumerate()
-            .map(|(index, vector)| summarise(index, vector))
+            .filter(|(_, (_, position, _))| *position < MAX_SUMMARIES_PER_ITEM)
+            .map(|(index, (item, position, vector))| summarise(index, item, position, vector))
             .collect(),
     }
 }
 
-/// Resolves the vector cascade and flattens whatever shape it selected.
+/// Resolves the vector cascade and groups whatever shape it selected into items.
 ///
-/// Three shapes are covered without a script: one node per vector
-/// (`$.data[*].embedding`), one node holding a list of vectors (`$.embeddings`),
-/// and a bare vector at the root.
+/// Four shapes are covered without a script: one node per item
+/// (`$.data[*].embedding`), one node holding the whole batch (`$.embeddings`), a
+/// bare vector at the root, and any of those with an item that is a *list* of
+/// vectors rather than one — the multi-vector case.
 fn decode_vectors(
     raw: &Value,
     spec: &DecodeSpec,
+    inputs: usize,
     trace: &mut DecodeTrace,
 ) -> (Vectors, VectorEncoding) {
     let Some((path, nodes)) = resolve(raw, &spec.vectors) else {
@@ -415,51 +512,99 @@ fn decode_vectors(
         return (Vectors::default(), VectorEncoding::None);
     };
 
-    // One array node whose first element is itself a vector means the node is a
-    // *list* of vectors, not a vector.
-    let items: Vec<&Value> = match nodes.as_slice() {
-        [Value::Array(array)]
-            if matches!(array.first(), Some(Value::Array(_) | Value::String(_))) =>
-        {
-            array.iter().collect()
-        }
+    // Several nodes are already one per item. A single one may be the whole
+    // batch, and only then is there anything to split.
+    let selected: Vec<&Value> = match nodes.as_slice() {
+        [node] => split_batch(node, inputs),
         other => other.to_vec(),
     };
 
-    let mut vectors = Vec::with_capacity(items.len());
+    let mut items = Vec::with_capacity(selected.len());
     let mut encoding = VectorEncoding::None;
 
-    for item in items {
-        match item {
-            Value::Array(values) => {
-                encoding = VectorEncoding::Float;
-                vectors.push(values.iter().map(number_to_f32).collect());
-            }
-            Value::String(encoded) => match decode_base64_f32(encoded) {
-                Ok(vector) => {
-                    encoding = VectorEncoding::Base64;
-                    vectors.push(vector);
+    for node in selected {
+        let mut vectors = Vec::new();
+        match node {
+            Value::Array(values) if holds_vectors(node) => {
+                for value in values {
+                    push_vector(value, &mut vectors, &mut encoding, path.source(), trace);
                 }
-                Err(message) => trace.issue(DecodeField::Vectors, path.source(), message),
-            },
-            other => trace.issue(
-                DecodeField::Vectors,
-                path.source(),
-                format!(
-                    "expected a vector or a base64 string, found {}",
-                    kind_of(other)
-                ),
-            ),
+            }
+            _ => push_vector(node, &mut vectors, &mut encoding, path.source(), trace),
+        }
+        if !vectors.is_empty() {
+            items.push(vectors);
         }
     }
 
-    if vectors.is_empty() {
+    if items.is_empty() {
         trace.miss(DecodeField::Vectors, paths::sources(&spec.vectors));
     } else {
         trace.hit(DecodeField::Vectors, path.source());
     }
 
-    (Vectors(vectors), encoding)
+    (Vectors::grouped(items), encoding)
+}
+
+/// Splits the single node that holds everything into one node per item.
+///
+/// A list of *lists of vectors* is unambiguous: one entry per item, several
+/// vectors in each. A list of plain vectors is not — it is a batch of pooled
+/// vectors under `$.embeddings`, and byte for byte the same JSON is one input's
+/// token vectors from a multi-vector endpoint. The number of inputs sent settles
+/// it; when it settles nothing, the batch reading wins and the `count` check is
+/// what reports the disagreement.
+fn split_batch(node: &Value, inputs: usize) -> Vec<&Value> {
+    let Value::Array(entries) = node else {
+        return vec![node];
+    };
+
+    match entries.first() {
+        // One entry per item, each holding its own vectors: nothing to guess.
+        Some(first) if holds_vectors(first) => entries.iter().collect(),
+        // A flat list of vectors: a batch, unless a single input was sent, in
+        // which case they are all that input's.
+        Some(Value::Array(_) | Value::String(_)) if inputs != 1 => entries.iter().collect(),
+        _ => vec![node],
+    }
+}
+
+/// `true` when the node is a *list* of vectors rather than a vector: its first
+/// element is itself an array or a base64 string.
+fn holds_vectors(node: &Value) -> bool {
+    matches!(node, Value::Array(entries) if matches!(entries.first(), Some(Value::Array(_) | Value::String(_))))
+}
+
+/// Decodes one vector — floats or base64 — onto an item, or traces why it could
+/// not.
+fn push_vector(
+    node: &Value,
+    vectors: &mut Vec<Vec<f32>>,
+    encoding: &mut VectorEncoding,
+    source: &str,
+    trace: &mut DecodeTrace,
+) {
+    match node {
+        Value::Array(values) => {
+            *encoding = VectorEncoding::Float;
+            vectors.push(values.iter().map(number_to_f32).collect());
+        }
+        Value::String(encoded) => match decode_base64_f32(encoded) {
+            Ok(vector) => {
+                *encoding = VectorEncoding::Base64;
+                vectors.push(vector);
+            }
+            Err(message) => trace.issue(DecodeField::Vectors, source, message),
+        },
+        other => trace.issue(
+            DecodeField::Vectors,
+            source,
+            format!(
+                "expected a vector or a base64 string, found {}",
+                kind_of(other)
+            ),
+        ),
+    }
 }
 
 /// A non-numeric entry becomes `NaN` rather than being dropped, so the vector
@@ -491,35 +636,39 @@ fn decode_base64_f32(encoded: &str) -> Result<Vec<f32>, String> {
         .collect())
 }
 
-fn dimensions(vectors: &[Vec<f32>]) -> Dimensions {
-    let mut widths = vectors.iter().map(Vec::len);
-    let Some(first) = widths.next() else {
+fn dimensions(widths: &[usize]) -> Dimensions {
+    let Some((first, rest)) = widths.split_first() else {
         return Dimensions::Unknown;
     };
-    if widths.all(|width| width == first) {
-        Dimensions::Uniform { value: first }
+    if rest.iter().all(|width| width == first) {
+        Dimensions::Uniform { value: *first }
     } else {
         Dimensions::Ragged {
-            values: vectors.iter().map(Vec::len).collect(),
+            values: widths.to_vec(),
         }
     }
 }
 
-fn summarise(index: usize, vector: &[f32]) -> VectorSummary {
-    let finite = vector.iter().all(|value| value.is_finite());
-    let norm = vector
+/// L2 norm over the finite values only: one hole should not turn the norm into
+/// `NaN` and hide the fact that the rest of the vector is perfectly ordinary.
+fn norm(vector: &[f32]) -> f64 {
+    vector
         .iter()
         .filter(|value| value.is_finite())
         .map(|value| f64::from(*value) * f64::from(*value))
         .sum::<f64>()
-        .sqrt();
+        .sqrt()
+}
 
+fn summarise(index: usize, item: usize, position: usize, vector: &[f32]) -> VectorSummary {
     VectorSummary {
         index,
+        item,
+        position,
         dimensions: vector.len(),
-        norm,
+        norm: norm(vector),
         sample: vector.iter().take(SAMPLE_LEN).copied().collect(),
-        finite,
+        finite: vector.iter().all(|value| value.is_finite()),
         histogram: histogram(vector),
     }
 }
@@ -612,7 +761,7 @@ usage: ["$.usage"]
             "usage": {"prompt_tokens": 7}
         });
 
-        let (embedding, _, trace) = decode(&raw, &spec(), false);
+        let (embedding, _, trace) = decode(&raw, &spec(), 2, false);
         assert_eq!(embedding.count, 2);
         assert_eq!(embedding.dimensions, Dimensions::Uniform { value: 3 });
         assert_eq!(embedding.encoding, VectorEncoding::Float);
@@ -624,7 +773,7 @@ usage: ["$.usage"]
     #[test]
     fn decodes_a_single_node_holding_a_list_of_vectors() {
         let raw = serde_json::json!({"embeddings": [[1.0, 0.0], [0.0, 1.0]]});
-        let (embedding, _, trace) = decode(&raw, &spec(), false);
+        let (embedding, _, trace) = decode(&raw, &spec(), 2, false);
 
         assert_eq!(embedding.count, 2);
         assert_eq!(embedding.dimensions, Dimensions::Uniform { value: 2 });
@@ -634,7 +783,7 @@ usage: ["$.usage"]
     #[test]
     fn decodes_a_bare_vector_at_the_root() {
         let raw = serde_json::json!([0.3, 0.4]);
-        let (embedding, _, _) = decode(&raw, &spec(), false);
+        let (embedding, _, _) = decode(&raw, &spec(), 1, false);
 
         assert_eq!(embedding.count, 1);
         assert_eq!(embedding.dimensions, Dimensions::Uniform { value: 2 });
@@ -650,18 +799,18 @@ usage: ["$.usage"]
             ]
         });
 
-        let (embedding, vectors, _) = decode(&raw, &spec(), true);
+        let (embedding, vectors, _) = decode(&raw, &spec(), 2, true);
         assert_eq!(embedding.encoding, VectorEncoding::Base64);
         assert_eq!(embedding.dimensions, Dimensions::Uniform { value: 3 });
         assert!((embedding.vectors[1].norm - 3.0).abs() < 1e-6);
-        assert_eq!(vectors.as_slice()[0], vec![1.0, 0.0, 0.0]);
+        assert_eq!(vectors.items()[0][0], vec![1.0, 0.0, 0.0]);
     }
 
     #[test]
     fn a_truncated_base64_payload_is_reported() {
         // Five bytes: not a whole number of f32 values.
         let raw = serde_json::json!({"embeddings": [BASE64.encode([1_u8, 2, 3, 4, 5])]});
-        let (embedding, _, trace) = decode(&raw, &spec(), false);
+        let (embedding, _, trace) = decode(&raw, &spec(), 1, false);
 
         assert_eq!(embedding.count, 0);
         assert!(trace.issues[0].message.contains("whole number of f32"));
@@ -670,7 +819,7 @@ usage: ["$.usage"]
     #[test]
     fn inconsistent_widths_are_surfaced_not_averaged_away() {
         let raw = serde_json::json!({"embeddings": [[1.0, 2.0, 3.0], [1.0, 2.0]]});
-        let (embedding, _, _) = decode(&raw, &spec(), false);
+        let (embedding, _, _) = decode(&raw, &spec(), 2, false);
 
         assert_eq!(
             embedding.dimensions,
@@ -682,7 +831,7 @@ usage: ["$.usage"]
     #[test]
     fn a_null_inside_a_vector_keeps_its_width_and_fails_finiteness() {
         let raw = serde_json::json!({"embeddings": [[1.0, null, 3.0]]});
-        let (embedding, _, _) = decode(&raw, &spec(), false);
+        let (embedding, _, _) = decode(&raw, &spec(), 1, false);
 
         assert_eq!(embedding.dimensions, Dimensions::Uniform { value: 3 });
         assert!(!embedding.vectors[0].finite);
@@ -693,7 +842,7 @@ usage: ["$.usage"]
     #[test]
     fn a_zero_vector_has_a_zero_norm() {
         let raw = serde_json::json!({"embeddings": [[0.0, 0.0, 0.0]]});
-        let (embedding, _, _) = decode(&raw, &spec(), false);
+        let (embedding, _, _) = decode(&raw, &spec(), 1, false);
         assert!((embedding.vectors[0].norm - 0.0).abs() < f64::EPSILON);
     }
 
@@ -701,12 +850,12 @@ usage: ["$.usage"]
     fn full_vectors_are_absent_unless_asked_for() {
         let raw = serde_json::json!({"embeddings": [[1.0, 2.0]]});
 
-        let (without, _, _) = decode(&raw, &spec(), false);
+        let (without, _, _) = decode(&raw, &spec(), 1, false);
         assert!(without.full.is_none());
         let rendered = serde_json::to_string(&without).unwrap();
         assert!(!rendered.contains("full"), "{rendered}");
 
-        let (with, _, _) = decode(&raw, &spec(), true);
+        let (with, _, _) = decode(&raw, &spec(), 1, true);
         assert_eq!(with.full.unwrap(), vec![vec![1.0, 2.0]]);
     }
 
@@ -715,7 +864,7 @@ usage: ["$.usage"]
         let values: Vec<f32> = (0..1024_u16).map(|i| f32::from(i) / 1024.0).collect();
         let raw = serde_json::json!({"embeddings": [values]});
 
-        let (embedding, _, _) = decode(&raw, &spec(), false);
+        let (embedding, _, _) = decode(&raw, &spec(), 1, false);
         assert_eq!(embedding.vectors[0].dimensions, 1024);
         assert_eq!(embedding.vectors[0].sample.len(), SAMPLE_LEN);
         assert_eq!(
@@ -729,13 +878,117 @@ usage: ["$.usage"]
     }
 
     #[test]
+    fn an_item_holding_several_vectors_is_still_one_item() {
+        // What a multi-vector endpoint answers: one vector per token, grouped
+        // per input.
+        let raw = serde_json::json!({
+            "data": [
+                {"embedding": [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]},
+                {"embedding": [[0.0, 2.0], [2.0, 0.0]]}
+            ]
+        });
+
+        let (embedding, vectors, trace) = decode(&raw, &spec(), 2, false);
+        assert_eq!(embedding.count, 2);
+        assert_eq!(embedding.vector_count, 5);
+        assert_eq!(embedding.vectors_per_item, vec![3, 2]);
+        assert_eq!(embedding.dimensions, Dimensions::Uniform { value: 2 });
+        assert!(vectors.multi());
+        assert_eq!(trace.matched[&DecodeField::Vectors], "$.data[*].embedding");
+
+        // Every vector knows which input it answers.
+        assert_eq!(
+            (embedding.vectors[3].item, embedding.vectors[3].position),
+            (1, 0)
+        );
+    }
+
+    #[test]
+    fn the_count_check_counts_items_not_vectors() {
+        let raw = serde_json::json!({
+            "data": [
+                {"embedding": [[1.0, 0.0], [0.0, 1.0]]},
+                {"embedding": [[1.0, 1.0]]}
+            ]
+        });
+
+        let (embedding, vectors, _) = decode(&raw, &spec(), 2, false);
+        let checks = EmbeddingChecks::evaluate(&embedding, &vectors, 2, Some(2));
+        assert!(
+            matches!(checks.count, CheckOutcome::Pass),
+            "{:?}",
+            checks.count
+        );
+        assert!(matches!(checks.dimensions, CheckOutcome::Pass));
+    }
+
+    #[test]
+    fn a_single_input_owns_the_whole_list_of_vectors() {
+        // The same JSON either way: three pooled vectors for three inputs, or one
+        // input's three token vectors. What was sent settles it.
+        let raw = serde_json::json!({"embeddings": [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]});
+
+        let (one, _, _) = decode(&raw, &spec(), 1, false);
+        assert_eq!(one.count, 1);
+        assert_eq!(one.vectors_per_item, vec![3]);
+
+        let (three, _, _) = decode(&raw, &spec(), 3, false);
+        assert_eq!(three.count, 3);
+        assert_eq!(three.vectors_per_item, vec![1, 1, 1]);
+    }
+
+    #[test]
+    fn a_batch_of_multi_vector_items_needs_no_hint() {
+        // Nesting one level deeper is unambiguous, whatever was sent.
+        let raw = serde_json::json!({"embeddings": [[[1.0, 0.0], [0.0, 1.0]], [[1.0, 1.0]]]});
+
+        let (embedding, _, _) = decode(&raw, &spec(), 1, false);
+        assert_eq!(embedding.count, 2);
+        assert_eq!(embedding.vectors_per_item, vec![2, 1]);
+    }
+
+    #[test]
+    fn only_the_leading_vectors_of_an_item_are_summarised() {
+        let token_vectors: Vec<Vec<f32>> = (0..20_u8).map(|i| vec![f32::from(i), 1.0]).collect();
+        let raw = serde_json::json!({"data": [{"embedding": token_vectors}]});
+
+        let (embedding, _, _) = decode(&raw, &spec(), 1, false);
+        assert_eq!(embedding.vector_count, 20);
+        assert_eq!(embedding.vectors_per_item, vec![20]);
+        assert_eq!(embedding.vectors.len(), MAX_SUMMARIES_PER_ITEM);
+    }
+
+    #[test]
+    fn a_check_reads_the_vectors_the_summaries_stopped_at() {
+        let mut token_vectors: Vec<Value> =
+            (0..12).map(|_| serde_json::json!([1.0, 1.0])).collect();
+        token_vectors[10] = serde_json::json!([1.0, null]);
+        let raw = serde_json::json!({"data": [{"embedding": token_vectors}]});
+
+        let (embedding, vectors, _) = decode(&raw, &spec(), 1, false);
+        let checks = EmbeddingChecks::evaluate(&embedding, &vectors, 1, None);
+
+        // Past the summary cap, and named by item and position because the item
+        // alone no longer identifies a vector.
+        let CheckOutcome::Fail { detail } = &checks.finite else {
+            panic!("expected a failure, got {:?}", checks.finite);
+        };
+        assert!(detail.contains("0#10"), "{detail}");
+    }
+
+    #[test]
     fn max_deviation_compares_shape_first() {
-        let a = Vectors(vec![vec![1.0, 2.0]]);
-        let b = Vectors(vec![vec![1.0, 2.000_01]]);
-        let c = Vectors(vec![vec![1.0, 2.0, 3.0]]);
+        let a = Vectors::new(vec![vec![1.0, 2.0]]);
+        let b = Vectors::new(vec![vec![1.0, 2.000_01]]);
+        let c = Vectors::new(vec![vec![1.0, 2.0, 3.0]]);
 
         assert!(a.max_deviation(&b).unwrap() > 0.0);
         assert!(a.max_deviation(&a).unwrap() < f32::EPSILON);
         assert!(a.max_deviation(&c).is_none());
+
+        // Same vectors, different grouping: two items of one, or one item of two.
+        let split = Vectors::grouped(vec![vec![vec![1.0, 2.0]], vec![vec![3.0, 4.0]]]);
+        let together = Vectors::grouped(vec![vec![vec![1.0, 2.0], vec![3.0, 4.0]]]);
+        assert!(split.max_deviation(&together).is_none());
     }
 }

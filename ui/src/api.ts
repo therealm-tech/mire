@@ -207,6 +207,8 @@ const histogramSchema = z.object({
 
 const vectorSummarySchema = z.object({
   index: z.number(),
+  item: z.number(),
+  position: z.number(),
   dimensions: z.number(),
   norm: z.number(),
   // A non-finite value serialises as `null`, which is exactly the case
@@ -232,7 +234,11 @@ const embeddingChecksSchema = z.object({
 
 const embeddingSchema = z.object({
   kind: z.literal('embedding'),
+  // One item per input. A multi-vector endpoint answers several vectors per
+  // item, which is `vectorCount` — `count` stays what the inputs are compared to.
   count: z.number(),
+  vectorCount: z.number(),
+  vectorsPerItem: z.array(z.number()),
   dimensions: dimensionsSchema,
   encoding: z.enum(['float', 'base64', 'none']),
   usage: usageSchema.nullable(),
@@ -522,6 +528,7 @@ export type LoginResponse = z.infer<typeof loginResponseSchema>
 export type Decoded = z.infer<typeof decodedSchema>
 export type Completion = Extract<Decoded, { kind: 'completion' }>
 export type Embedding = Extract<Decoded, { kind: 'embedding' }>
+export type VectorSummary = z.infer<typeof vectorSummarySchema>
 export type CheckOutcome = z.infer<typeof checkOutcomeSchema>
 export type DecodeTrace = z.infer<typeof decodeTraceSchema>
 export type DecodedError = z.infer<typeof decodedErrorSchema>
