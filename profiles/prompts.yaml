@@ -25,8 +25,8 @@ prompts:
   - name: call a tool
     text: What is the weather in Lyon right now?
 
-  # Long enough to watch arriving. On **Chat** this is where time to first token
-  # stops being a number and starts being something you can see.
+  # Long enough to watch arriving. With **stream** ticked this is where time to
+  # first token stops being a number and starts being something you can see.
   - name: stream something
     text: |
       Explain, in about three hundred words, why a checksum is not a signature.

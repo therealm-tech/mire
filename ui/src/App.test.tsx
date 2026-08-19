@@ -164,17 +164,16 @@ function completion(status: number) {
 }
 
 /**
- * A turn that answered and asked for nothing, which is what a chat profile with
- * no tools produces: the loop stops on turn one.
+ * One turn wrapping a call outcome, asking for nothing and stopping the loop.
+ *
+ * Takes the outcome rather than building it, because a streamed turn carries a
+ * different one — the chunk counters and the time to first token — and the loop
+ * is now the only route those reach the page through.
  */
-function answerTurn(status: number, content: string | null = 'pong') {
-  const call = completion(status)
+function turnOf(call: ReturnType<typeof completion>) {
   return {
     index: 1,
-    call: {
-      ...call,
-      response: { ...call.response, decoded: { ...call.response.decoded, content } },
-    },
+    call,
     tools: [],
     decision: {
       decision: 'stop',
@@ -184,12 +183,24 @@ function answerTurn(status: number, content: string | null = 'pong') {
 }
 
 /**
+ * A turn that answered and asked for nothing, which is what a chat profile with
+ * no tools produces: the loop stops on turn one.
+ */
+function answerTurn(status: number, content: string | null = 'pong') {
+  const call = completion(status)
+  return turnOf({
+    ...call,
+    response: { ...call.response, decoded: { ...call.response.decoded, content } },
+  })
+}
+
+/**
  * The event stream `POST /api/agent` emits: one `turn` per turn, then the trace.
  *
- * Every chat send goes through this now, so the tests speak it too rather than
- * the single-shot shape the UI no longer asks for.
+ * Every chat send goes through this — there is no second route left — so the
+ * tests speak it too rather than the single-shot shape the UI no longer asks for.
  */
-function agentStream(turns: ReturnType<typeof answerTurn>[]): string {
+function agentStream(turns: ReturnType<typeof turnOf>[]): string {
   const trace = {
     profile: 'chat',
     auth: 'anonymous',
@@ -209,6 +220,23 @@ function agentStream(turns: ReturnType<typeof answerTurn>[]): string {
     '',
     '',
   ].join('\n')
+}
+
+/**
+ * The same stream, with the chunks a streamed turn arrived in ahead of it.
+ *
+ * `POST /api/agent` emits one `delta` per chunk, each naming the turn it belongs
+ * to, before that turn's own event — so a test about time to first token or a
+ * body that stopped mid-sentence asks this, which is the only route the composer
+ * has left to ask.
+ */
+function streamedAgent(turn: ReturnType<typeof turnOf>, deltas: string[]): string {
+  const chunks = deltas.flatMap((text) => [
+    'event: delta',
+    `data: ${JSON.stringify({ event: 'delta', turn: turn.index, text })}`,
+    '',
+  ])
+  return [...chunks, agentStream([turn])].join('\n')
 }
 
 /**
@@ -272,28 +300,24 @@ async function openCard(
 }
 
 /**
- * Picks a mode in the composer, which is what decides how many turns **Send**
- * runs.
+ * Caps the loop at one turn, which is the whole of what **Chat** used to be.
  *
- * **Agent** is the default and the loop; **Chat** is one turn that answers no
- * tools. Said out loud in every test that depends on it, default or not: a test
- * that reads as "the loop" because nobody has touched the dropdown is a test
- * that quietly changes meaning the day the default does.
+ * `fireEvent` rather than typing: the box is a controlled number input, so
+ * clearing it and typing a digit would put a `0` through `onChange` on the way,
+ * and a run briefly budgeted at nothing is not the state under test.
  */
-async function agentMode(user: ReturnType<typeof userEvent.setup>): Promise<void> {
-  await user.selectOptions(await screen.findByLabelText('mode'), 'agent')
-}
-
-async function chatMode(user: ReturnType<typeof userEvent.setup>): Promise<void> {
-  await user.selectOptions(await screen.findByLabelText('mode'), 'chat')
+async function oneTurn(): Promise<void> {
+  const budget = await screen.findByLabelText(/max turns/)
+  fireEvent.change(budget, { target: { value: '1' } })
+  await waitFor(() => expect(budget).toHaveValue(1))
 }
 
 /**
  * Ticks the composer's **stream** box, which is the other half of the question
- * and is off by default in either mode.
+ * and is off by default whatever the turn budget.
  *
- * Spelled out for the same reason as the mode: a streamed test that relies on
- * the default is a test that stops testing streaming the day the default moves.
+ * Spelled out rather than inherited: a streamed test that relies on the default
+ * is a test that stops testing streaming the day the default moves.
  */
 async function streamOn(user: ReturnType<typeof userEvent.setup>): Promise<void> {
   await user.click(await screen.findByLabelText('stream'))
@@ -454,7 +478,6 @@ describe('App', () => {
     )
     render(<App />)
 
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     await waitFor(() => {
@@ -487,7 +510,6 @@ describe('App', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(1))
 
@@ -546,24 +568,31 @@ describe('App', () => {
     expect(within(keyed).queryByRole('button')).not.toBeInTheDocument()
   })
 
-  it('takes the servers out of the picture on a chat, which calls no tool', async () => {
+  it('keeps the servers in the picture on a single turn, and drops them when switched off', async () => {
     const user = userEvent.setup()
     render(<App />)
 
-    // Agent mode: both declared servers, their identities, and the revision to
-    // reach them in — all of it about the run that is about to happen.
+    // Both declared servers, their identities, and the revision to reach them in
+    // — all of it about the run that is about to happen.
     await user.click(await screen.findByRole('button', { name: /guarded/ }))
     expect(screen.getByRole('heading', { name: 'MCP servers' })).toBeInTheDocument()
     expect(screen.getByLabelText('Protocol')).toBeInTheDocument()
     expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('2 MCP servers')
     expect(screen.getByText(/answer 409 until/)).toBeInTheDocument()
 
-    // Chat mode: one turn, which sets nothing up and calls nothing. None of it
-    // is this run's business — least of all a 409 it cannot be given.
-    await chatMode(user)
-    expect(screen.queryByRole('heading', { name: 'MCP servers' })).not.toBeInTheDocument()
-    expect(screen.queryByLabelText('Protocol')).not.toBeInTheDocument()
-    expect(screen.getByLabelText('What the next call will do')).not.toHaveTextContent('MCP server')
+    // A budget of one turn changes none of that. One turn against a real server
+    // is a fair question — does the model ask for the tool it was shown? — so the
+    // servers stay, and so does the 409 standing between it and an answer.
+    await oneTurn()
+    expect(screen.getByRole('heading', { name: 'MCP servers' })).toBeInTheDocument()
+    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('2 MCP servers')
+    expect(screen.getByText(/answer 409 until/)).toBeInTheDocument()
+
+    // Switching them off is what takes them out, which is the control that says
+    // so: no discovery, no listing, and no 409 to be blocked by.
+    const servers = within(screen.getByRole('group', { name: 'Servers' }))
+    await user.click(servers.getByRole('button', { name: 'None' }))
+    expect(screen.getByLabelText('What the next call will do')).not.toHaveTextContent('2 MCP')
     expect(screen.queryByText(/answer 409 until/)).not.toBeInTheDocument()
   })
 
@@ -616,7 +645,6 @@ describe('App', () => {
     await user.click(await screen.findByRole('button', { name: /guarded/ }))
     // First, because a stream speaks to no server: the selector is inert until
     // the run is one that can call a tool.
-    await agentMode(user)
     await user.selectOptions(screen.getByLabelText('Protocol'), '2025-03-26')
     await user.click(screen.getByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(1))
@@ -638,7 +666,6 @@ describe('App', () => {
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: /guarded/ }))
-    await agentMode(user)
 
     // Every declared server, all on: `mcp.yaml`'s word, unedited.
     expect(
@@ -673,7 +700,6 @@ describe('App', () => {
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: /guarded/ }))
-    await agentMode(user)
     await user.click(screen.getByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(1))
 
@@ -706,7 +732,6 @@ describe('App', () => {
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: /guarded/ }))
-    await agentMode(user)
 
     const servers = () => within(screen.getByRole('group', { name: 'Servers' }))
     // Every one already on, so there is nothing for **All** to do — and it says
@@ -747,8 +772,8 @@ describe('App', () => {
     render(<App />)
 
     // Every declared server is offered to every *chat* profile. `kind:
-    // embedding` has no agent loop for one to be part of, and the mode this tab
-    // remembers is about whichever profile was on before.
+    // embedding` has no agent loop for one to be part of, whatever the turn
+    // budget this tab remembers from the profile that was on before.
     await user.click(await screen.findByRole('button', { name: /^chat/ }))
     await openAuth(user)
     expect(screen.getByRole('heading', { name: 'MCP servers' })).toBeInTheDocument()
@@ -883,32 +908,34 @@ describe('describeLive', () => {
   })
 })
 
-describe('agent mode', () => {
-  it('offers the loop controls for a chat profile and not for an embedding one', async () => {
+describe('the loop', () => {
+  it('offers one turn budget for a chat profile and none for an embedding one', async () => {
     const user = userEvent.setup()
     render(<App />)
 
-    // Two named runs rather than a mechanism to switch on, and it starts on the
-    // loop, which is the mode this tool is about.
-    const picker = await screen.findByLabelText('mode')
-    expect(
-      Array.from(picker.querySelectorAll('option')).map((option) => option.textContent),
-    ).toEqual(['Agent', 'Chat'])
-    expect(picker).toHaveValue('agent')
-    expect(screen.getByLabelText(/max turns/)).toBeEnabled()
-
-    // A chat is one turn, so the cap on the second one is shown as inert rather
-    // than quietly ignored.
-    await chatMode(user)
-    expect(screen.getByLabelText(/max turns/)).toBeDisabled()
-
-    // There is no second turn of an embedding, so there is nothing to loop.
-    await user.click(screen.getByRole('button', { name: /embed/ }))
+    // One control saying how many turns, and no mode beside it implying a second
+    // mechanism: the loop is the mechanism, and this is how far it may run.
+    const budget = await screen.findByLabelText(/max turns/)
+    expect(budget).toBeEnabled()
+    expect(budget).toHaveValue(6)
     expect(screen.queryByLabelText('mode')).not.toBeInTheDocument()
+
+    // Live at one as at six — a cap of one turn is a run, not a disabled state.
+    await oneTurn()
+    expect(screen.getByLabelText(/max turns/)).toBeEnabled()
+    expect(screen.getByLabelText(/max turns/)).toHaveValue(1)
+
+    // Emptying the box is not a run of no turns: it snaps to the smallest one
+    // there is rather than sending a budget the endpoint never hears about.
+    fireEvent.change(screen.getByLabelText(/max turns/), { target: { value: '' } })
+    expect(screen.getByLabelText(/max turns/)).toHaveValue(1)
+
+    // There is no second turn of an embedding, so there is nothing to cap.
+    await user.click(screen.getByRole('button', { name: /embed/ }))
     expect(screen.queryByLabelText(/max turns/)).not.toBeInTheDocument()
   })
 
-  it('picks the endpoint from the mode and the streaming from the box', async () => {
+  it('sends every turn count to the loop, and reads the box for chunks', async () => {
     const user = userEvent.setup()
     const urls: string[] = []
     const bodies: unknown[] = []
@@ -951,7 +978,7 @@ describe('agent mode', () => {
     await waitFor(() => expect(urls.some((url) => url.endsWith('api/agent'))).toBe(true))
     expect(bodies.some((body) => (body as { stream?: boolean }).stream === true)).toBe(false)
 
-    // The box is what asks for chunks, and it asks for them of the loop: same
+    // The box is what asks for chunks, and it asks them of the loop: same
     // endpoint, same one button, one flag different.
     await streamOn(user)
     await user.type(screen.getByRole('textbox', { name: /message/i }), 'again')
@@ -959,24 +986,21 @@ describe('agent mode', () => {
     await waitFor(() =>
       expect(bodies.some((body) => (body as { stream?: boolean }).stream === true)).toBe(true),
     )
-    expect(urls.some((url) => url.endsWith('api/call/stream'))).toBe(false)
 
-    // The mode is the other question: **Chat** is one turn, and with the box
-    // still ticked that turn is the streamed route.
-    await chatMode(user)
+    // And a budget of one turn is the same route with a smaller number on it,
+    // not a second mechanism: the single-shot endpoints are not asked either way.
+    await oneTurn()
     await user.type(screen.getByRole('textbox', { name: /message/i }), 'once')
     await user.click(screen.getByRole('button', { name: 'Send' }))
-    await waitFor(() => expect(urls.some((url) => url.endsWith('api/call/stream'))).toBe(true))
+    await waitFor(() =>
+      expect(bodies.some((body) => (body as { maxIterations?: number }).maxIterations === 1)).toBe(
+        true,
+      ),
+    )
 
-    // And untick it: one turn, read whole, on the plain endpoint. Four
-    // combinations, two controls, still one **Send**.
-    await user.click(screen.getByLabelText('stream'))
-    await user.type(screen.getByRole('textbox', { name: /message/i }), 'plainly')
-    await user.click(screen.getByRole('button', { name: 'Send' }))
-    await waitFor(() => expect(urls.some((url) => url.endsWith('api/call'))).toBe(true))
-
+    expect(urls.some((url) => url.endsWith('api/call'))).toBe(false)
+    expect(urls.some((url) => url.endsWith('api/call/stream'))).toBe(false)
     expect(screen.getAllByRole('button', { name: 'Send' })).toHaveLength(1)
-    expect(screen.queryByRole('button', { name: 'Stream' })).not.toBeInTheDocument()
   })
 
   it('writes a streamed loop into the transcript as it arrives', async () => {
@@ -1019,7 +1043,6 @@ describe('agent mode', () => {
     )
 
     render(<App />)
-    await agentMode(user)
     await streamOn(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
@@ -1065,7 +1088,6 @@ describe('agent mode', () => {
     )
 
     render(<App />)
-    await agentMode(user)
     await streamOn(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
@@ -1073,10 +1095,11 @@ describe('agent mode', () => {
     await waitFor(() => {
       expect(conversation.getByText('answered 400')).toBeInTheDocument()
     })
+    expect(conversation.getByText('answered 400')).toHaveClass('text-bad')
     expect(conversation.queryByText('complete')).not.toBeInTheDocument()
   })
 
-  it('leaves max turns live on a streamed loop and inert on a chat', async () => {
+  it('leaves max turns live whether or not the run streams', async () => {
     const user = userEvent.setup()
     vi.stubGlobal(
       'fetch',
@@ -1089,15 +1112,15 @@ describe('agent mode', () => {
     )
 
     render(<App />)
-    await agentMode(user)
     await streamOn(user)
 
     // Streaming says how the answer arrives, not how many answers there are, so
-    // the cap on the loop is still a cap on this one.
+    // the cap on the loop is still a cap on this one — at every value it takes.
     expect(await screen.findByLabelText(/max turns/)).toBeEnabled()
 
-    await chatMode(user)
-    expect(screen.getByLabelText(/max turns/)).toBeDisabled()
+    await oneTurn()
+    expect(screen.getByLabelText(/max turns/)).toBeEnabled()
+    expect(screen.getByLabelText(/max turns/)).toHaveValue(1)
   })
 
   it('sends a chat profile through the loop and an embedding one straight out', async () => {
@@ -1130,7 +1153,6 @@ describe('agent mode', () => {
     render(<App />)
 
     // There is one send button, and for a chat profile it is the loop.
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => expect(urls.some((url) => url.endsWith('api/agent'))).toBe(true))
 
@@ -1159,21 +1181,7 @@ describe('agent mode', () => {
         },
       },
     }
-    const stream = [
-      'event: open',
-      `data: ${JSON.stringify({ event: 'open', status: 200, headers: {} })}`,
-      '',
-      'event: delta',
-      `data: ${JSON.stringify({ event: 'delta', text: 'po' })}`,
-      '',
-      'event: delta',
-      `data: ${JSON.stringify({ event: 'delta', text: 'ng' })}`,
-      '',
-      'event: done',
-      `data: ${JSON.stringify({ event: 'done', ...streamed })}`,
-      '',
-      '',
-    ].join('\n')
+    const stream = streamedAgent(turnOf(streamed), ['po', 'ng'])
 
     vi.stubGlobal(
       'fetch',
@@ -1182,12 +1190,12 @@ describe('agent mode', () => {
         'api/auth': AUTH,
         'api/mcp': MCP,
         'api/prompts': PROMPTS,
-        'api/call/stream': stream,
+        'api/agent': stream,
       }),
     )
 
     render(<App />)
-    await chatMode(user)
+    await oneTurn()
     await streamOn(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
@@ -1200,7 +1208,7 @@ describe('agent mode', () => {
     // And the numbers a streaming test is actually for, one panel down: the
     // headline on the folded card, the counters once it is opened.
     expect(within(panel('Traffic')).getByText(/first token 40 ms/)).toBeInTheDocument()
-    const model = within(await openCard(user, /Call · model/))
+    const model = within(await openCard(user, /Turn 1 · model/))
     expect(model.getByText('3 chunks')).toBeInTheDocument()
     expect(model.getByText(/ended cleanly/)).toBeInTheDocument()
   })
@@ -1223,12 +1231,7 @@ describe('agent mode', () => {
         },
       },
     }
-    const stream = [
-      'event: done',
-      `data: ${JSON.stringify({ event: 'done', ...cut })}`,
-      '',
-      '',
-    ].join('\n')
+    const stream = streamedAgent(turnOf(cut), ['half a sen'])
 
     vi.stubGlobal(
       'fetch',
@@ -1237,12 +1240,12 @@ describe('agent mode', () => {
         'api/auth': AUTH,
         'api/mcp': MCP,
         'api/prompts': PROMPTS,
-        'api/call/stream': stream,
+        'api/agent': stream,
       }),
     )
 
     render(<App />)
-    await chatMode(user)
+    await oneTurn()
     await streamOn(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
@@ -1250,46 +1253,8 @@ describe('agent mode', () => {
     await waitFor(() => {
       expect(within(panel('Conversation')).getByText('half a sen')).toBeInTheDocument()
     })
-    const model = within(await openCard(user, /Call · model/))
+    const model = within(await openCard(user, /Turn 1 · model/))
     expect(model.getByText(/stopped without ending/i)).toBeInTheDocument()
-  })
-
-  it('says what a refused stream came back with instead of calling it complete', async () => {
-    const user = userEvent.setup()
-    // Nothing decodes out of a `400`, so no bubble is promoted and the live one
-    // is the only thing left saying how the call went.
-    const stream = [
-      'event: open',
-      `data: ${JSON.stringify({ event: 'open', status: 400, headers: {} })}`,
-      '',
-      'event: done',
-      `data: ${JSON.stringify({ event: 'done', ...completion(400) })}`,
-      '',
-      '',
-    ].join('\n')
-
-    vi.stubGlobal(
-      'fetch',
-      mockApi({
-        'api/profiles': PROFILES,
-        'api/auth': AUTH,
-        'api/mcp': MCP,
-        'api/prompts': PROMPTS,
-        'api/call/stream': stream,
-      }),
-    )
-
-    render(<App />)
-    await chatMode(user)
-    await streamOn(user)
-    await user.click(await screen.findByRole('button', { name: 'Send' }))
-
-    const conversation = within(panel('Conversation'))
-    await waitFor(() => {
-      expect(conversation.getByText('answered 400')).toBeInTheDocument()
-    })
-    expect(conversation.getByText('answered 400')).toHaveClass('text-bad')
-    expect(conversation.queryByText('complete')).not.toBeInTheDocument()
   })
 
   it('shows the tools a run called in the transcript and the verdict it ended on', async () => {
@@ -1297,7 +1262,6 @@ describe('agent mode', () => {
     vi.stubGlobal('fetch', toolRunApi())
 
     render(<App />)
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     // What the run did on its own sits between the question and the answer,
@@ -1345,7 +1309,6 @@ describe('agent mode', () => {
     )
 
     render(<App />)
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     const conversation = within(panel('Conversation'))
@@ -1401,7 +1364,6 @@ describe('agent mode', () => {
     vi.stubGlobal('fetch', toolRunApi([turn]))
 
     render(<App />)
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     const conversation = within(panel('Conversation'))
@@ -1453,7 +1415,6 @@ describe('agent mode', () => {
     vi.stubGlobal('fetch', toolRunApi([turn]))
 
     render(<App />)
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     const conversation = within(panel('Conversation'))
@@ -1517,7 +1478,6 @@ describe('agent mode', () => {
     )
 
     render(<App />)
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     // The card says `400` while folded; opening it opens the body with it,
@@ -1577,7 +1537,6 @@ describe('agent mode', () => {
     )
 
     render(<App />)
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     const traffic = within(panel('Traffic'))
@@ -1712,7 +1671,6 @@ describe('traffic', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     // One card for what was asked of the model, one for what the tool was asked.
@@ -1751,7 +1709,6 @@ describe('traffic', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     // Its own card, not a line on the tool's: the tool card says the call did
@@ -1798,7 +1755,6 @@ describe('traffic', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     const hook = within(await openCard(user, /Turn 1 · audit \(after\)/))
@@ -1845,7 +1801,6 @@ describe('traffic', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     await waitFor(() => {
@@ -1885,7 +1840,6 @@ describe('traffic', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     await waitFor(() => {
@@ -1949,7 +1903,6 @@ describe('traffic', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     // The first is just the hook; the second says which action it was, because
@@ -1968,7 +1921,6 @@ describe('traffic', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     // No tool was called by these, so a tool listing could never show them —
@@ -1991,7 +1943,6 @@ describe('traffic', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /Turn 1 · model/ })).toBeInTheDocument()
@@ -2016,7 +1967,6 @@ describe('traffic', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /Turn 1 · model/ })).toBeInTheDocument()
@@ -2039,7 +1989,6 @@ describe('traffic', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /Turn 1 · get_weather/ })).toBeInTheDocument()
@@ -2072,7 +2021,6 @@ describe('traffic', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /Turn 1 · get_weather/ })).toBeInTheDocument()
@@ -2093,7 +2041,6 @@ describe('traffic', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /Turn 1 · model/ })).toBeInTheDocument()
@@ -2128,7 +2075,6 @@ describe('traffic', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => {
       expect(within(panel('Traffic')).getByText('1 exchange')).toBeInTheDocument()
@@ -2474,7 +2420,6 @@ describe('conversation', () => {
     render(<App />)
 
     await type(user, 'Capital of France?')
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(1))
 
@@ -2502,7 +2447,6 @@ describe('conversation', () => {
     render(<App />)
 
     await type(user, 'Capital of France?')
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     const conversation = within(panel('Conversation'))
@@ -2520,7 +2464,6 @@ describe('conversation', () => {
     render(<App />)
 
     await type(user, 'Which crate for **json**?')
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     const conversation = within(panel('Conversation'))
@@ -2541,7 +2484,6 @@ describe('conversation', () => {
     render(<App />)
 
     await type(user, 'hello')
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     await waitFor(() => expect(screen.getByRole('textbox', { name: /message/i })).toHaveValue(''))
@@ -2554,7 +2496,6 @@ describe('conversation', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await agentMode(user)
     const box = await screen.findByRole('textbox', { name: /message/i })
     await user.clear(box)
     await user.type(box, 'one{Shift>}{Enter}{/Shift}two')
@@ -2573,7 +2514,6 @@ describe('conversation', () => {
     render(<App />)
 
     await type(user, 'one')
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(1))
 
@@ -2594,7 +2534,6 @@ describe('conversation', () => {
     render(<App />)
 
     await type(user, 'one')
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(1))
 
@@ -2618,7 +2557,6 @@ describe('conversation', () => {
     render(<App />)
 
     await type(user, 'one')
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(1))
 
@@ -2659,7 +2597,6 @@ describe('conversation', () => {
     render(<App />)
 
     await type(user, 'weather?')
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     const conversation = within(panel('Conversation'))
@@ -2706,7 +2643,6 @@ describe('conversation', () => {
     render(<App />)
 
     await type(user, 'one')
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => expect(screen.getByText('the endpoint refused')).toBeInTheDocument())
 
@@ -2729,7 +2665,6 @@ describe('conversation', () => {
     render(<App />)
 
     await type(user, 'one')
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(1))
     expect(within(panel('Conversation')).getByText('one')).toBeInTheDocument()
@@ -2753,7 +2688,6 @@ describe('conversation', () => {
     render(<App />)
 
     await type(user, 'a question')
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(1))
 
@@ -2939,7 +2873,6 @@ describe('stopping a run', () => {
     // The box arrives prefilled, so it is cleared rather than typed into twice.
     await user.clear(screen.getByLabelText('Message'))
     await user.type(screen.getByLabelText('Message'), 'are you there')
-    await agentMode(user)
     await user.click(screen.getByRole('button', { name: 'Send' }))
 
     // Nothing to stop until there is something in flight.
@@ -2961,7 +2894,6 @@ describe('reading a run', () => {
     vi.stubGlobal('fetch', toolRunApi())
 
     render(<App />)
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     const conversation = within(panel('Conversation'))
@@ -2991,7 +2923,6 @@ describe('reading a run', () => {
     vi.stubGlobal('fetch', toolRunApi())
 
     render(<App />)
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     const traffic = within(panel('Traffic'))
@@ -3014,7 +2945,6 @@ describe('reading a run', () => {
     vi.stubGlobal('fetch', toolRunApi())
 
     render(<App />)
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     const traffic = within(panel('Traffic'))
@@ -3037,7 +2967,6 @@ describe('reading a run', () => {
     vi.stubGlobal('fetch', toolRunApi([broken]))
 
     render(<App />)
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     const traffic = within(panel('Traffic'))
@@ -3056,7 +2985,6 @@ describe('reading a run', () => {
     vi.stubGlobal('fetch', toolRunApi())
 
     render(<App />)
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     // On the folded summary line, where the model and protocol cards already
@@ -3083,7 +3011,6 @@ describe('reading a run', () => {
     vi.stubGlobal('fetch', toolRunApi([refused]))
 
     render(<App />)
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     await waitFor(() =>
@@ -3111,7 +3038,6 @@ describe('reading a run', () => {
     vi.stubGlobal('fetch', toolRunApi([lost]))
 
     render(<App />)
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     await waitFor(() =>
@@ -3128,7 +3054,6 @@ describe('reading a run', () => {
     vi.stubGlobal('fetch', toolRunApi())
 
     render(<App />)
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     const traffic = within(panel('Traffic'))
@@ -3235,18 +3160,15 @@ describe('coming back to it', () => {
     )
   })
 
-  it('reopens in the mode it was left in', async () => {
-    const user = userEvent.setup()
+  it('reopens on the turn budget it was left on', async () => {
     const first = render(<App />)
 
     // Away from the default, which is the only setting a reload can get wrong.
-    await chatMode(user)
+    await oneTurn()
     first.unmount()
 
     render(<App />)
-    expect(await screen.findByLabelText('mode')).toHaveValue('chat')
-    // And the controls a chat has no use for stay out of the way with it.
-    expect(screen.getByLabelText(/max turns/)).toBeDisabled()
+    expect(await screen.findByLabelText(/max turns/)).toHaveValue(1)
   })
 
   it('never keeps the credential, whatever else it keeps', async () => {
@@ -3311,7 +3233,6 @@ describe('taking the run away with you', () => {
     const clicked = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
 
     render(<App />)
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() =>
       expect(within(panel('Traffic')).getByText('5 exchanges')).toBeInTheDocument(),
@@ -3454,7 +3375,6 @@ describe('attaching a file', () => {
     })
     vi.stubGlobal('fetch', fetchMock)
     render(<App />)
-    await agentMode(user)
     await screen.findByRole('button', { name: 'Send' })
 
     pick([new File(['a known signal'], 'report.pdf', { type: 'application/pdf' })])
@@ -3479,7 +3399,6 @@ describe('attaching a file', () => {
     })
     vi.stubGlobal('fetch', fetchMock)
     render(<App />)
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     await waitFor(() => {
@@ -3602,7 +3521,6 @@ describe('attaching a file', () => {
       }),
     )
     render(<App />)
-    await agentMode(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() =>
       expect(within(panel('Traffic')).getByText('1 exchange')).toBeInTheDocument(),

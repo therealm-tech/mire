@@ -27,8 +27,8 @@ auth: keycloak-workload
 timeout_ms: 300000
 
 # `"stream": {{ stream | tojson }}` is what makes the composer's `stream` box do
-# anything: the flag comes from the call, so one profile serves both shapes — in
-# either mode, a single turn or the whole loop. The `| tojson` is not decoration
+# anything: the flag comes from the call, so one profile serves both shapes,
+# whatever the run's turn budget. The `| tojson` is not decoration
 # — MiniJinja renders a bare boolean as `True`, which is Python and is not JSON.
 #
 # Ticking it for a loop is worth one caveat: a streamed answer is decoded from
