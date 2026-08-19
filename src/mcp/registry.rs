@@ -5,17 +5,18 @@
 //! across auth modes without duplicating anything.
 //!
 //! Same loading policy as everywhere else — a bad entry is reported and skipped,
-//! the rest still work.
+//! the rest still work, and a server declared in two layered directories is the
+//! later one's, with the one it displaced named in the log.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
 use reqwest::{Client, Method};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, warn};
 use url::Url;
 
 use super::client::{McpClient, McpServer};
@@ -125,56 +126,79 @@ pub struct ActionDescriptor {
 pub struct McpRegistry {
     clients: BTreeMap<String, McpClient>,
     descriptors: Vec<McpDescriptor>,
+    /// Which file each server came from — see [`crate::auth::AuthRegistry`] for
+    /// why the file matters and not just the name.
+    sources: BTreeMap<String, PathBuf>,
     issues: Vec<LoadIssue>,
 }
 
 impl McpRegistry {
-    /// Loads `mcp.yaml` from the profiles directory.
+    /// Loads `mcp.yaml` from each of the profile directories, in order.
     ///
     /// Never fails: a missing file means no servers, and a broken one is an issue
     /// you can read in the UI rather than a refusal to start.
     #[must_use]
-    pub fn load(dir: &Path, http: &Client) -> Self {
-        let path = dir.join(MCP_REGISTRY_FILE);
+    pub fn load_dirs(dirs: &[impl AsRef<Path>], http: &Client) -> Self {
         let mut registry = Self::default();
+        for dir in dirs {
+            registry.read(&dir.as_ref().join(MCP_REGISTRY_FILE), http);
+        }
+        registry.descriptors.sort_by(|a, b| a.name.cmp(&b.name));
+        registry
+    }
 
+    /// Loads `mcp.yaml` from a single profiles directory.
+    #[must_use]
+    pub fn load(dir: &Path, http: &Client) -> Self {
+        Self::load_dirs(&[dir], http)
+    }
+
+    /// Folds one `mcp.yaml` in, on top of whatever earlier directories declared.
+    fn read(&mut self, path: &Path, http: &Client) {
         if !path.exists() {
             debug!(path = %path.display(), "no MCP registry");
-            return registry;
+            return;
         }
 
-        let text = match std::fs::read_to_string(&path) {
+        let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(error) => {
-                registry
-                    .issues
-                    .push(LoadIssue::new(&path, error.to_string()));
-                return registry;
+                self.issues.push(LoadIssue::new(path, error.to_string()));
+                return;
             }
         };
 
         let file: RegistryFile = match serde_yaml_ng::from_str(&text) {
             Ok(file) => file,
             Err(error) => {
-                registry.issues.push(LoadIssue::from_yaml(&path, &error));
-                return registry;
+                self.issues.push(LoadIssue::from_yaml(path, &error));
+                return;
             }
         };
 
         for config in file.servers {
-            if registry.clients.contains_key(&config.name) {
-                registry.issues.push(LoadIssue::new(
-                    &path,
-                    format!("duplicate MCP server `{}`", config.name),
-                ));
-                continue;
+            match self.sources.get(&config.name) {
+                Some(previous) if previous == path => {
+                    self.issues.push(LoadIssue::new(
+                        path,
+                        format!("duplicate MCP server `{}`", config.name),
+                    ));
+                    continue;
+                }
+                Some(previous) => warn!(
+                    name = %config.name,
+                    path = %path.display(),
+                    shadowed = %previous.display(),
+                    "MCP server overridden by a later directory"
+                ),
+                None => {}
             }
 
             let headers = match HeaderTemplates::compile(&config.headers) {
                 Ok(headers) => headers,
                 Err(message) => {
-                    registry.issues.push(LoadIssue::new(
-                        &path,
+                    self.issues.push(LoadIssue::new(
+                        path,
                         format!("MCP server `{}`: {message}", config.name),
                     ));
                     continue;
@@ -185,8 +209,8 @@ impl McpRegistry {
                 None => None,
                 Some(Ok(revision)) => Some(revision),
                 Some(Err(message)) => {
-                    registry.issues.push(LoadIssue::new(
-                        &path,
+                    self.issues.push(LoadIssue::new(
+                        path,
                         format!("MCP server `{}`: {message}", config.name),
                     ));
                     continue;
@@ -196,7 +220,7 @@ impl McpRegistry {
             let hooks = match compile_hooks(&config.name, &config.hooks) {
                 Ok(hooks) => hooks,
                 Err(message) => {
-                    registry.issues.push(LoadIssue::new(&path, message));
+                    self.issues.push(LoadIssue::new(path, message));
                     continue;
                 }
             };
@@ -218,7 +242,9 @@ impl McpRegistry {
                 hooks = server.hooks.len(),
                 "MCP server registered"
             );
-            registry.descriptors.push(McpDescriptor {
+            self.descriptors
+                .retain(|existing| existing.name != server.name);
+            self.descriptors.push(McpDescriptor {
                 name: server.name.clone(),
                 url: server.url.to_string(),
                 auth: server.auth.clone(),
@@ -227,13 +253,10 @@ impl McpRegistry {
                 uses_auth: server.headers.providers().map(str::to_owned).collect(),
                 hooks: server.hooks.iter().map(describe).collect(),
             });
-            registry
-                .clients
+            self.sources.insert(server.name.clone(), path.to_path_buf());
+            self.clients
                 .insert(server.name.clone(), McpClient::new(server, http.clone()));
         }
-
-        registry.descriptors.sort_by(|a, b| a.name.cmp(&b.name));
-        registry
     }
 
     /// Looks a server up by name.
@@ -623,6 +646,52 @@ mod tests {
         let registry = McpRegistry::load(&dir, &Client::new());
         assert!(registry.is_empty());
         assert!(registry.issues().is_empty());
+    }
+
+    #[test]
+    fn a_later_directory_takes_a_server_the_earlier_one_declared() {
+        let base = write(
+            "layer-base",
+            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n",
+        );
+        let mine = write(
+            "layer-mine",
+            "servers:\n  - name: files\n    url: https://staging.internal/mcp\n",
+        );
+
+        let registry = McpRegistry::load_dirs(&[&base, &mine], &Client::new());
+
+        assert_eq!(registry.descriptors().len(), 1);
+        assert_eq!(
+            registry.descriptors()[0].url,
+            "https://staging.internal/mcp"
+        );
+        assert!(registry.issues().is_empty(), "{:?}", registry.issues());
+    }
+
+    /// Overriding is only ever *across* directories. Twice in one file is still
+    /// the typo it always was.
+    #[test]
+    fn a_duplicate_inside_the_later_directory_is_still_reported() {
+        let base = write(
+            "layer-dup-base",
+            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n",
+        );
+        let mine = write(
+            "layer-dup-mine",
+            "servers:\n  - name: files\n    url: https://a.internal/mcp\n  - name: files\n    url: https://b.internal/mcp\n",
+        );
+
+        let registry = McpRegistry::load_dirs(&[&base, &mine], &Client::new());
+
+        assert_eq!(registry.descriptors().len(), 1);
+        assert_eq!(registry.descriptors()[0].url, "https://a.internal/mcp");
+        assert_eq!(registry.issues().len(), 1);
+        assert!(
+            registry.issues()[0]
+                .message
+                .contains("duplicate MCP server")
+        );
     }
 
     #[test]

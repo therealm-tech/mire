@@ -1,9 +1,15 @@
-//! Shared, hot-reloading view of the configuration directory.
+//! Shared, hot-reloading view of the configuration directories.
 //!
 //! Profiles, the auth registry, the MCP servers and the saved prompts all come
-//! from the same directory and reload together, as one atomic snapshot: a call
+//! from the same directories and reload together, as one atomic snapshot: a call
 //! that starts with a given profile also gets the auth registry that was current
 //! when it started.
+//!
+//! There can be more than one directory, and then they are layered in the order
+//! given: a name declared twice belongs to the last directory that declared it,
+//! and the one it displaced is named in a warning. That is what lets a shared,
+//! read-only directory be a base you put your own on top of, instead of
+//! something you have to copy before you can change one line of it.
 //!
 //! Readers take a cheap [`Arc`] snapshot; a reload swaps a whole new one in.
 
@@ -22,13 +28,13 @@ use crate::mcp::McpRegistry;
 use crate::profile::loader::{self, ProfileSet};
 use crate::prompt::PromptRegistry;
 
-/// How long the directory must stay quiet before a reload is triggered.
+/// How long the directories must stay quiet before a reload is triggered.
 ///
 /// Editors write in bursts (temp file, rename, chmod); reloading on every event
 /// would reload three times per save.
 const DEBOUNCE: Duration = Duration::from_millis(200);
 
-/// One consistent view of the configuration directory.
+/// One consistent view of the configuration directories.
 #[derive(Debug, Default)]
 pub struct Config {
     /// Profiles that parsed and validated, plus the files that did not.
@@ -44,7 +50,7 @@ pub struct Config {
 }
 
 impl Config {
-    /// Every issue found in the directory, whichever file it came from.
+    /// Every issue found, whichever directory and file it came from.
     pub fn issues(&self) -> impl Iterator<Item = &LoadIssue> {
         self.profiles
             .issues()
@@ -55,43 +61,47 @@ impl Config {
     }
 }
 
-/// The configuration directory and its current contents.
+/// The configuration directories and their current contents.
 #[derive(Debug)]
 pub struct ConfigStore {
-    dir: PathBuf,
+    dirs: Vec<PathBuf>,
     /// Handed to OIDC providers on every load, so their token exchanges use the
     /// same client — and therefore the same CA bundle — as everything else.
     http: Client,
     /// Browser logins, deliberately *outside* the snapshot. Everything else in
-    /// this directory is declarative and can be rebuilt from the files; a session
+    /// these directories is declarative and can be rebuilt from the files; a session
     /// cannot, and losing it on every save would make the flow unusable.
     sessions: Arc<SessionStore>,
     current: RwLock<Arc<Config>>,
 }
 
 impl ConfigStore {
-    /// Performs the initial load of `dir`.
+    /// Performs the initial load of `dirs`, layered in the order given.
     ///
     /// # Errors
     ///
-    /// Fails only if the directory cannot be read. Broken profiles and broken auth
-    /// entries are recorded as issues, not returned as errors.
-    pub fn load(dir: impl Into<PathBuf>, http: Client) -> std::io::Result<Arc<Self>> {
-        let dir = dir.into();
+    /// Fails only if one of the directories cannot be read — the error names
+    /// which. Broken profiles and broken auth entries are recorded as issues, not
+    /// returned as errors.
+    pub fn load(dirs: &[impl AsRef<Path>], http: Client) -> std::io::Result<Arc<Self>> {
+        // A slice rather than an `IntoIterator`: `&Path` is itself iterable, over
+        // its own components, so the looser signature would happily accept a
+        // single directory and read each of its segments as one.
+        let dirs: Vec<PathBuf> = dirs.iter().map(|dir| dir.as_ref().to_path_buf()).collect();
         let sessions = Arc::new(SessionStore::default());
-        let config = read(&dir, &http, &sessions)?;
+        let config = read(&dirs, &http, &sessions)?;
         Ok(Arc::new(Self {
-            dir,
+            dirs,
             http,
             sessions,
             current: RwLock::new(Arc::new(config)),
         }))
     }
 
-    /// The directory being watched.
+    /// The directories being watched, in precedence order — last one wins.
     #[must_use]
-    pub fn dir(&self) -> &Path {
-        &self.dir
+    pub fn dirs(&self) -> &[PathBuf] {
+        &self.dirs
     }
 
     /// Browser login sessions. Survives reloads; see the field's comment.
@@ -110,22 +120,22 @@ impl ConfigStore {
         Arc::clone(&self.current.read().expect("config store lock"))
     }
 
-    /// Re-reads the directory and swaps the result in. Errors are logged and the
-    /// previous snapshot is kept: a transiently unreadable directory must not
+    /// Re-reads the directories and swaps the result in. Errors are logged and
+    /// the previous snapshot is kept: a transiently unreadable directory must not
     /// blank the UI.
     ///
     /// # Panics
     ///
     /// Panics if the lock was poisoned by a previous panic while reloading.
     pub fn reload(&self) {
-        match read(&self.dir, &self.http, &self.sessions) {
+        match read(&self.dirs, &self.http, &self.sessions) {
             Ok(config) => {
                 info!(
                     profiles = config.profiles.len(),
                     providers = config.registry.descriptors().len(),
                     prompts = config.prompts.len(),
                     issues = config.issues().count(),
-                    dir = %self.dir.display(),
+                    dirs = %describe(&self.dirs),
                     "configuration reloaded"
                 );
                 for issue in config.issues() {
@@ -134,29 +144,38 @@ impl ConfigStore {
                 *self.current.write().expect("config store lock") = Arc::new(config);
             }
             Err(error) => {
-                error!(%error, dir = %self.dir.display(), "reload failed, keeping the previous configuration");
+                error!(%error, "reload failed, keeping the previous configuration");
             }
         }
     }
 }
 
-fn read(dir: &Path, http: &Client, sessions: &Arc<SessionStore>) -> std::io::Result<Config> {
+/// The directory list as one field value, for a log line.
+#[must_use]
+pub fn describe(dirs: &[PathBuf]) -> String {
+    dirs.iter()
+        .map(|dir| dir.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn read(dirs: &[PathBuf], http: &Client, sessions: &Arc<SessionStore>) -> std::io::Result<Config> {
     Ok(Config {
-        profiles: loader::load_dir(dir)?,
-        registry: AuthRegistry::load(dir, http, sessions),
-        mcp: McpRegistry::load(dir, http),
-        prompts: PromptRegistry::load(dir),
+        profiles: loader::load_dirs(dirs)?,
+        registry: AuthRegistry::load_dirs(dirs, http, sessions),
+        mcp: McpRegistry::load_dirs(dirs, http),
+        prompts: PromptRegistry::load_dirs(dirs),
     })
 }
 
-/// Watches the configuration directory and reloads `store` on change.
+/// Watches every configuration directory and reloads `store` on change.
 ///
 /// The returned [`RecommendedWatcher`] must be kept alive: dropping it stops the
 /// watch. Hand it to the caller rather than leaking it, so shutdown is clean.
 ///
 /// # Errors
 ///
-/// Fails if the platform watcher cannot be created or the directory cannot be watched.
+/// Fails if the platform watcher cannot be created or a directory cannot be watched.
 pub fn watch(store: Arc<ConfigStore>) -> notify::Result<RecommendedWatcher> {
     let (tx, mut rx) = mpsc::unbounded_channel::<()>();
 
@@ -169,7 +188,9 @@ pub fn watch(store: Arc<ConfigStore>) -> notify::Result<RecommendedWatcher> {
             }
             Err(error) => error!(%error, "configuration watcher error"),
         })?;
-    watcher.watch(store.dir(), RecursiveMode::NonRecursive)?;
+    for dir in store.dirs() {
+        watcher.watch(dir, RecursiveMode::NonRecursive)?;
+    }
 
     tokio::spawn(async move {
         while rx.recv().await.is_some() {
@@ -208,7 +229,7 @@ mod tests {
     #[test]
     fn a_reload_picks_up_a_new_profile() {
         let dir = temp_dir("profile");
-        let store = ConfigStore::load(&dir, Client::new()).unwrap();
+        let store = ConfigStore::load(std::slice::from_ref(&dir), Client::new()).unwrap();
         assert!(store.snapshot().profiles.is_empty());
 
         std::fs::write(dir.join("late.yaml"), PROFILE).unwrap();
@@ -220,7 +241,7 @@ mod tests {
     #[test]
     fn a_reload_picks_up_a_new_auth_provider() {
         let dir = temp_dir("auth");
-        let store = ConfigStore::load(&dir, Client::new()).unwrap();
+        let store = ConfigStore::load(std::slice::from_ref(&dir), Client::new()).unwrap();
         assert!(store.snapshot().registry.get("gateway").is_none());
 
         std::fs::write(
@@ -236,7 +257,7 @@ mod tests {
     #[test]
     fn a_reload_picks_up_a_new_prompt() {
         let dir = temp_dir("prompt");
-        let store = ConfigStore::load(&dir, Client::new()).unwrap();
+        let store = ConfigStore::load(std::slice::from_ref(&dir), Client::new()).unwrap();
         assert!(store.snapshot().prompts.is_empty());
 
         std::fs::write(
@@ -254,7 +275,7 @@ mod tests {
         let dir = temp_dir("broken-auth");
         std::fs::write(dir.join("auth.yaml"), "providers: [unclosed\n").unwrap();
 
-        let store = ConfigStore::load(&dir, Client::new()).unwrap();
+        let store = ConfigStore::load(std::slice::from_ref(&dir), Client::new()).unwrap();
         let config = store.snapshot();
 
         assert!(config.registry.get("anonymous").is_some());
@@ -264,7 +285,7 @@ mod tests {
     #[test]
     fn profiles_and_providers_swap_together() {
         let dir = temp_dir("atomic");
-        let store = ConfigStore::load(&dir, Client::new()).unwrap();
+        let store = ConfigStore::load(std::slice::from_ref(&dir), Client::new()).unwrap();
 
         std::fs::write(dir.join("late.yaml"), PROFILE).unwrap();
         std::fs::write(
@@ -280,6 +301,47 @@ mod tests {
     }
 
     #[test]
+    fn a_later_directory_wins_a_name_and_both_are_watched() {
+        let base = temp_dir("layer-base");
+        let mine = temp_dir("layer-mine");
+        std::fs::write(base.join("late.yaml"), PROFILE).unwrap();
+        std::fs::write(
+            mine.join("late.yaml"),
+            PROFILE.replace(
+                "https://models.internal/late",
+                "https://staging.internal/late",
+            ),
+        )
+        .unwrap();
+
+        let store = ConfigStore::load(&[&base, &mine], Client::new()).unwrap();
+
+        assert_eq!(store.dirs(), [base, mine.clone()]);
+        let config = store.snapshot();
+        assert_eq!(config.profiles.len(), 1);
+        assert_eq!(
+            config.profiles.get("late").unwrap().url.as_str(),
+            "https://staging.internal/late"
+        );
+
+        // And the win survives a reload, rather than depending on which
+        // directory happened to be read first.
+        std::fs::write(
+            mine.join("late.yaml"),
+            PROFILE.replace(
+                "https://models.internal/late",
+                "https://other.internal/late",
+            ),
+        )
+        .unwrap();
+        store.reload();
+        assert_eq!(
+            store.snapshot().profiles.get("late").unwrap().url.as_str(),
+            "https://other.internal/late"
+        );
+    }
+
+    #[test]
     fn a_reload_does_not_sign_you_out() {
         use std::time::Duration;
 
@@ -292,7 +354,7 @@ mod tests {
             "providers:\n  - name: kc\n    kind: oidc_browser\n    issuer: https://idp.internal/realms/mire\n    client_id: mire-ui\n",
         )
         .unwrap();
-        let store = ConfigStore::load(&dir, Client::new()).unwrap();
+        let store = ConfigStore::load(std::slice::from_ref(&dir), Client::new()).unwrap();
 
         store.sessions().store(
             "kc",

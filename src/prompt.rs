@@ -10,12 +10,12 @@
 //! your editor writes it, the watcher picks the change up — and the same loading
 //! policy applies: a bad entry is reported and skipped, the rest still work.
 
-use std::collections::BTreeSet;
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, warn};
 use validator::Validate;
 
 use crate::issue::LoadIssue;
@@ -49,44 +49,60 @@ pub struct Prompt {
 #[derive(Debug, Default)]
 pub struct PromptRegistry {
     prompts: Vec<Prompt>,
+    /// Which file each prompt came from — see [`crate::auth::AuthRegistry`] for
+    /// why the file matters and not just the name.
+    sources: BTreeMap<String, PathBuf>,
     issues: Vec<LoadIssue>,
 }
 
 impl PromptRegistry {
-    /// Loads `prompts.yaml` from the profiles directory.
+    /// Loads `prompts.yaml` from each of the profile directories, in order.
     ///
     /// Never fails: a missing file means no saved prompts — which is how every
     /// directory starts — and a broken one is an issue you can read in the UI
     /// rather than a refusal to start.
     #[must_use]
-    pub fn load(dir: &Path) -> Self {
-        let path = dir.join(PROMPT_REGISTRY_FILE);
+    pub fn load_dirs(dirs: &[impl AsRef<Path>]) -> Self {
         let mut registry = Self::default();
+        for dir in dirs {
+            registry.read(&dir.as_ref().join(PROMPT_REGISTRY_FILE));
+        }
+        registry
+    }
 
+    /// Loads `prompts.yaml` from a single profiles directory.
+    #[must_use]
+    pub fn load(dir: &Path) -> Self {
+        Self::load_dirs(&[dir])
+    }
+
+    /// Folds one `prompts.yaml` in, on top of whatever earlier directories said.
+    ///
+    /// An overridden prompt keeps its place in the list rather than moving to the
+    /// end: the order is somebody's arrangement, and replacing one text should
+    /// not reshuffle the library around it.
+    fn read(&mut self, path: &Path) {
         if !path.exists() {
             debug!(path = %path.display(), "no saved prompts");
-            return registry;
+            return;
         }
 
-        let text = match std::fs::read_to_string(&path) {
+        let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(error) => {
-                registry
-                    .issues
-                    .push(LoadIssue::new(&path, error.to_string()));
-                return registry;
+                self.issues.push(LoadIssue::new(path, error.to_string()));
+                return;
             }
         };
 
         let file: RegistryFile = match serde_yaml_ng::from_str(&text) {
             Ok(file) => file,
             Err(error) => {
-                registry.issues.push(LoadIssue::from_yaml(&path, &error));
-                return registry;
+                self.issues.push(LoadIssue::from_yaml(path, &error));
+                return;
             }
         };
 
-        let mut seen = BTreeSet::new();
         for prompt in file.prompts {
             if let Err(errors) = prompt.validate() {
                 // Named where there is a name to name it by. An entry that has
@@ -97,25 +113,39 @@ impl PromptRegistry {
                 } else {
                     format!("prompt `{}`", prompt.name)
                 };
-                registry
-                    .issues
-                    .push(LoadIssue::new(&path, format!("{subject}: {errors}")));
+                self.issues
+                    .push(LoadIssue::new(path, format!("{subject}: {errors}")));
                 continue;
             }
 
-            if !seen.insert(prompt.name.clone()) {
-                registry.issues.push(LoadIssue::new(
-                    &path,
-                    format!("duplicate prompt `{}`", prompt.name),
-                ));
-                continue;
+            match self.sources.get(&prompt.name) {
+                Some(previous) if previous == path => {
+                    self.issues.push(LoadIssue::new(
+                        path,
+                        format!("duplicate prompt `{}`", prompt.name),
+                    ));
+                    continue;
+                }
+                Some(previous) => warn!(
+                    name = %prompt.name,
+                    path = %path.display(),
+                    shadowed = %previous.display(),
+                    "prompt overridden by a later directory"
+                ),
+                None => {}
             }
 
             debug!(name = %prompt.name, "prompt loaded");
-            registry.prompts.push(prompt);
+            self.sources.insert(prompt.name.clone(), path.to_path_buf());
+            match self
+                .prompts
+                .iter_mut()
+                .find(|existing| existing.name == prompt.name)
+            {
+                Some(existing) => *existing = prompt,
+                None => self.prompts.push(prompt),
+            }
         }
-
-        registry
     }
 
     /// Every prompt that loaded, in the order the file declares them.
@@ -242,6 +272,63 @@ mod tests {
             "{:?}",
             registry.issues()
         );
+    }
+
+    #[test]
+    fn a_later_directory_takes_a_prompt_the_earlier_one_declared() {
+        let base = temp_dir("layer-base");
+        let mine = temp_dir("layer-mine");
+        write(&base, "prompts:\n  - name: ping\n    text: first\n");
+        write(&mine, "prompts:\n  - name: ping\n    text: second\n");
+
+        let registry = PromptRegistry::load_dirs(&[&base, &mine]);
+
+        assert_eq!(registry.len(), 1);
+        assert_eq!(registry.prompts()[0].text, "second");
+        assert!(registry.issues().is_empty(), "{:?}", registry.issues());
+    }
+
+    /// An overridden prompt keeps its place. The order is somebody's
+    /// arrangement; swapping one text should not send it to the bottom.
+    #[test]
+    fn an_overridden_prompt_keeps_its_place_in_the_list() {
+        let base = temp_dir("layer-order-base");
+        let mine = temp_dir("layer-order-mine");
+        write(
+            &base,
+            "prompts:\n  - name: ping\n    text: first\n  - name: pong\n    text: first\n",
+        );
+        write(&mine, "prompts:\n  - name: ping\n    text: second\n");
+
+        let registry = PromptRegistry::load_dirs(&[&base, &mine]);
+
+        let names: Vec<&str> = registry
+            .prompts()
+            .iter()
+            .map(|prompt| prompt.name.as_str())
+            .collect();
+        assert_eq!(names, ["ping", "pong"]);
+        assert_eq!(registry.prompts()[0].text, "second");
+    }
+
+    /// Overriding is only ever *across* directories. Twice in one file is still
+    /// the typo it always was.
+    #[test]
+    fn a_duplicate_inside_the_later_directory_is_still_reported() {
+        let base = temp_dir("layer-dup-base");
+        let mine = temp_dir("layer-dup-mine");
+        write(&base, "prompts:\n  - name: ping\n    text: first\n");
+        write(
+            &mine,
+            "prompts:\n  - name: ping\n    text: second\n  - name: ping\n    text: third\n",
+        );
+
+        let registry = PromptRegistry::load_dirs(&[&base, &mine]);
+
+        assert_eq!(registry.len(), 1);
+        assert_eq!(registry.prompts()[0].text, "second");
+        assert_eq!(registry.issues().len(), 1);
+        assert!(registry.issues()[0].message.contains("duplicate prompt"));
     }
 
     #[test]

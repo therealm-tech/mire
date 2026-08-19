@@ -42,19 +42,14 @@ async fn run(cli: Cli) -> Result<(), StartupError> {
         ca_bundle: cli.ca_bundle.clone(),
     })?;
 
-    let config = ConfigStore::load(&cli.profiles, client.clone()).map_err(|source| {
-        StartupError::Config {
-            path: cli.profiles.display().to_string(),
-            source,
-        }
-    })?;
+    let config = ConfigStore::load(&cli.profiles, client.clone()).map_err(StartupError::Config)?;
 
     {
         let snapshot = config.snapshot();
         info!(
             profiles = snapshot.profiles.len(),
             providers = snapshot.registry.descriptors().len(),
-            dir = %cli.profiles.display(),
+            dirs = %config::describe(&cli.profiles),
             "configuration loaded"
         );
         // Never fatal: coming up and showing the problem beats refusing to start.
@@ -122,13 +117,12 @@ async fn shutdown_signal() {
 /// Why `mire` could not start.
 #[derive(Debug, thiserror::Error)]
 enum StartupError {
-    #[error("cannot read the configuration directory `{path}`: {source}")]
-    Config {
-        path: String,
-        source: std::io::Error,
-    },
+    // The path is inside the error: with a list of directories, "no such file or
+    // directory" on its own does not say which one you got wrong.
+    #[error("cannot read the configuration directory {0}")]
+    Config(#[source] std::io::Error),
 
-    #[error("cannot watch the configuration directory: {0}")]
+    #[error("cannot watch the configuration directories: {0}")]
     Watch(#[from] notify::Error),
 
     #[error(transparent)]
