@@ -812,10 +812,11 @@ fn response_view(
                 script::decode_embedding(value, raw.status, &http.headers, source, include_vectors)
             } else {
                 let (embedding, vectors, trace) =
-                    embedding::decode(value, &profile.decode, include_vectors);
+                    embedding::decode(value, &profile.decode, inputs, include_vectors);
                 (embedding, vectors, None, trace)
             };
-            let checks = EmbeddingChecks::evaluate(&embedding, inputs, profile.expect.dimensions);
+            let checks =
+                EmbeddingChecks::evaluate(&embedding, &vectors, inputs, profile.expect.dimensions);
             let result = EmbeddingResult { embedding, checks };
             (
                 Some(Decoded::Embedding(Box::new(result))),
