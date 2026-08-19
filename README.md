@@ -417,7 +417,9 @@ Four things follow, each of which is a decision:
   attached — the button says how many it takes with it, and what leaves the
   conversation stays in **Traffic**, which keeps every exchange this tab ever
   made. **Send** stays greyed out until there is something to say, so no request
-  ever leaves without the transcript showing what it carried.
+  ever leaves without the transcript showing what it carried — unless the profile
+  says there is nothing to say at all, which is what
+  [`has_prompt: false`](#a-profile-with-nothing-to-type) is for.
 - **Only the answer the run finished on rejoins the history.** The tool calls in
   between and their results stay out of it: replaying them into the next request
   without their results is how you get a `400` from an endpoint that was working
@@ -1217,6 +1219,49 @@ curl -sS -X POST \
 `docker compose up -d` serves something for it to talk to — see [A stack to point
 it at](#a-stack-to-point-it-at). The pyannote variant is written out in a comment
 beside it.
+
+### A profile with nothing to type
+
+The composer holds **Send** back until there is something in the box, because a
+request nobody can see the input of is the one thing this tool exists not to
+send. On a transcriber that rule is backwards: the input is the audio, and the
+box is a place to write a question the endpoint is never asked.
+
+So a profile can say so:
+
+```yaml
+name: whisper
+kind: chat
+has_prompt: false
+url: http://127.0.0.1:9000/v1/audio/transcriptions
+```
+
+`true` is the default and every other profile takes it. `false` does two things
+and no more: the message box and the saved-prompt picker go away, and **Send**
+goes out with an empty conversation instead of waiting. **Attach**, **stream**,
+**max turns**, the servers, the traffic and the `401` replay are all unchanged —
+this is a statement about the composer, not about the wire.
+
+Nothing else is special-cased. A template on such a profile still renders, now
+against an empty `messages`, which is the same rule `uploads` and `stream`
+follow: what goes out is what the request says goes out.
+
+`profiles/whisper.yaml` declares it, and moves whisper's `prompt` field — which
+is a vocabulary hint rather than an instruction — to a knob, since that is what
+it always was:
+
+```yaml
+    prompt: '{{ params.prompt | default("") }}'
+```
+
+```sh
+curl -sS localhost:8787/api/call -H 'content-type: application/json' \
+  -d '{"profile": "whisper", "uploads": ["<id>"],
+       "params": {"prompt": "mire, Keycloak, speaches"}}'
+```
+
+Put `{{ messages[-1].content }}` back and drop the `has_prompt: false` if you
+would rather type it.
 
 ## Really calling tools
 

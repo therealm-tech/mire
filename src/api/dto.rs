@@ -29,6 +29,9 @@ pub struct ProfileSummary {
     pub name: String,
     /// What the endpoint does.
     pub kind: ProfileKind,
+    /// `false` when the profile takes no typed message, so the composer hides
+    /// the box instead of holding **Send** back for one.
+    pub has_prompt: bool,
     /// Where it points.
     pub url: Url,
     /// Auth provider the profile defaults to, for the call to the model.
@@ -45,6 +48,7 @@ impl From<&Profile> for ProfileSummary {
         Self {
             name: profile.name.clone(),
             kind: profile.kind,
+            has_prompt: profile.has_prompt,
             url: profile.url.clone(),
             auth: profile.auth.clone(),
             source: profile.source.display().to_string(),

@@ -7319,6 +7319,68 @@ async fn a_multipart_profile_sends_the_file_and_its_knobs_as_form_parts() {
     assert!(file_at < model_at, "{form}");
 }
 
+/// The other half of a transcriber: there is nothing to type.
+///
+/// `has_prompt: false` is the profile saying so, and both ends of that have to
+/// hold — the listing carries it, so the composer knows to drop its box, and a
+/// call arriving with no message at all is a call like any other rather than an
+/// empty request nobody meant to send.
+#[tokio::test]
+async fn a_profile_declaring_no_prompt_is_called_with_nothing_typed() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/transcriptions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"text": "hello there"})))
+        .mount(&server)
+        .await;
+
+    let profile = transcription_profile(&format!("{}/v1/audio/transcriptions", server.uri()))
+        .replace("kind: chat", "kind: chat\nhas_prompt: false")
+        // The vocabulary hint is a knob rather than a sentence once the box is
+        // gone, which is exactly what `params` is for.
+        .replace(
+            r"prompt: '{{ messages[-1].content }}'",
+            r#"prompt: '{{ params.prompt | default("") }}'"#,
+        );
+    let mire = Harness::start(&[("whisper.yaml", profile)]).await;
+
+    let listed = mire.get("/api/profiles").await;
+    assert_eq!(listed["profiles"][0]["hasPrompt"], false);
+
+    let (_, stored) = mire.upload("meeting.mp3", b"ID3\x04audio").await;
+
+    // No `prompt`, no `messages`: the file is the whole of the signal going in.
+    let (status, _, body) = mire
+        .call(json!({
+            "profile": "whisper",
+            "uploads": [stored["id"].as_str().expect("id")],
+        }))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["response"]["decoded"]["content"], "hello there");
+
+    let sent = server.received_requests().await.unwrap();
+    let form = String::from_utf8_lossy(&sent[0].body);
+    assert!(form.contains(r#"filename="meeting.mp3""#), "{form}");
+    // The hint field still goes out, empty, because the profile still declares
+    // it — a field nobody set is not a field that disappears.
+    assert!(form.contains(r#"name="prompt""#), "{form}");
+}
+
+/// Nothing declared is a profile with a question to ask, which is every profile
+/// written before the field existed.
+#[tokio::test]
+async fn a_profile_takes_a_prompt_unless_it_says_otherwise() {
+    let harness = Harness::start(&[(
+        "chat.yaml",
+        openai_profile("https://models.internal/v1/chat/completions"),
+    )])
+    .await;
+
+    let body = harness.get("/api/profiles").await;
+    assert_eq!(body["profiles"][0]["hasPrompt"], true);
+}
+
 /// The trace has to say what went out, and for a form that is the parts — not a
 /// body, which a form does not have, and not the bytes, which nobody can read.
 #[tokio::test]

@@ -30,6 +30,14 @@ export const profileKindSchema = z.enum(['chat', 'embedding'])
 export const profileSummarySchema = z.object({
   name: z.string(),
   kind: profileKindSchema,
+  /**
+   * Whether this profile takes a typed message.
+   *
+   * `false` on an endpoint whose input is not text — a transcriber reading an
+   * attachment, a classifier reading a form: the composer then has no box, and
+   * **Send** goes out with an empty conversation.
+   */
+  hasPrompt: z.boolean(),
   url: z.string(),
   /**
    * The model call's default credential.
