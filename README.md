@@ -594,7 +594,7 @@ Three kinds of card, each showing what went out and what came back:
 | --- | --- | --- | --- |
 | **Request** | Method, URL, masked headers, body, *Copy as curl* | The JSON-RPC that went out, with its headers and the revision it went out on | The arguments the model produced |
 | **Decode** | Which configured path matched which field, which missed, and everything that was tried | — | Whether those arguments match the schema the tool was declared with |
-| **Response** | Status, latency, decoded content and tool calls, whatever the endpoint said went wrong, stream counters, the body, the raw JSON as a tree | Status, latency, and the JSON-RPC that came back | What the tool handed back, and whether it reported a problem |
+| **Response** | Status, latency, decoded content and tool calls, whatever the endpoint said went wrong, stream counters, the body, the raw JSON as a tree | Status, latency, and the JSON-RPC that came back | Status, latency, what the tool handed back, and whether it reported a problem |
 | **Captured** | — | — | Every variable [`agent.capture`](#keeping-something-a-tool-call-answered) pulled out of that answer, by name and by worth — only when a rule matched |
 
 **The transcript points at the cards.** A tool row in the conversation is a
@@ -654,10 +654,19 @@ next request carried it *like this*. Split across panels, or reset per turn, and
 the comparison stops being possible.
 
 Every tool card says whether it really left the process: a call that did names
-the server that answered and how long it took, and one that did not is marked
-**simulated, nothing executed** (see [agent mode](#agent-mode)). A
-plausible-looking result from a tool nothing wired up is the easiest way to
-believe an integration works.
+the server that answered, the status it answered with and how long it took, and
+one that did not is marked **simulated, nothing executed** (see [agent
+mode](#agent-mode)). A plausible-looking result from a tool nothing wired up is
+the easiest way to believe an integration works.
+
+**The status is on the tool card, not only on the round trip beside it.** A
+`tools/call` that came back `401` is a tool call that failed for a reason the
+words "tool failed" do not carry, and reading it used to mean finding the
+protocol card underneath. It reads like the others now — the badge on the folded
+summary line, `never answered` when the request never reached anybody at all,
+and nothing at all when nothing was sent, which is what a simulated tool and a
+call [a gate refused](#hooks-something-that-happens-around-a-tool-call) have in
+common.
 
 The list **accumulates across the whole conversation** rather than resetting on
 every send, because "it worked on turn one and not on turn four" is a comparison

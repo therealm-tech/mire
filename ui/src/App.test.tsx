@@ -1283,6 +1283,7 @@ function turnFixture() {
         call: { id: 'c1', name: 'get_weather', arguments: { city: 'Paris' } },
         source: 'mcp',
         server: 'weather',
+        status: 200,
         latencyMs: 42,
         reportedError: false,
         // Typed, not inferred: an empty literal infers `never[]`, and a variant
@@ -2715,6 +2716,78 @@ describe('reading a run', () => {
     expect(traffic.getByText('1 of 5')).toBeInTheDocument()
     expect(traffic.getByRole('button', { name: /Turn 1 · get_weather/ })).toBeInTheDocument()
     expect(traffic.queryByRole('button', { name: /Turn 1 · model/ })).not.toBeInTheDocument()
+  })
+
+  it('says what the round trip under a tool call answered', async () => {
+    const user = userEvent.setup()
+    vi.stubGlobal('fetch', toolRunApi())
+
+    render(<App />)
+    await agentMode(user)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    // On the folded summary line, where the model and protocol cards already
+    // put theirs: reading a run means comparing them, and one of the three
+    // making you open it first is one too many.
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Turn 1 · get_weather/ })).toBeInTheDocument(),
+    )
+    expect(within(card(/Turn 1 · get_weather/)).getByText('200')).toBeInTheDocument()
+  })
+
+  it('says what refused a tool call, not only that the tool failed', async () => {
+    const user = userEvent.setup()
+    const turn = turnFixture()
+    const refused = {
+      ...turn,
+      tools: turn.tools.map((tool) => ({
+        ...tool,
+        status: 401,
+        result: '{"error": "MCP server `weather`: tools/call answered 401"}',
+        error: 'MCP server `weather`: tools/call answered 401',
+      })),
+    }
+    vi.stubGlobal('fetch', toolRunApi([refused]))
+
+    render(<App />)
+    await agentMode(user)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Turn 1 · get_weather/ })).toBeInTheDocument(),
+    )
+    // "tool failed" says the loop got nothing back; the status says who said so,
+    // which is the difference between a broken tool and a missing credential.
+    const tool = within(card(/Turn 1 · get_weather/))
+    expect(tool.getByText('401')).toBeInTheDocument()
+    expect(tool.getByText('tool failed')).toBeInTheDocument()
+  })
+
+  it('says a tool call that never reached a server never answered', async () => {
+    const user = userEvent.setup()
+    const turn = turnFixture()
+    const lost = {
+      ...turn,
+      tools: turn.tools.map((tool) => ({
+        ...tool,
+        status: 0,
+        result: '{"error": "connection refused"}',
+        error: 'MCP server `weather`: connection refused',
+      })),
+    }
+    vi.stubGlobal('fetch', toolRunApi([lost]))
+
+    render(<App />)
+    await agentMode(user)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Turn 1 · get_weather/ })).toBeInTheDocument(),
+    )
+    // `0` is not a status anybody answered with, so it is not shown as one.
+    const tool = within(card(/Turn 1 · get_weather/))
+    expect(tool.getByText('never answered')).toBeInTheDocument()
+    expect(tool.queryByText('0')).not.toBeInTheDocument()
   })
 
   it('drops a filter that would hide the card being pointed at', async () => {
