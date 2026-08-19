@@ -8,10 +8,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use reqwest::{Client, redirect};
+use reqwest::multipart::{Form, Part};
+use reqwest::{Client, RequestBuilder, redirect};
 use tracing::debug;
 
-use crate::render::RenderedRequest;
+use crate::render::{PartContent, RenderedBody, RenderedRequest};
 
 /// Redirects followed before giving up. Generous enough for a gateway chain,
 /// small enough that a loop is reported rather than hung on.
@@ -85,14 +86,16 @@ pub async fn send(
 ) -> Result<RawResponse, TransportError> {
     let started = Instant::now();
 
-    let response = client
-        .request(request.method.into(), request.url.clone())
-        .headers(request.headers.clone())
-        .body(request.body.clone())
-        .timeout(timeout)
-        .send()
-        .await
-        .map_err(|error| classify(error, timeout))?;
+    let response = carrying(
+        client
+            .request(request.method.into(), request.url.clone())
+            .headers(request.headers.clone())
+            .timeout(timeout),
+        &request.body,
+    )?
+    .send()
+    .await
+    .map_err(|error| classify(error, timeout))?;
 
     let status = response.status().as_u16();
     let headers = header_map(&response);
@@ -209,14 +212,16 @@ pub async fn open(
 ) -> Result<OpenResponse, TransportError> {
     let started = Instant::now();
 
-    let response = client
-        .request(request.method.into(), request.url.clone())
-        .headers(request.headers.clone())
-        .body(request.body.clone())
-        .timeout(timeout)
-        .send()
-        .await
-        .map_err(|error| classify(error, timeout))?;
+    let response = carrying(
+        client
+            .request(request.method.into(), request.url.clone())
+            .headers(request.headers.clone())
+            .timeout(timeout),
+        &request.body,
+    )?
+    .send()
+    .await
+    .map_err(|error| classify(error, timeout))?;
 
     let headers = header_map(&response);
     let content_type = headers.get("content-type").cloned();
@@ -235,6 +240,63 @@ pub async fn open(
         inner: response,
         timeout,
     })
+}
+
+/// Puts the rendered body on the builder.
+///
+/// A form is encoded here rather than at render time because a request is sent
+/// more than once — replayed after a `401`, repeated by the determinism check —
+/// and a [`Form`] is consumed by the send that uses it. Each attempt therefore
+/// gets its own boundary, which is also why the request panel shows the parts
+/// and not a boundary: it would be true of one attempt and a guess about the
+/// next.
+///
+/// The `content-type` is the encoder's, not ours. [`crate::exec`] leaves the
+/// header off for a form precisely because `reqwest` *appends* rather than
+/// replaces here — two of them, and a server reading the first is told `json`
+/// about a body that is not.
+fn carrying(
+    builder: RequestBuilder,
+    body: &RenderedBody,
+) -> Result<RequestBuilder, TransportError> {
+    match body {
+        RenderedBody::Json(text) => Ok(builder.body(text.clone())),
+        RenderedBody::Multipart(parts) => {
+            let mut form = Form::new();
+            for part in parts {
+                form = match &part.content {
+                    PartContent::Text { value, media_type } => {
+                        let encoded = Part::text(value.clone());
+                        let encoded = match media_type {
+                            Some(media) => encoded.mime_str(media).map_err(|source| {
+                                TransportError::Multipart {
+                                    field: part.field.clone(),
+                                    message: format!("`{media}` is not a media type: {source}"),
+                                }
+                            })?,
+                            None => encoded,
+                        };
+                        form.part(part.field.clone(), encoded)
+                    }
+                    PartContent::File(file) => {
+                        let encoded = Part::bytes(file.bytes.clone())
+                            .file_name(file.filename.clone())
+                            .mime_str(&file.media_type)
+                            .map_err(|source| TransportError::Multipart {
+                                field: part.field.clone(),
+                                message: format!(
+                                    "`{}` is not a media type: {source}",
+                                    file.media_type
+                                ),
+                            })?;
+                        form.part(part.field.clone(), encoded)
+                    }
+                };
+            }
+            debug!(parts = parts.len(), "encoding a multipart body");
+            Ok(builder.multipart(form))
+        }
+    }
 }
 
 fn header_map(response: &reqwest::Response) -> BTreeMap<String, String> {
@@ -352,6 +414,20 @@ pub enum TransportError {
         path: PathBuf,
         /// Underlying TLS error.
         source: reqwest::Error,
+    },
+
+    /// A form part could not be encoded.
+    ///
+    /// In practice a `type:` the profile wrote that is not a media type. Caught
+    /// here rather than sent, because a part with a broken `content-type` is a
+    /// request the endpoint would only be able to complain about in the vaguest
+    /// possible terms.
+    #[error("multipart field `{field}`: {message}")]
+    Multipart {
+        /// The form field that could not be encoded.
+        field: String,
+        /// Why.
+        message: String,
     },
 
     /// The endpoint did not answer within the profile's timeout.

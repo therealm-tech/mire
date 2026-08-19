@@ -260,6 +260,12 @@ impl From<RenderError> for ApiError {
                 "no_request_source",
                 message,
             ),
+            // The profile is fine and the call is not: a form field naming a
+            // file that was never attached is something the caller can fix by
+            // attaching it, which is what makes this a `422` and not a `500`.
+            RenderError::Multipart { .. } => {
+                Self::new(StatusCode::UNPROCESSABLE_ENTITY, "multipart_error", message)
+            }
             RenderError::InvalidJson {
                 line,
                 column,
@@ -288,6 +294,11 @@ impl From<TransportError> for ApiError {
             }
             TransportError::Send { .. } => {
                 Self::new(StatusCode::BAD_GATEWAY, "endpoint_unreachable", message)
+            }
+            // A `type:` in the profile that is not a media type. Nothing left
+            // the process, and the fix is in the file.
+            TransportError::Multipart { .. } => {
+                Self::new(StatusCode::UNPROCESSABLE_ENTITY, "multipart_error", message)
             }
             TransportError::Build(_)
             | TransportError::CaBundleRead { .. }

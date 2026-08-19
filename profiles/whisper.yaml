@@ -1,0 +1,113 @@
+# A transcription endpoint, which does not read a JSON document at all.
+#
+# Whisper — and every diariser, classifier and OCR service shaped like it — takes
+# a `multipart/form-data`: the audio as bytes, and a handful of knobs as ordinary
+# form fields beside it. That is what `request.multipart:` is, and it is the
+# third way to build a body, beside `template:` and `script:`.
+#
+# Nothing here is special-cased in `mire`. A file becomes a part because this
+# file said so, exactly as an attachment becomes a data URL in qwen3.yaml because
+# that template said so. Attach an audio file in the composer, press Send, and
+# read the parts in Traffic.
+#
+# `docker compose up -d` serves this on 9000 — `speaches`, which is the current
+# name of what used to be `faster-whisper-server`. Point `url:` somewhere else
+# and nothing here has to change:
+#
+#   https://api.openai.com/v1/audio/transcriptions  the hosted one, plus `auth:`
+#                                                   and `model: whisper-1`
+---
+name: whisper
+kind: chat
+url: http://127.0.0.1:9000/v1/audio/transcriptions
+# Transcribing an hour of audio is not a 30-second request.
+timeout_ms: 600000
+
+# One entry per form field, in the order they go out.
+#
+# A bare value is a text field, and it is a template like any other — so
+# `{{ params.language }}` and `{{ messages[-1].content }}` work here exactly as
+# they do in a `template:`. Numbers and booleans are fine written as themselves;
+# a form sends text either way, and `temperature: 0` is how anybody writes a
+# knob.
+#
+# `upload:` is what makes a field a file. It names uploads of the call — the
+# object itself, a list of them, or a string matching a `path`, `name` or `id` —
+# and a field naming a file nobody attached fails the call rather than sending a
+# form with a hole in it. That refusal is the whole point: an endpoint asked to
+# validate a form with no file in it answers `422` about a field nobody here ever
+# mentioned, and finding that out from the endpoint costs an afternoon.
+#
+# The two things never guessed at: which fields are files, and which are text.
+# A `model: whisper-1` that turned into a file part because something in the
+# upload directory happened to be called `whisper-1` is exactly the surprise this
+# tool exists not to have.
+request:
+  multipart:
+    file:
+      upload: '{{ uploads[0] }}'
+      # Both optional, and both overrides of something guessed. The media type
+      # comes from the extension — `.mp3` is `audio/mpeg`, `.wav` is `audio/wav`
+      # — and `application/octet-stream` when the extension gave nothing away.
+      # Uncomment either when the guess is not good enough: some endpoints
+      # validate the extension in `filename` before they look at the bytes.
+      #
+      # type: audio/wav
+      # filename: recording.wav
+    # What the compose stack preloads. `speaches` names models by their Hugging
+    # Face repo, and asking for one it has not got makes it fetch the model
+    # mid-call — a first request that looks like a hang. `tiny` is lighter and
+    # noticeably worse; `small` is better and four times the download.
+    model: Systran/faster-whisper-base
+    # `json` is the shape the decode cascade below reads. Ask for `verbose_json`
+    # and the segments arrive too — `$.segments` is then worth a look in the raw
+    # response, which is where anything this profile does not decode still shows
+    # up.
+    response_format: json
+    temperature: 0
+    # The prompt field is a real whisper knob: a hint at vocabulary and spelling,
+    # not an instruction. So the composer's message box is the natural place for
+    # it — type the names the recording is full of and they come back spelled
+    # right.
+    prompt: '{{ messages[-1].content }}'
+
+# `kind: chat` and a one-line cascade, because a transcript *is* a completion:
+# text in the answer, read out of wherever the endpoint put it. Nothing
+# downstream had to learn what a transcriber is.
+#
+# The two paths cover the two shapes seen in the wild: the OpenAI-compatible one
+# answers `{"text": "..."}`, and Ollama-style wrappers put it under `result`.
+decode:
+  content:
+    - $.text
+    - $.result.text
+  # `$` rather than `$.error`, for the same reason qwen3.yaml gives: a gateway
+  # refusing the call puts its sentence in `error_description`, and pointing one
+  # level down hands back the code and drops the only line that explains it.
+  error:
+    - $
+
+# A diariser is the same file with different fields. pyannote-style services
+# usually want the audio plus a JSON blob of options, which is what `type:` on a
+# text field is for — the part goes out declaring `application/json` rather than
+# as a plain form field:
+#
+# request:
+#   multipart:
+#     file:
+#       upload: '{{ uploads[0] }}'
+#     config:
+#       text: '{{ params.config | tojson }}'
+#       type: application/json
+#
+# Then `params.config` is set per call — in the composer, or over the API:
+#
+#   POST /api/call -d '{"profile": "pyannote", "uploads": ["<id>"],
+#                       "params": {"config": {"num_speakers": 2}}}'
+#
+# Several files under one field is a list, or an expression producing one. They
+# go out as several parts under that same name, which is what every server-side
+# upload handler already reads:
+#
+#     file:
+#       upload: '{{ uploads }}'

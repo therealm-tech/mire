@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
+use minijinja::value::{Value as Rendered, ValueKind};
 use serde::Serialize;
 use tracing::{debug, info};
 
@@ -307,6 +308,22 @@ fn content_type_for(name: &str) -> Option<String> {
         "md" => "text/markdown",
         "txt" | "log" => "text/plain",
         "yaml" | "yml" => "application/yaml",
+        // Audio, because a transcriber is the whole reason a form body exists
+        // here and every one of them reads the part's type. An endpoint handed
+        // `application/octet-stream` for an MP3 is one that either guesses or
+        // refuses, and both are worse than saying so. A profile that disagrees
+        // still overrides it with `type:`.
+        "mp3" | "mpga" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "flac" => "audio/flac",
+        "ogg" | "oga" => "audio/ogg",
+        "opus" => "audio/opus",
+        "m4a" => "audio/mp4",
+        "aac" => "audio/aac",
+        "webm" => "audio/webm",
+        // A video type, because that is what it is — a transcriber that accepts
+        // a recording in this container accepts it under this name.
+        "mp4" => "video/mp4",
         _ => return None,
     };
     Some(media.to_owned())
@@ -404,6 +421,96 @@ pub enum UploadError {
         #[source]
         source: std::io::Error,
     },
+}
+
+/// The media type a file goes out as.
+///
+/// The extension's guess, made when the file was read back off the disk.
+/// `application/octet-stream` when the extension gave nothing away, which is
+/// what a part with no better idea is supposed to say.
+#[must_use]
+pub fn mime_of(upload: &UploadRef) -> &str {
+    upload
+        .content_type
+        .as_deref()
+        .unwrap_or("application/octet-stream")
+}
+
+/// The uploads one rendered template value names.
+///
+/// Three forms, because a template can sensibly produce three things: an upload
+/// whole (`{{ uploads[0] }}`), a list of them (`{{ uploads }}`), or a string
+/// naming one — its `path`, its `name` or its `id`. Anything else is an error
+/// rather than a file quietly left out of a form.
+///
+/// Shared by a hook's `multipart:` and a profile's, so the two cannot end up
+/// with different answers to "which file did you mean". In a tool whose whole
+/// pitch is that what went out is written down, that is the divergence least
+/// worth having.
+///
+/// `field` is only ever read back in an error message, naming the form field
+/// that asked.
+///
+/// # Errors
+///
+/// Fails when the value is not a file, a list of them, or the name of one — and
+/// when it names a file this run is not carrying.
+pub fn resolve<'a>(
+    value: &Rendered,
+    uploads: &'a [UploadRef],
+    field: &str,
+) -> Result<Vec<&'a UploadRef>, String> {
+    if let Some(text) = value.as_str() {
+        return named(text, uploads, field).map(|upload| vec![upload]);
+    }
+
+    if value.kind() == ValueKind::Seq {
+        let items = value
+            .try_iter()
+            .map_err(|error| format!("`{field}`: {error}"))?;
+        let mut found = Vec::new();
+        for item in items {
+            found.extend(resolve(&item, uploads, field)?);
+        }
+        return Ok(found);
+    }
+
+    // An upload as the context carries it. Any of the three identifying fields
+    // will do, and `path` is the one a file is most likely to have written.
+    for attribute in ["path", "id", "name"] {
+        if let Ok(inner) = value.get_attr(attribute)
+            && let Some(text) = inner.as_str()
+        {
+            return named(text, uploads, field).map(|upload| vec![upload]);
+        }
+    }
+
+    Err(format!(
+        "`{field}`: that is not a file, and not the name of one"
+    ))
+}
+
+/// The upload a path, name or id points at.
+fn named<'a>(text: &str, uploads: &'a [UploadRef], field: &str) -> Result<&'a UploadRef, String> {
+    uploads
+        .iter()
+        .find(|upload| upload.path == text || upload.name == text || upload.id == text)
+        .ok_or_else(|| {
+            format!(
+                "`{field}`: `{text}` is not a file this run is carrying ({})",
+                carrying(uploads)
+            )
+        })
+}
+
+/// What the run has to offer, for the error saying it had none of it.
+#[must_use]
+pub fn carrying(uploads: &[UploadRef]) -> String {
+    if uploads.is_empty() {
+        return "nothing was attached to this run".to_owned();
+    }
+    let names: Vec<&str> = uploads.iter().map(|upload| upload.name.as_str()).collect();
+    format!("it is carrying {}", names.join(", "))
 }
 
 #[cfg(test)]

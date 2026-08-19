@@ -26,7 +26,10 @@ use crate::decode::{
 use crate::message::Message;
 use crate::profile::{DecodeSpec, HttpMethod, Profile, ProfileKind};
 use crate::redact::{Redactor, Secret};
-use crate::render::{RenderContext, RenderError, RenderedRequest, render_body};
+use crate::render::{
+    PartContent, RenderContext, RenderError, RenderedBody, RenderedPart, RenderedRequest,
+    render_body,
+};
 use crate::transport::{self, TransportError};
 use crate::uploads::UploadRef;
 
@@ -83,8 +86,40 @@ pub struct RequestView {
     pub url: String,
     /// Headers, masked.
     pub headers: BTreeMap<String, String>,
-    /// Body as rendered.
+    /// Body as rendered. Empty for a `multipart:` request, whose parts are in
+    /// [`parts`](Self::parts) — a form is not text.
     pub body: String,
+    /// The form fields, when the request is a `multipart:`. Empty otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<PartView>,
+}
+
+/// One part of a form, as the trace describes it.
+///
+/// A file's bytes are named, never repeated: they went out on the wire, and a
+/// panel carrying 25 MB of base64 beside them would cost everything and tell the
+/// reader nothing. A text field's value *is* shown — it is a knob somebody set,
+/// and it is the half of the form worth reading.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PartView {
+    /// The form field it went out under, as the profile named it.
+    pub field: String,
+    /// The part's `content-type`, when there is one to declare.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    /// A text field's value, masked. Absent for a file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// A file's `filename`. Absent for a text field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    /// The upload's handle, for a file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upload_id: Option<String>,
+    /// A file's size in bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
 }
 
 /// What came back.
@@ -209,7 +244,7 @@ impl Runner {
 
         let body = render_body(profile, &render_context(profile, &input))
             .map_err(|error| ExecError::Render(redact_render_error(error, &redactor)))?;
-        let base_headers = base_headers(profile)?;
+        let base_headers = base_headers(profile, &body)?;
 
         let mut headers = base_headers.clone();
         redactor.merge(
@@ -321,7 +356,7 @@ impl Runner {
 
         let body = render_body(profile, &render_context(profile, &input))
             .map_err(|error| ExecError::Render(redact_render_error(error, &redactor)))?;
-        let base_headers = base_headers(profile)?;
+        let base_headers = base_headers(profile, &body)?;
 
         let mut headers = base_headers.clone();
         redactor.merge(
@@ -720,9 +755,17 @@ fn render_context(profile: &Profile, input: &CallInput) -> RenderContext {
 }
 
 /// Headers common to every attempt: `content-type`, then whatever the profile adds.
-fn base_headers(profile: &Profile) -> Result<HeaderMap, ExecError> {
+///
+/// A form has no `content-type` here, and cannot be given one. The encoder
+/// settles it at send time — boundary and all, which is the half nothing written
+/// in a profile could get right — and `reqwest` *appends* rather than replaces,
+/// so a header surviving this far would go out beside the real one. A profile
+/// that declares one for a `multipart:` gets it dropped, loudly enough to find.
+fn base_headers(profile: &Profile, body: &RenderedBody) -> Result<HeaderMap, ExecError> {
     let mut headers = HeaderMap::new();
-    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    if body.as_json().is_some() {
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    }
 
     for (name, value) in &profile.headers {
         let name = HeaderName::try_from(name.to_ascii_lowercase()).map_err(|_| {
@@ -736,6 +779,13 @@ fn base_headers(profile: &Profile) -> Result<HeaderMap, ExecError> {
             header: name.as_str().to_owned(),
         })?;
         headers.insert(name, value);
+    }
+
+    if body.as_json().is_none() && headers.remove(CONTENT_TYPE).is_some() {
+        warn!(
+            profile = %profile.name,
+            "`headers.content-type` dropped: a multipart's is the encoder's to write"
+        );
     }
 
     Ok(headers)
@@ -765,7 +815,38 @@ fn request_view(request: &RenderedRequest, redactor: &Redactor) -> RequestView {
         method: request.method,
         url: request.url.to_string(),
         headers: request.display_headers(redactor),
-        body: redactor.text(&request.body),
+        body: request
+            .body
+            .as_json()
+            .map(|body| redactor.text(body))
+            .unwrap_or_default(),
+        parts: request
+            .body
+            .parts()
+            .iter()
+            .map(|part| part_view(part, redactor))
+            .collect(),
+    }
+}
+
+fn part_view(part: &RenderedPart, redactor: &Redactor) -> PartView {
+    match &part.content {
+        PartContent::Text { value, media_type } => PartView {
+            field: part.field.clone(),
+            content_type: media_type.clone(),
+            value: Some(redactor.text(value)),
+            filename: None,
+            upload_id: None,
+            size: None,
+        },
+        PartContent::File(file) => PartView {
+            field: part.field.clone(),
+            content_type: Some(file.media_type.clone()),
+            value: None,
+            filename: Some(file.filename.clone()),
+            upload_id: Some(file.id.clone()),
+            size: Some(file.bytes.len() as u64),
+        },
     }
 }
 

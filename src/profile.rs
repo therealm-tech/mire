@@ -125,13 +125,17 @@ pub enum RequestSource<'a> {
     Template(&'a str),
     /// A Rhai script.
     Script(&'a ScriptSource),
+    /// A `multipart/form-data`, one entry per field.
+    Multipart(&'a MultipartSpec),
 }
 
 /// How the request body is produced.
 ///
-/// Exactly one of the two, and the template is the one to reach for: a script is
-/// code in a config file, and it earns its place only when the template cannot
-/// express the shape.
+/// Exactly one of the three, and the template is the one to reach for. A script
+/// is code in a config file and earns its place only when the template cannot
+/// express the shape; `multipart:` is for the endpoints that do not take a JSON
+/// document at all — a transcriber, a diariser, anything whose input is bytes
+/// with a few knobs beside them.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, Validate)]
 #[serde(deny_unknown_fields)]
 #[validate(schema(function = exactly_one_request_source))]
@@ -144,30 +148,453 @@ pub struct RequestSpec {
     /// or a map or array that gets serialised to JSON.
     #[serde(default)]
     pub script: Option<ScriptSource>,
+    /// Form fields, in the order the file wrote them. See [`MultipartSpec`].
+    #[serde(default)]
+    pub multipart: Option<MultipartSpec>,
 }
 
 impl RequestSpec {
-    /// Which of the two was declared.
+    /// Which of the three was declared.
     #[must_use]
     pub fn source(&self) -> Option<RequestSource<'_>> {
-        match (&self.template, &self.script) {
-            (Some(template), _) => Some(RequestSource::Template(template)),
-            (None, Some(script)) => Some(RequestSource::Script(script)),
-            (None, None) => None,
+        match (&self.template, &self.script, &self.multipart) {
+            (Some(template), _, _) => Some(RequestSource::Template(template)),
+            (None, Some(script), _) => Some(RequestSource::Script(script)),
+            (None, None, Some(multipart)) => Some(RequestSource::Multipart(multipart)),
+            (None, None, None) => None,
         }
     }
 }
 
+/// A `multipart/form-data` body, one entry per form field.
+///
+/// A list rather than a map, because the wire is a list: parts go out in the
+/// order the file wrote them. Deserialised *from* a YAML mapping, which is the
+/// shape anybody writing one expects — see the [`Deserialize`] impl.
+///
+/// ```yaml
+/// request:
+///   multipart:
+///     file:
+///       upload: '{{ uploads[0] }}'
+///     model: whisper-1
+///     response_format: json
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct MultipartSpec(Vec<PartSpec>);
+
+impl MultipartSpec {
+    /// The fields, in the order the file declared them.
+    #[must_use]
+    pub fn parts(&self) -> &[PartSpec] {
+        &self.0
+    }
+}
+
+/// One field of a multipart body.
+#[derive(Debug, Clone)]
+pub struct PartSpec {
+    /// The form field, as the profile named it.
+    pub field: String,
+    /// What it carries.
+    pub part: PartKind,
+}
+
+/// What one field of a form carries: text, or files.
+///
+/// The two are told apart by which key the file used, never by guessing at the
+/// rendered value. A `model: whisper-1` that quietly became a file part because
+/// something in the upload directory happened to be called `whisper-1` is
+/// exactly the kind of surprise this tool exists to not have.
+#[derive(Debug, Clone)]
+pub enum PartKind {
+    /// A text field: one `MiniJinja` template, rendered against the same context
+    /// a `template:` sees.
+    Text {
+        /// The template. Rendered per call, like everything else here.
+        template: String,
+        /// `content-type` of the part, when the endpoint wants one declared —
+        /// `application/json` for the config blob some diarisers take. Left off,
+        /// the part goes out as a plain form field.
+        media_type: Option<String>,
+    },
+    /// A file field: templates naming uploads of the call.
+    File {
+        /// Templates, each naming one or more uploads. A field carrying several
+        /// files sends several parts under the same name, which is what every
+        /// server-side upload handler already reads.
+        sources: Vec<String>,
+        /// `content-type` of the part, overriding the one guessed from the
+        /// extension. The guess is an extension lookup and nothing more; a
+        /// profile that knows better says so.
+        media_type: Option<String>,
+        /// `filename` of the part, overriding the stored name.
+        ///
+        /// Worth having because some transcription endpoints refuse a file whose
+        /// name carries no extension they recognise, and the name on disk is
+        /// whatever the browser handed over. Only for a field carrying exactly
+        /// one file — two parts under one filename is a form nobody meant.
+        filename: Option<String>,
+    },
+}
+
+/// The wire shape of one field: the scalar shorthand, or the long form.
+///
+/// `model: whisper-1` is the common case and stays one line. The long form is
+/// what a file field needs, and what a text field reaches for when it has a
+/// `type:` to declare.
+///
+/// Hand-written rather than `#[serde(untagged)]` so that a typo inside the long
+/// form is reported as one. Untagged, a stray `typ:` makes the whole variant
+/// fail to match and the error becomes "data did not match any variant" — which
+/// is precisely the message somebody reads three times before finding the typo.
+#[derive(Debug, Clone)]
+enum PartConfig {
+    /// `field: <template>` — a text part, and nothing else to say about it.
+    Shorthand(Scalar),
+    /// `field: {text: …}` or `field: {upload: …}`, with an optional `type:`.
+    Long(LongPart),
+}
+
+impl<'de> Deserialize<'de> for PartConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Either;
+
+        impl<'de> serde::de::Visitor<'de> for Either {
+            type Value = PartConfig;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a form field: a value, or a mapping with `text` or `upload`")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<Self::Value, A::Error> {
+                LongPart::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(PartConfig::Long)
+            }
+        }
+
+        // Every scalar spelling routes through `Scalar`, so `model: whisper-1`
+        // and `temperature: 0` are read the same way and by the same code.
+        struct Both(Either);
+
+        impl<'de> serde::de::Visitor<'de> for Both {
+            type Value = PartConfig;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                self.0.expecting(formatter)
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<Self::Value, A::Error> {
+                self.0.visit_map(map)
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(PartConfig::Shorthand(Scalar(value.to_owned())))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(PartConfig::Shorthand(Scalar(value.to_string())))
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(PartConfig::Shorthand(Scalar(value.to_string())))
+            }
+
+            fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
+                Ok(PartConfig::Shorthand(Scalar(value.to_string())))
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(PartConfig::Shorthand(Scalar(value.to_string())))
+            }
+        }
+
+        deserializer.deserialize_any(Both(Either))
+    }
+}
+
+impl JsonSchema for PartConfig {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "PartConfig".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let long = generator.subschema_for::<LongPart>();
+        schemars::json_schema!({
+            "description": "A text part written as a bare value, or the long form of either kind.",
+            "anyOf": [
+                {"type": ["string", "number", "boolean"]},
+                long,
+            ],
+        })
+    }
+}
+
+/// A form field's value, as the file wrote it.
+///
+/// Any scalar, not just a string: `temperature: 0` and `translate: false` are
+/// how anybody writes a knob in YAML, and every part of a form goes out as text
+/// regardless. Refusing the number would be refusing the natural spelling for
+/// nothing gained on the wire.
+#[derive(Debug, Clone)]
+struct Scalar(String);
+
+impl<'de> Deserialize<'de> for Scalar {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct AnyScalar;
+
+        impl serde::de::Visitor<'_> for AnyScalar {
+            type Value = Scalar;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a string, a number or a boolean")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(Scalar(value.to_owned()))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(Scalar(value.to_string()))
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(Scalar(value.to_string()))
+            }
+
+            fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
+                Ok(Scalar(value.to_string()))
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(Scalar(value.to_string()))
+            }
+        }
+
+        deserializer.deserialize_any(AnyScalar)
+    }
+}
+
+impl Serialize for Scalar {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl JsonSchema for Scalar {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Scalar".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": ["string", "number", "boolean"],
+            "description": "A form field's value. Rendered as a template, sent as text.",
+        })
+    }
+}
+
+/// The long form of a field. Exactly one of `text:` and `upload:`.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct LongPart {
+    /// A text field's template.
+    #[serde(default)]
+    text: Option<Scalar>,
+    /// A file field's templates, each naming uploads of the call. One, or a list.
+    #[serde(default)]
+    upload: Option<OneOrMany>,
+    /// `content-type` of the part.
+    #[serde(default, rename = "type")]
+    media_type: Option<String>,
+    /// `filename` of the part. File fields only.
+    #[serde(default)]
+    filename: Option<String>,
+}
+
+/// One template, or several. The short form is the common one and stays short.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(untagged)]
+enum OneOrMany {
+    /// One template.
+    One(String),
+    /// Several, in order.
+    Many(Vec<String>),
+}
+
+impl OneOrMany {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            Self::One(source) => vec![source],
+            Self::Many(sources) => sources,
+        }
+    }
+}
+
+impl PartConfig {
+    /// The part this field declares, or why it declares nothing usable.
+    fn into_kind(self, field: &str) -> Result<PartKind, String> {
+        let long = match self {
+            Self::Shorthand(Scalar(template)) => {
+                return Ok(PartKind::Text {
+                    template,
+                    media_type: None,
+                });
+            }
+            Self::Long(long) => long,
+        };
+
+        match (long.text, long.upload) {
+            (Some(_), Some(_)) => Err(format!(
+                "`{field}` sets both `text` and `upload`; a part carries one or the other"
+            )),
+            (None, None) => Err(format!(
+                "`{field}` sets neither `text` nor `upload`, so it would carry nothing"
+            )),
+            (Some(Scalar(template)), None) => {
+                if long.filename.is_some() {
+                    return Err(format!(
+                        "`{field}` sets `filename` on a `text` part, which has no file to name"
+                    ));
+                }
+                Ok(PartKind::Text {
+                    template,
+                    media_type: long.media_type,
+                })
+            }
+            (None, Some(upload)) => {
+                let sources = upload.into_vec();
+                // An empty list is a field that will never carry anything, which
+                // is a `422` waiting for the first call rather than something to
+                // find out at startup.
+                if sources.is_empty() {
+                    return Err(format!("`{field}` names no file"));
+                }
+                Ok(PartKind::File {
+                    sources,
+                    media_type: long.media_type,
+                    filename: long.filename,
+                })
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for MultipartSpec {
+    /// Reads a YAML mapping, keeping the order it was written in.
+    ///
+    /// A [`BTreeMap`] would be four characters and would silently sort the form
+    /// alphabetically. Most parsers do not care, right up to the one that does,
+    /// and "the parts went out in a different order than the file lists them" is
+    /// a bad afternoon in a tool whose entire promise is that the request is
+    /// written down.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Fields;
+
+        impl<'de> serde::de::Visitor<'de> for Fields {
+            type Value = Vec<PartSpec>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a mapping of form field names to parts")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut parts = Vec::new();
+                while let Some((field, config)) = map.next_entry::<String, PartConfig>()? {
+                    let part = config.into_kind(&field).map_err(serde::de::Error::custom)?;
+                    parts.push(PartSpec { field, part });
+                }
+                Ok(parts)
+            }
+        }
+
+        deserializer.deserialize_map(Fields).map(Self)
+    }
+}
+
+impl Serialize for MultipartSpec {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for spec in &self.0 {
+            match &spec.part {
+                PartKind::Text {
+                    template,
+                    media_type,
+                } => map.serialize_entry(
+                    &spec.field,
+                    &LongPart {
+                        text: Some(Scalar(template.clone())),
+                        upload: None,
+                        media_type: media_type.clone(),
+                        filename: None,
+                    },
+                )?,
+                PartKind::File {
+                    sources,
+                    media_type,
+                    filename,
+                } => map.serialize_entry(
+                    &spec.field,
+                    &LongPart {
+                        text: None,
+                        upload: Some(OneOrMany::Many(sources.clone())),
+                        media_type: media_type.clone(),
+                        filename: filename.clone(),
+                    },
+                )?,
+            }
+        }
+        map.end()
+    }
+}
+
+impl JsonSchema for MultipartSpec {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "MultipartSpec".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let part = generator.subschema_for::<PartConfig>();
+        schemars::json_schema!({
+            "type": "object",
+            "description": "Form fields, in the order they are written. A scalar is a text part; `upload:` makes it a file part.",
+            "additionalProperties": part,
+        })
+    }
+}
+
 fn exactly_one_request_source(spec: &RequestSpec) -> Result<(), ValidationError> {
-    match (&spec.template, &spec.script) {
-        (Some(template), None) if !template.is_empty() => Ok(()),
-        (Some(_), None) => Err(ValidationError::new("empty_template")
+    let declared = u8::from(spec.template.is_some())
+        + u8::from(spec.script.is_some())
+        + u8::from(spec.multipart.is_some());
+
+    if declared > 1 {
+        return Err(ValidationError::new("ambiguous_request").with_message(
+            "set one of `request.template`, `request.script` or `request.multipart` — a request is one body".into(),
+        ));
+    }
+
+    match (&spec.template, &spec.script, &spec.multipart) {
+        (Some(template), ..) if template.is_empty() => Err(ValidationError::new("empty_template")
             .with_message("`request.template` must not be empty".into())),
-        (None, Some(_)) => Ok(()),
-        (Some(_), Some(_)) => Err(ValidationError::new("ambiguous_request")
-            .with_message("set either `request.template` or `request.script`, not both".into())),
-        (None, None) => Err(ValidationError::new("missing_request")
-            .with_message("`request` needs a `template` or a `script`".into())),
+        (_, _, Some(multipart)) if multipart.parts().is_empty() => {
+            Err(ValidationError::new("empty_multipart")
+                .with_message("`request.multipart` declares no field".into()))
+        }
+        (None, None, None) => Err(ValidationError::new("missing_request")
+            .with_message("`request` needs a `template`, a `script` or a `multipart`".into())),
+        _ => Ok(()),
     }
 }
 
@@ -546,5 +973,129 @@ decode:
         // The point is that the failure names the offending field, so the loader can
         // point at a file and a key rather than at "somewhere in your YAML".
         assert!(error.to_string().contains("decode.content"), "{error}");
+    }
+
+    /// A profile whose `request.multipart:` is the given YAML fragment, parsed
+    /// and validated the way the loader does it.
+    fn with_multipart(fields: &str) -> Result<Profile, String> {
+        let yaml = format!(
+            "name: transcribe\nkind: chat\nurl: https://models.internal/v1/audio/transcriptions\nrequest:\n  multipart:\n{fields}"
+        );
+        let profile: Profile = serde_yaml_ng::from_str(&yaml).map_err(|error| error.to_string())?;
+        profile.validate().map_err(|error| error.to_string())?;
+        Ok(profile)
+    }
+
+    #[test]
+    fn a_scalar_field_is_a_text_part_and_upload_makes_it_a_file() {
+        let profile =
+            with_multipart("    model: whisper-1\n    file:\n      upload: '{{ uploads[0] }}'\n")
+                .expect("it loads");
+
+        let RequestSource::Multipart(spec) = profile.request.source().unwrap() else {
+            panic!("a multipart source");
+        };
+        let parts = spec.parts();
+        assert_eq!(parts.len(), 2);
+
+        assert_eq!(parts[0].field, "model");
+        assert!(matches!(
+            &parts[0].part,
+            PartKind::Text { template, media_type }
+                if template == "whisper-1" && media_type.is_none()
+        ));
+
+        assert_eq!(parts[1].field, "file");
+        assert!(matches!(
+            &parts[1].part,
+            PartKind::File { sources, .. } if sources == &["{{ uploads[0] }}"]
+        ));
+    }
+
+    /// The one thing a map cannot be trusted with, checked: the order survives
+    /// the parse.
+    #[test]
+    fn the_field_order_survives_loading() {
+        let profile = with_multipart("    z: 1\n    a: 2\n    m: 3\n").expect("it loads");
+        let RequestSource::Multipart(spec) = profile.request.source().unwrap() else {
+            panic!("a multipart source");
+        };
+
+        let fields: Vec<&str> = spec.parts().iter().map(|p| p.field.as_str()).collect();
+        assert_eq!(fields, vec!["z", "a", "m"]);
+    }
+
+    /// `temperature: 0` is how anybody writes a knob, and a form sends text
+    /// either way. Refusing the number would be refusing the natural spelling.
+    #[test]
+    fn a_knob_can_be_written_as_a_number_or_a_boolean() {
+        let profile =
+            with_multipart("    temperature: 0.2\n    speakers: 2\n    translate: false\n")
+                .expect("it loads");
+        let RequestSource::Multipart(spec) = profile.request.source().unwrap() else {
+            panic!("a multipart source");
+        };
+
+        let rendered: Vec<&str> = spec
+            .parts()
+            .iter()
+            .map(|part| match &part.part {
+                PartKind::Text { template, .. } => template.as_str(),
+                PartKind::File { .. } => panic!("a text part"),
+            })
+            .collect();
+        assert_eq!(rendered, vec!["0.2", "2", "false"]);
+    }
+
+    /// A typo inside the long form is reported as a typo. The reason this is a
+    /// test and not a shrug: untagged, it would come back as "data did not match
+    /// any variant", which names nothing and sends the reader hunting.
+    #[test]
+    fn a_misspelled_key_in_the_long_form_is_named() {
+        let error = with_multipart("    file:\n      uploads: '{{ uploads[0] }}'\n")
+            .expect_err("`uploads` is not `upload`");
+        assert!(error.contains("uploads"), "{error}");
+        assert!(!error.contains("did not match any variant"), "{error}");
+    }
+
+    #[test]
+    fn a_field_that_is_both_text_and_upload_is_refused_at_load() {
+        let error =
+            with_multipart("    file:\n      text: hello\n      upload: '{{ uploads[0] }}'\n")
+                .expect_err("a part carries one or the other");
+        assert!(error.contains("both `text` and `upload`"), "{error}");
+    }
+
+    #[test]
+    fn a_field_that_carries_nothing_is_refused_at_load() {
+        let error = with_multipart("    file:\n      type: audio/wav\n")
+            .expect_err("a `type` is not a payload");
+        assert!(error.contains("neither `text` nor `upload`"), "{error}");
+    }
+
+    /// A `filename:` on a text part is a line whose author expected something
+    /// else to happen, which is worth saying at startup rather than ignoring.
+    #[test]
+    fn a_filename_on_a_text_part_is_refused_at_load() {
+        let error = with_multipart("    model:\n      text: whisper-1\n      filename: x.wav\n")
+            .expect_err("a text part has no file to name");
+        assert!(error.contains("`filename`"), "{error}");
+    }
+
+    #[test]
+    fn a_multipart_beside_a_template_is_refused_at_load() {
+        let yaml = "name: t\nkind: chat\nurl: https://models.internal/v1\nrequest:\n  template: '{}'\n  multipart:\n    model: whisper-1\n";
+        let profile: Profile = serde_yaml_ng::from_str(yaml).unwrap();
+        let error = profile.validate().unwrap_err().to_string();
+        assert!(error.contains("a request is one body"), "{error}");
+    }
+
+    #[test]
+    fn an_empty_multipart_is_refused_at_load() {
+        let yaml =
+            "name: t\nkind: chat\nurl: https://models.internal/v1\nrequest:\n  multipart: {}\n";
+        let profile: Profile = serde_yaml_ng::from_str(yaml).unwrap();
+        let error = profile.validate().unwrap_err().to_string();
+        assert!(error.contains("declares no field"), "{error}");
     }
 }
