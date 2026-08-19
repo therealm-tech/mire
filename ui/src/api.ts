@@ -337,6 +337,12 @@ const toolInvocationSchema = z.object({
   /** `mcp` means something really happened outside this process. */
   source: z.enum(['simulated', 'mcp']),
   server: z.string().optional(),
+  /**
+   * HTTP status of the round trip that answered. `0` never reached a server,
+   * and absent means nothing was ever sent — a simulated tool, or one a hook
+   * refused.
+   */
+  status: z.number().optional(),
   latencyMs: z.number().optional(),
   /** The tool ran and reported a problem. A result, not a failure of the run. */
   reportedError: z.boolean(),

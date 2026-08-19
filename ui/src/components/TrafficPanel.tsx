@@ -826,6 +826,10 @@ function ToolCard({
 }) {
   const tool: ToolInvocation = exchange.invocation
   const captured = Object.entries(tool.captured)
+  // Not `statusTone`, for the reason the protocol card gives: nothing is ever
+  // expected to refuse a tool call, so a `401` here is bad news whoever the run
+  // was calling as.
+  const tone = tool.status === undefined || tool.status === 0 || tool.status >= 400 ? 'bad' : 'good'
 
   return (
     <Card
@@ -838,6 +842,16 @@ function ToolCard({
       badges={
         <>
           {tool.source === 'mcp' ? null : <Badge tone="neutral">simulated, nothing executed</Badge>}
+          {/* The same statement the model and protocol cards lead with, in the
+              same place: a call that left the process was answered by somebody,
+              and `0` says it never got that far. A tool nothing sent — simulated,
+              or refused by a gate — has no status to report, and the badges
+              beside it already say which. */}
+          {tool.status === undefined ? null : tool.status === 0 ? (
+            <Badge tone="bad">never answered</Badge>
+          ) : (
+            <Badge tone={tone}>{tool.status}</Badge>
+          )}
           {tool.latencyMs === undefined ? null : (
             <span className="text-faint text-xs">{tool.latencyMs} ms</span>
           )}

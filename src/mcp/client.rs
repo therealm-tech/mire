@@ -220,6 +220,42 @@ impl McpClient {
         }
     }
 
+    /// How many round trips are already on the record.
+    ///
+    /// Taken before a call so [`answered`](Self::answered) can tell that call's
+    /// own traffic from everything filed before it. `0` when nobody is
+    /// collecting, which is the only honest answer: there is no record to mark.
+    #[must_use]
+    pub fn recorded(&self) -> usize {
+        self.journal
+            .as_ref()
+            .and_then(|journal| journal.lock().ok())
+            .map_or(0, |entries| entries.len())
+    }
+
+    /// The status the `tools/call` filed since `since` came back with.
+    ///
+    /// Read back off the journal rather than threaded up through the call, and
+    /// deliberately so: a status is a fact about a round trip, the round trip
+    /// already records it, and the answers worth reading — a `401` from the
+    /// server, a gateway `502` — are exactly the ones that reach the caller as
+    /// an [`McpError`], which carries no status at all. `0` is the journal's own
+    /// word for "the request never reached anybody", and it means that here too.
+    ///
+    /// The *last* one, because a session the server has forgotten is retried
+    /// once: the answer that decided the call is the one the retry got.
+    #[must_use]
+    pub fn answered(&self, since: usize) -> Option<u16> {
+        let journal = self.journal.as_ref()?;
+        let entries = journal.lock().ok()?;
+        entries
+            .get(since..)?
+            .iter()
+            .rev()
+            .find(|exchange| exchange.method == "tools/call")
+            .map(|exchange| exchange.status)
+    }
+
     /// Files one hook firing, if anybody is collecting.
     fn file_hook(&self, record: HookRecord) {
         if let Some(journal) = &self.hooks

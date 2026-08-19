@@ -146,6 +146,16 @@ pub struct ToolInvocation {
     /// MCP server that ran it, when one did.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server: Option<String>,
+    /// HTTP status of the round trip that answered it, when one did.
+    ///
+    /// The same statement the model call and the protocol round trip already
+    /// make, made where a tool call is read: `0` means the request never reached
+    /// a server, and absent means nothing was ever sent — a simulated tool, or a
+    /// live one a `before` hook refused. Reported whether the call ended in a
+    /// result or an error, because a `401` on `tools/call` is exactly the case
+    /// where "the tool failed" is not the interesting half of the sentence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
     /// Round trip to that server, in milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<u64>,
@@ -914,6 +924,7 @@ async fn invoke_tools(tools: &Tools, calls: &[ToolCall], turn: u32) -> Vec<ToolI
                 call: call.clone(),
                 source: ToolSource::Simulated,
                 server: None,
+                status: None,
                 latency_ms: None,
                 reported_error: false,
                 schema_errors,
@@ -961,6 +972,7 @@ fn simulated(
         call: call.clone(),
         source: ToolSource::Simulated,
         server: None,
+        status: None,
         latency_ms: None,
         reported_error: false,
         schema_errors,
@@ -981,6 +993,7 @@ async fn live(
         call: call.clone(),
         source: ToolSource::Mcp,
         server: Some(tool.server.clone()),
+        status: None,
         latency_ms: None,
         reported_error: false,
         schema_errors,
@@ -989,15 +1002,21 @@ async fn live(
         captured: crate::vars::Captured::new(),
     };
 
+    // Where the record stands before anything goes out, so the status of the
+    // round trip that answers can be read back off it afterwards — on the way
+    // out *and* on the way in. A call that comes back an error is precisely the
+    // one whose status is worth reading, and an error carries none.
+    let client = tools.clients.get(&tool.server);
+    let mark = client.map_or(0, McpClient::recorded);
+
     let outcome = async {
-        let client = tools
-            .clients
-            .get(&tool.server)
-            .ok_or_else(|| McpError::UnknownServer(tool.server.clone()))?;
+        let client = client.ok_or_else(|| McpError::UnknownServer(tool.server.clone()))?;
         let credentials = McpCredentials::resolve(&tools.config.registry, client.server()).await?;
         client.call_tool(tool, &call.arguments, &credentials).await
     }
     .await;
+
+    invocation.status = client.and_then(|client| client.answered(mark));
 
     match outcome {
         Ok(result) => {

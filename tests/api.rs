@@ -2410,6 +2410,9 @@ async fn an_agent_answers_a_tool_call_and_stops_when_the_model_is_done() {
         first["tools"][0]["result"],
         r#"{"temp": 21, "conditions": "clear"}"#
     );
+    // Nothing left the process, so there is no status to report — which is a
+    // different statement from "answered nothing", and the absence makes it.
+    assert!(first["tools"][0]["status"].is_null());
     assert_eq!(first["decision"]["decision"], "continue");
 
     // Turn 2: the result came back in, and the model finished.
@@ -3507,6 +3510,9 @@ async fn the_agent_really_calls_an_mcp_tool_and_feeds_the_result_back() {
     assert!(tool["result"].as_str().unwrap().contains("21"));
     assert!(!tool["reportedError"].as_bool().unwrap());
     assert!(tool["latencyMs"].is_number());
+    // What the round trip under it answered, said where the tool call is read
+    // rather than only on the protocol exchange beside it.
+    assert_eq!(tool["status"], 200);
 
     let done = events.iter().find(|(name, _)| name == "done").unwrap();
     assert_eq!(done.1["stop"]["outcome"], "stopped");
@@ -5193,6 +5199,50 @@ async fn a_tool_that_reports_a_problem_is_a_result_the_model_gets_to_see() {
     assert!(tool.get("error").is_none(), "{tool}");
     // And the loop carried on, so the model had its chance to react.
     assert_eq!(events.iter().filter(|(n, _)| n == "turn").count(), 2);
+}
+
+#[tokio::test]
+async fn a_tool_call_the_server_refused_reports_the_status_it_was_refused_with() {
+    let mcp = mcp_server(weather_tool(), vec![]).await;
+    // The answer a tool call gets when the credential is wrong: a status, and a
+    // body that is not JSON-RPC because nothing on the server ever saw it.
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
+        .and(header("mcp-method", "tools/call"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("no credential"))
+        .mount(&mcp)
+        .await;
+
+    let endpoint = MockServer::start().await;
+    model_using_a_tool(&endpoint).await;
+
+    let harness = Harness::start(&[
+        (
+            "mcp.yaml",
+            format!("servers:\n  - name: weather\n    url: {}/mcp\n", mcp.uri()),
+        ),
+        (
+            "chat.yaml",
+            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+        ),
+    ])
+    .await;
+
+    let (status, events) = harness
+        .agent(json!({"profile": "chat", "prompt": "go"}))
+        .await;
+    assert_eq!(status, 200);
+
+    // The call came back an error, which says the loop got nothing — and the
+    // status says who refused it, which is the half that names the fix. It is
+    // the case the status exists for: an error carries no status of its own, so
+    // reading it off the round trip is the only way it reaches the tool call.
+    let tool = &events.iter().find(|(n, _)| n == "turn").unwrap().1["tools"][0];
+    assert_eq!(tool["status"], 401);
+    assert!(
+        tool["error"].as_str().is_some_and(|m| m.contains("401")),
+        "{tool}"
+    );
 }
 
 #[tokio::test]
