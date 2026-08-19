@@ -695,12 +695,11 @@ pub async fn agent(
     // back as a `failed` event like any other upstream failure.
     //
     // Only the ones this run asked for, which is also what makes switching a
-    // broken server off a way to get the rest of the profile running.
-    for server in &agent::selected_servers(&profile, request.mcp_servers.as_deref())? {
-        if state.runner.config().snapshot().mcp.get(server).is_none() {
-            return Err(McpError::UnknownServer(server.clone()).into());
-        }
-    }
+    // broken server off a way to get the rest of the run going.
+    agent::selected_servers(
+        &state.runner.config().snapshot().mcp,
+        request.mcp_servers.as_deref(),
+    )?;
 
     // Same reasoning as the streamed call: settled before the stream opens.
     let uploads = resolve_uploads(&state, &request.call.uploads).await?;

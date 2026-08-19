@@ -31,10 +31,13 @@ export const profileSummarySchema = z.object({
   name: z.string(),
   kind: profileKindSchema,
   url: z.string(),
-  /** The model call's default credential. Not the MCP servers' — see `mcp`. */
+  /**
+   * The model call's default credential.
+   *
+   * Not the MCP servers': theirs are declared in `mcp.yaml`, next to the server,
+   * and resolved when a tool is actually called.
+   */
   auth: z.string().nullable(),
-  /** Registry names of the MCP servers this profile's loop may reach. */
-  mcp: z.array(z.string()),
   source: z.string(),
   hasDecode: z.boolean(),
 })
@@ -699,13 +702,13 @@ export function call(body: CallRequest, signal?: AbortSignal): Promise<CallOutco
 export interface AgentRequest extends CallRequest {
   maxIterations?: number
   /**
-   * Which of the profile's MCP servers this run may reach.
+   * Which of the declared MCP servers this run may reach.
    *
-   * Left out when every one of them is on, which is what the profile says.
+   * Left out when every one of them is on, which is what `mcp.yaml` says.
    * Sending a shorter list narrows the run to those — `[]` included, which is a
-   * loop offering the model no live tool at all. It only ever narrows: a server
-   * the profile does not name is a `422`, because that opt-in belongs to the
-   * file rather than to a tab.
+   * loop offering the model no live tool at all. A name `mcp.yaml` does not
+   * declare is a `404`: the opt-in is the declaration, and a tab cannot write
+   * one.
    */
   mcpServers?: string[]
   /**

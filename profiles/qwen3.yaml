@@ -172,13 +172,13 @@ agent:
   #         - $.sessionId
   #         - $.session.id
 
-# The tools are not declared here. They are fetched from the `dev` server at the
-# start of the run and **really called**, which is the difference between
-# checking that the model emits well-formed calls and checking that tool calling
-# works. The declarations the model sees come from the server's own `tools/list`,
-# so a schema change there shows up here without touching this file.
-mcp:
-  - dev
+# The tools are not declared here, and neither are the servers they come from.
+# Every server mcp.yaml declares is offered to every `kind: chat` profile: they
+# are fetched at the start of the run and **really called**, which is the
+# difference between checking that the model emits well-formed calls and checking
+# that tool calling works. The declarations the model sees come from each server's
+# own `tools/list`, so a schema change there shows up here without touching this
+# file. The Servers row in the composer is where a single run leaves one out.
 
 # A simulated tool of the same name would win over the server's, which is how you
 # stub exactly one tool of an otherwise live server — and how you check that the

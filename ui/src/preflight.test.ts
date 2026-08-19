@@ -7,7 +7,6 @@ const PROFILE: ProfileSummary = {
   kind: 'chat',
   url: 'https://models.internal/v1/chat/completions',
   auth: 'token',
-  mcp: [],
   source: '/tmp/chat.yaml',
   hasDecode: true,
 }
@@ -45,6 +44,21 @@ function run(overrides: {
     mcpOff: overrides.mcpOff ?? [],
   })
 }
+
+/** A browser identity nobody has signed in to. */
+const HUMAN: AuthDescriptor = {
+  name: 'me',
+  kind: 'oidc_browser',
+  needsValue: false,
+  needsLogin: true,
+  allowedHosts: [],
+}
+
+/** Two declared servers, both wanting `me`, in the order the registry lists them. */
+const TWO_SERVERS: McpDescriptor[] = [
+  { name: 'files', url: 'https://a', auth: 'me', tools: [], headers: [], usesAuth: [] },
+  { name: 'search', url: 'https://b', auth: 'me', tools: [], headers: [], usesAuth: [] },
+]
 
 describe('reaches', () => {
   it('lets a credential with no allowed_hosts go anywhere', () => {
@@ -89,12 +103,6 @@ describe('preflight', () => {
     expect(state.blockers[0]?.signIn).toBe('token')
   })
 
-  it('blocks on an MCP server no mcp.yaml entry declares', () => {
-    const state = run({ profile: { mcp: ['ghost'] } })
-    expect(state.blockers[0]?.message).toContain('ghost')
-    expect(state.servers).toEqual(['ghost'])
-  })
-
   it('blocks on a server whose identity nobody is signed in to, named or templated', () => {
     const human: AuthDescriptor = {
       name: 'me',
@@ -108,17 +116,12 @@ describe('preflight', () => {
       { name: 'templated', url: 'https://b', tools: [], headers: [], usesAuth: ['me'] },
     ]
 
-    const state = run({
-      profile: { mcp: ['named', 'templated'] },
-      providers: [PROVIDER, human],
-      servers,
-    })
+    const state = run({ providers: [PROVIDER, human], servers })
     expect(state.blockers).toHaveLength(2)
     expect(state.blockers.every((blocker) => blocker.signIn === 'me')).toBe(true)
 
     // A session on that provider is all it took.
     const signedIn = run({
-      profile: { mcp: ['named', 'templated'] },
       providers: [
         PROVIDER,
         { ...human, session: { expiresInS: 600, canRefresh: true, subject: 'gleroy' } },
@@ -128,24 +131,22 @@ describe('preflight', () => {
     expect(signedIn.blockers).toEqual([])
   })
 
-  it('leaves the servers out entirely on a run that will not speak to them', () => {
-    const human: AuthDescriptor = {
-      name: 'me',
-      kind: 'oidc_browser',
-      needsValue: false,
-      needsLogin: true,
-      allowedHosts: [],
-    }
-    const overrides = {
-      profile: { mcp: ['named', 'ghost'] },
-      providers: [PROVIDER, human],
+  it('offers every declared server to a profile that says nothing about them', () => {
+    // There is no per-profile opt-in left to read: `mcp.yaml` declares a server
+    // and every chat profile is offered it.
+    const state = run({
       servers: [
-        { name: 'named', url: 'https://a', auth: 'me', tools: [], headers: [], usesAuth: [] },
-      ] as McpDescriptor[],
-    }
+        { name: 'files', url: 'https://a', tools: [], headers: [], usesAuth: [] },
+        { name: 'search', url: 'https://b', tools: [], headers: [], usesAuth: [] },
+      ],
+    })
+    expect(state.servers).toEqual(['files', 'search'])
+  })
 
-    // In agent mode both are the run's business: one is undeclared, the other
-    // needs a session.
+  it('leaves the servers out entirely on a run that will not speak to them', () => {
+    const overrides = { providers: [PROVIDER, HUMAN], servers: TWO_SERVERS }
+
+    // In agent mode both are the run's business, and both want a session.
     expect(run(overrides).blockers).toHaveLength(2)
 
     // In chat mode neither is. A single turn calls no tool, so a credential it
@@ -156,45 +157,42 @@ describe('preflight', () => {
   })
 
   it('drops a server switched off, and says so rather than quietly shrinking', () => {
-    const human: AuthDescriptor = {
-      name: 'me',
-      kind: 'oidc_browser',
-      needsValue: false,
-      needsLogin: true,
-      allowedHosts: [],
-    }
-    const overrides = {
-      profile: { mcp: ['named', 'ghost'] },
-      providers: [PROVIDER, human],
-      servers: [
-        { name: 'named', url: 'https://a', auth: 'me', tools: [], headers: [], usesAuth: [] },
-      ] as McpDescriptor[],
-    }
+    const overrides = { providers: [PROVIDER, HUMAN], servers: TWO_SERVERS }
 
-    // `ghost` is undeclared and `named` wants a session: two refusals, both of
-    // them about servers this run would set up.
+    // Both want a session nobody has: two refusals, both of them about servers
+    // this run would set up.
     expect(run(overrides).blockers).toHaveLength(2)
 
     // Switched off, and with it the refusal it was causing — the same way a chat
     // drops them, because this run reaches it exactly as little.
-    const narrowed = run({ ...overrides, mcpOff: ['ghost'] })
-    expect(narrowed.servers).toEqual(['named'])
+    const narrowed = run({ ...overrides, mcpOff: ['search'] })
+    expect(narrowed.servers).toEqual(['files'])
     expect(narrowed.blockers).toHaveLength(1)
     expect(narrowed.blockers[0]?.signIn).toBe('me')
-    expect(narrowed.notes[0]).toContain('ghost')
+    expect(narrowed.notes[0]).toContain('search')
 
-    // All of them off: nothing to set up, nothing to refuse it, and the note is
-    // what keeps that from looking like a profile with no servers at all.
-    const none = run({ ...overrides, mcpOff: ['ghost', 'named'] })
+    // All of them off — what the composer's **None** button asks for. Nothing to
+    // set up, nothing to refuse it, and the note is what keeps that from looking
+    // like an installation with no servers at all.
+    const none = run({ ...overrides, mcpOff: ['search', 'files'] })
     expect(none.servers).toEqual([])
     expect(none.blockers).toEqual([])
-    expect(none.notes[0]).toContain('named')
+    expect(none.notes[0]).toContain('files')
+  })
+
+  it('ignores a switched-off name that nothing declares any more', () => {
+    // `mcpOff` outlives a reload, and so outlives the entry it was about. A name
+    // deleted from `mcp.yaml` is simply not in the picture — not a server this
+    // run reports having left out.
+    const state = run({ servers: TWO_SERVERS, mcpOff: ['deleted'] })
+    expect(state.servers).toEqual(['files', 'search'])
+    expect(state.notes).toEqual([])
   })
 
   it('says nothing about servers switched off on a run that reaches none anyway', () => {
     // Chat mode already leaves every server out, so a note listing the ones
     // somebody unticked would be reporting a distinction this run does not have.
-    const chat = run({ profile: { mcp: ['named'] }, mcpOff: ['named'], usesMcp: false })
+    const chat = run({ servers: TWO_SERVERS, mcpOff: ['files'], usesMcp: false })
     expect(chat.servers).toEqual([])
     expect(chat.notes).toEqual([])
   })

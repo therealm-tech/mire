@@ -12,7 +12,6 @@ const PROFILES = {
       kind: 'chat',
       url: 'https://models.internal/v1/chat/completions',
       auth: null,
-      mcp: [],
       source: '/tmp/chat.yaml',
       hasDecode: true,
     },
@@ -21,17 +20,15 @@ const PROFILES = {
       kind: 'embedding',
       url: 'https://models.internal/v1/embeddings',
       auth: null,
-      mcp: [],
       source: '/tmp/embed.yaml',
       hasDecode: true,
     },
-    // Names a credential this tab has to be asked for, and three MCP servers.
+    // Names a credential this tab has to be asked for.
     {
       name: 'guarded',
       kind: 'chat',
       url: 'http://127.0.0.1:11435/v1/messages',
       auth: 'pasted',
-      mcp: ['dev', 'keyed', 'ghost'],
       source: '/tmp/guarded.yaml',
       hasDecode: true,
     },
@@ -41,7 +38,6 @@ const PROFILES = {
       kind: 'chat',
       url: 'https://models.internal/v1/as-me',
       auth: 'me',
-      mcp: [],
       source: '/tmp/as-me.yaml',
       hasDecode: true,
     },
@@ -52,7 +48,6 @@ const PROFILES = {
       kind: 'chat',
       url: 'https://models.internal/v1/pinned',
       auth: 'gateway',
-      mcp: [],
       source: '/tmp/pinned.yaml',
       hasDecode: true,
     },
@@ -501,9 +496,11 @@ describe('App', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    // A profile with no `mcp:` has nothing to say here, so it says nothing.
-    await screen.findByRole('button', { name: /^chat/ })
-    expect(screen.queryByRole('heading', { name: 'MCP servers' })).not.toBeInTheDocument()
+    // Every declared server is offered to every chat profile, so this panel is
+    // about the installation rather than about the profile in front of you.
+    await user.click(await screen.findByRole('button', { name: /^chat/ }))
+    await openAuth(user)
+    expect(screen.getByRole('heading', { name: 'MCP servers' })).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: /guarded/ }))
     expect(screen.getByRole('heading', { name: 'MCP servers' })).toBeInTheDocument()
@@ -529,21 +526,18 @@ describe('App', () => {
     expect(within(dev).getAllByRole('button')).toHaveLength(1)
     expect(within(dev).getByRole('button', { name: /Sign in to me/ })).toBeInTheDocument()
     expect(within(keyed).queryByRole('button')).not.toBeInTheDocument()
-
-    // A profile naming a server that `mcp.yaml` never declared says so.
-    expect(screen.getByText(/declared in no/)).toBeInTheDocument()
   })
 
   it('takes the servers out of the picture on a chat, which calls no tool', async () => {
     const user = userEvent.setup()
     render(<App />)
 
-    // Agent mode: three servers, their identities, and the revision to reach
-    // them in — all of it about the run that is about to happen.
+    // Agent mode: both declared servers, their identities, and the revision to
+    // reach them in — all of it about the run that is about to happen.
     await user.click(await screen.findByRole('button', { name: /guarded/ }))
     expect(screen.getByRole('heading', { name: 'MCP servers' })).toBeInTheDocument()
     expect(screen.getByLabelText('Protocol')).toBeInTheDocument()
-    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('3 MCP servers')
+    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('2 MCP servers')
     expect(screen.getByText(/answer 409 until/)).toBeInTheDocument()
 
     // Chat mode: one turn, which sets nothing up and calls nothing. None of it
@@ -553,18 +547,13 @@ describe('App', () => {
     expect(screen.queryByLabelText('Protocol')).not.toBeInTheDocument()
     expect(screen.getByLabelText('What the next call will do')).not.toHaveTextContent('MCP server')
     expect(screen.queryByText(/answer 409 until/)).not.toBeInTheDocument()
-    expect(screen.queryByText(/declared in no/)).not.toBeInTheDocument()
   })
 
   it('offers the revisions the server says it speaks, and negotiates by default', async () => {
     const user = userEvent.setup()
     render(<App />)
 
-    // Nothing to speak to, nothing to choose.
-    await screen.findByRole('button', { name: /^chat/ })
-    expect(screen.queryByLabelText('Protocol')).not.toBeInTheDocument()
-
-    await user.click(screen.getByRole('button', { name: /guarded/ }))
+    await user.click(await screen.findByRole('button', { name: /guarded/ }))
     const protocol = screen.getByLabelText('Protocol')
 
     // The list comes from `GET /api/mcp` rather than from a copy kept here, so
@@ -576,6 +565,27 @@ describe('App', () => {
     ).toEqual(['auto', '2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26'])
     expect(protocol).toHaveValue('')
     expect(screen.getByText(/Negotiated per server/)).toBeInTheDocument()
+  })
+
+  it('offers neither a server nor a revision when mcp.yaml declares none', async () => {
+    // Nothing to speak to, nothing to choose. It is the registry that decides
+    // this now: with a server declared, every chat profile is offered it.
+    vi.stubGlobal(
+      'fetch',
+      mockApi({
+        'api/profiles': PROFILES,
+        'api/auth': AUTH,
+        'api/mcp': { servers: [], revisions: MCP.revisions, issues: [] },
+        'api/prompts': PROMPTS,
+      }),
+    )
+
+    render(<App />)
+
+    await screen.findByRole('button', { name: /^chat/ })
+    expect(screen.queryByLabelText('Protocol')).not.toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: 'Servers' })).not.toBeInTheDocument()
+    expect(screen.getByLabelText('What the next call will do')).not.toHaveTextContent('MCP server')
   })
 
   it('states the chosen revision on the wire and says nothing on auto', async () => {
@@ -609,25 +619,21 @@ describe('App', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    // Nothing to switch off on a profile that names no server.
-    await screen.findByRole('button', { name: /^chat/ })
-    expect(screen.queryByRole('checkbox', { name: 'dev' })).not.toBeInTheDocument()
-
-    await user.click(screen.getByRole('button', { name: /guarded/ }))
+    await user.click(await screen.findByRole('button', { name: /guarded/ }))
     await agentMode(user)
 
-    // Every server the profile names, all on: the file's word, unedited.
+    // Every declared server, all on: `mcp.yaml`'s word, unedited.
     expect(
       within(screen.getByRole('group', { name: 'Servers' }))
         .getAllByRole('checkbox')
         .map((box) => (box as HTMLInputElement).checked),
-    ).toEqual([true, true, true])
-    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('3 MCP servers')
+    ).toEqual([true, true])
+    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('2 MCP servers')
 
     // `dev` off: out of the bar, out of the auth panel — and with it the `409`
     // its unsigned-in provider was promising, because this run never asks.
     await user.click(screen.getByRole('checkbox', { name: 'dev' }))
-    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('2 MCP servers')
+    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('1 MCP server')
     expect(screen.getByLabelText('What the next call will do')).toHaveTextContent(
       /Switched off for this run: dev/,
     )
@@ -638,7 +644,7 @@ describe('App', () => {
     // And back, because a switch that only goes one way is a trap.
     await user.click(screen.getByRole('checkbox', { name: 'dev' }))
     expect(screen.getByTestId('mcp-dev')).toBeInTheDocument()
-    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('3 MCP servers')
+    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('2 MCP servers')
   })
 
   it('names the servers on the wire only once one is off', async () => {
@@ -653,26 +659,85 @@ describe('App', () => {
     await user.click(screen.getByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(1))
 
-    // All on: the profile already says which, and a copy alongside it is a
+    // All on: `mcp.yaml` already says which, and a copy alongside it is a
     // second thing that can disagree with the file.
     expect(sent[0]).not.toHaveProperty('mcpServers')
 
-    await user.click(screen.getByRole('checkbox', { name: 'ghost' }))
+    await user.click(screen.getByRole('checkbox', { name: 'keyed' }))
     await user.type(screen.getByRole('textbox', { name: /message/i }), 'again')
     await user.click(screen.getByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(2))
 
-    expect(sent[1]?.mcpServers).toEqual(['dev', 'keyed'])
+    expect(sent[1]?.mcpServers).toEqual(['dev'])
 
     // Every one off is a list of none, not a silence: saying nothing would be
-    // asking for all three.
+    // asking for both.
     await user.click(screen.getByRole('checkbox', { name: 'dev' }))
-    await user.click(screen.getByRole('checkbox', { name: 'keyed' }))
     await user.type(screen.getByRole('textbox', { name: /message/i }), 'and again')
     await user.click(screen.getByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(3))
 
     expect(sent[2]?.mcpServers).toEqual([])
+  })
+
+  it('switches every server off and back on in one press', async () => {
+    const { fetchMock, sent } = recordingApi(['pong', 'pong'])
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: /guarded/ }))
+    await agentMode(user)
+
+    const servers = () => within(screen.getByRole('group', { name: 'Servers' }))
+    // Every one already on, so there is nothing for **All** to do — and it says
+    // so rather than disappearing and having to be found again later.
+    expect(servers().getByRole('button', { name: 'All' })).toBeDisabled()
+
+    await user.click(servers().getByRole('button', { name: 'None' }))
+    expect(
+      servers()
+        .getAllByRole('checkbox')
+        .every((box) => !(box as HTMLInputElement).checked),
+    )
+    expect(servers().getByRole('button', { name: 'None' })).toBeDisabled()
+    expect(screen.getByLabelText('What the next call will do')).not.toHaveTextContent('MCP server')
+
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(sent).toHaveLength(1))
+    expect(sent[0]?.mcpServers).toEqual([])
+
+    // And all the way back, which is the other half of the pair being worth a
+    // button at all.
+    await user.click(servers().getByRole('button', { name: 'All' }))
+    expect(
+      servers()
+        .getAllByRole('checkbox')
+        .every((box) => (box as HTMLInputElement).checked),
+    )
+    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('2 MCP servers')
+
+    await user.type(screen.getByRole('textbox', { name: /message/i }), 'again')
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(sent).toHaveLength(2))
+    expect(sent[1]).not.toHaveProperty('mcpServers')
+  })
+
+  it('leaves the servers out of an embedding profile, which has no loop to be in', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    // Every declared server is offered to every *chat* profile. `kind:
+    // embedding` has no agent loop for one to be part of, and the mode this tab
+    // remembers is about whichever profile was on before.
+    await user.click(await screen.findByRole('button', { name: /^chat/ }))
+    await openAuth(user)
+    expect(screen.getByRole('heading', { name: 'MCP servers' })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /embed/ }))
+    expect(screen.queryByRole('heading', { name: 'MCP servers' })).not.toBeInTheDocument()
+    expect(screen.getByLabelText('What the next call will do')).not.toHaveTextContent('MCP server')
   })
 
   it('switches to the embedding input when an embedding profile is selected', async () => {
@@ -1840,7 +1905,13 @@ describe('browser login', () => {
     // And the popup was pointed at the identity provider rather than navigated to.
     expect(popup.location.href).toBe('https://idp.example/authorize?state=abc')
 
-    expect(await screen.findByText('gleroy', undefined, { timeout: 4000 })).toBeInTheDocument()
+    // Scoped: `dev` authenticates with `me` too, and every chat profile is
+    // offered `dev` — so the session shows on that row as well.
+    await waitFor(
+      () =>
+        expect(within(screen.getByTestId('model-auth')).getByText('gleroy')).toBeInTheDocument(),
+      { timeout: 4000 },
+    )
   })
 
   it('shows why a login failed and offers to force a fresh prompt', async () => {
@@ -1892,9 +1963,12 @@ describe('browser login', () => {
     await user.click(await screen.findByRole('button', { name: /as-me/ }))
     await openAuth(user)
 
-    // The reason survives the tab that closed, which is the whole point.
-    expect(screen.getByText(/refused the login/)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument()
+    // The reason survives the tab that closed, which is the whole point. Scoped
+    // to the model's row: `dev` reaches for `me` as well, and shows the same
+    // failure against the tool calls it would refuse.
+    const model = within(screen.getByTestId('model-auth'))
+    expect(model.getByText(/refused the login/)).toBeInTheDocument()
+    expect(model.getByRole('button', { name: 'Try again' })).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: /asking for credentials/ }))
     await waitFor(() => expect(prompts).toContain('login'))
@@ -1994,14 +2068,17 @@ describe('browser login', () => {
 
     await user.click(await screen.findByRole('button', { name: /as-me/ }))
     await openAuth(user)
-    expect(screen.getByText('gleroy')).toBeInTheDocument()
-    expect(screen.getByText('expires in 4 min')).toBeInTheDocument()
-    expect(screen.getByText(/granted: openid profile/)).toBeInTheDocument()
+    // The model's row, not `dev`'s: both authenticate with `me`, and this test
+    // is about the one the profile names.
+    const model = () => within(screen.getByTestId('model-auth'))
+    expect(model().getByText('gleroy')).toBeInTheDocument()
+    expect(model().getByText('expires in 4 min')).toBeInTheDocument()
+    expect(model().getByText(/granted: openid profile/)).toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: 'Sign out' }))
+    await user.click(model().getByRole('button', { name: 'Sign out' }))
 
     expect(await screen.findByRole('button', { name: 'Sign in' })).toBeInTheDocument()
-    expect(screen.queryByText('gleroy')).not.toBeInTheDocument()
+    expect(model().queryByText('gleroy')).not.toBeInTheDocument()
   })
 
   it('drops a session from the MCP row that is the only place it shows', async () => {
@@ -2401,6 +2478,17 @@ describe('conversation', () => {
 
 describe('preflight', () => {
   it('says where the call is going and who it goes as, before it is made', async () => {
+    // No server declared, so nothing but the model call is in the bar: `dev`
+    // wants a session, and every chat profile is offered `dev`.
+    vi.stubGlobal(
+      'fetch',
+      mockApi({
+        'api/profiles': PROFILES,
+        'api/auth': AUTH,
+        'api/mcp': { servers: [], revisions: MCP.revisions, issues: [] },
+        'api/prompts': PROMPTS,
+      }),
+    )
     render(<App />)
 
     await screen.findByRole('button', { name: /^chat/ })
@@ -2416,7 +2504,7 @@ describe('preflight', () => {
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: /guarded/ }))
-    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('3 MCP servers')
+    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('2 MCP servers')
   })
 
   it('names what would refuse the call, and starts the login that fixes it', async () => {
@@ -2459,8 +2547,15 @@ describe('preflight', () => {
     expect(within(bar).getByText('blocked')).toBeInTheDocument()
     expect(bar).toHaveTextContent('Nobody is signed in to me')
 
+    // Two refusals, both of them `me`: the model call, and the tool calls to
+    // `dev`. Two lines rather than one, because they are two different things
+    // this run would fail at — and the same button fixes both.
+    expect(bar).toHaveTextContent(/Tool calls to dev answer 409/)
+
     // The fix is on the bar rather than three panels away.
-    await user.click(within(bar).getByRole('button', { name: 'Sign in to me' }))
+    await user.click(
+      within(bar).getAllByRole('button', { name: 'Sign in to me' })[0] as HTMLElement,
+    )
     await waitFor(() => expect(logins).toHaveLength(1))
     expect(logins[0]).toContain('/api/auth/me/login')
   })
