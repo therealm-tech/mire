@@ -4,8 +4,10 @@ import type { Message, PromptsResponse, UploadedFile } from '../api'
 import {
   type ActivityItem,
   type ChatItem,
-  describeStop,
+  describeLive,
+  describeVerdict,
   type HookExchange,
+  type Live,
   messagePositions,
   type ToolExchange,
   type VerdictItem,
@@ -62,6 +64,7 @@ export function ChatPanel({
   items,
   live,
   busy,
+  expectUnauthorized,
   stopped,
   prompt,
   prompts,
@@ -92,8 +95,10 @@ export function ChatPanel({
 }: {
   items: ChatItem[]
   /** Text arriving chunk by chunk, shown as an answer still being written. */
-  live: string | null
+  live: Live | null
   busy: boolean
+  /** A `401` asked anonymously is the pass it was sent to prove, here as below. */
+  expectUnauthorized: boolean
   /** The last run was called off rather than finished. */
   stopped: boolean
   prompt: string
@@ -139,7 +144,7 @@ export function ChatPanel({
   // biome-ignore lint/correctness/useExhaustiveDependencies: the effect reads nothing, it reacts — a new item or a new chunk is exactly when the view has to move.
   useEffect(() => {
     foot.current?.scrollIntoView({ block: 'end' })
-  }, [items.length, live])
+  }, [items.length, live?.text])
 
   return (
     <Panel
@@ -182,11 +187,18 @@ export function ChatPanel({
             ) : item.kind === 'activity' ? (
               <Activity key={item.id} item={item} onReveal={onReveal} />
             ) : (
-              <Verdict key={item.id} item={item} />
+              <Verdict key={item.id} item={item} expectUnauthorized={expectUnauthorized} />
             ),
           )}
 
-          {live === null ? null : <Writing text={live} done={!busy} />}
+          {live === null ? null : (
+            <Writing
+              live={live}
+              busy={busy}
+              stopped={stopped}
+              expectUnauthorized={expectUnauthorized}
+            />
+          )}
 
           {busy && live === null ? (
             <p className="text-muted text-sm" role="status">
@@ -513,8 +525,8 @@ function HookRow({
 }
 
 /** How the run ended, in the one place where its answer sits above it. */
-function Verdict({ item }: { item: VerdictItem }) {
-  const { tone, text } = describeStop(item.stop)
+function Verdict({ item, expectUnauthorized }: { item: VerdictItem; expectUnauthorized: boolean }) {
+  const { tone, text } = describeVerdict(item, expectUnauthorized)
   return (
     <p className="flex flex-wrap items-baseline gap-2 text-xs">
       <Badge tone={tone}>{item.stop.outcome}</Badge>
@@ -526,18 +538,35 @@ function Verdict({ item }: { item: VerdictItem }) {
   )
 }
 
-/** The answer as it arrives, before the `done` event says what it really was. */
-function Writing({ text, done }: { text: string; done: boolean }) {
+/** The answer as it arrives, and then what the `done` event said it really was. */
+function Writing({
+  live,
+  busy,
+  stopped,
+  expectUnauthorized,
+}: {
+  live: Live
+  busy: boolean
+  stopped: boolean
+  expectUnauthorized: boolean
+}) {
+  const { text } = live
+  const done = !busy
+  const { tone, label } = describeLive(live, { busy, stopped }, expectUnauthorized)
   return (
     <div className="flex flex-col items-start gap-1">
       {/* Chrome, and unselectable for the same reason a bubble's label is. */}
       <div className="flex select-none items-center gap-2 px-1">
         <span className="text-faint text-xs">model</span>
-        <Badge tone={done ? 'good' : 'neutral'}>{done ? 'complete' : 'receiving…'}</Badge>
+        <Badge tone={tone}>{label}</Badge>
       </div>
       <div className="max-w-[85%] rounded-2xl border border-line bg-paper px-3 py-2 text-sm">
         {text.length === 0 ? (
-          <p className="text-faint italic">Connected. Nothing has arrived yet.</p>
+          <p className="text-faint italic">
+            {busy
+              ? 'Connected. Nothing has arrived yet.'
+              : 'Nothing arrived. Whatever the endpoint did say is on the wire below.'}
+          </p>
         ) : (
           // The caret goes into the source rather than after the render, which
           // is the only way it lands at the end of the last line instead of on a
