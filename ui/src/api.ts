@@ -307,6 +307,25 @@ const responseViewSchema = z.object({
   stream: streamViewSchema.optional(),
 })
 
+/**
+ * One part of a `multipart:` request.
+ *
+ * A text field carries its `value`; a file carries `filename`, `size` and the
+ * `uploadId` it came from, and never its bytes — they went out on the wire, and
+ * a panel repeating them would cost everything and tell the reader nothing.
+ */
+export const partViewSchema = z.object({
+  /** The form field it went out under, as the profile named it. */
+  field: z.string(),
+  contentType: z.string().optional(),
+  /** A text field's value, masked. Absent for a file. */
+  value: z.string().optional(),
+  /** A file's `filename`. Absent for a text field. */
+  filename: z.string().optional(),
+  uploadId: z.string().optional(),
+  size: z.number().optional(),
+})
+
 export const callOutcomeSchema = z.object({
   profile: z.string(),
   auth: z.string(),
@@ -314,7 +333,9 @@ export const callOutcomeSchema = z.object({
     method: z.string(),
     url: z.string(),
     headers: z.record(z.string(), z.string()),
+    /** Empty for a `multipart:` request — a form is not text, its parts are below. */
     body: z.string(),
+    parts: z.array(partViewSchema).default([]),
   }),
   curl: z.string(),
   response: responseViewSchema,
@@ -537,6 +558,7 @@ export type VectorSummary = z.infer<typeof vectorSummarySchema>
 export type CheckOutcome = z.infer<typeof checkOutcomeSchema>
 export type DecodeTrace = z.infer<typeof decodeTraceSchema>
 export type DecodedError = z.infer<typeof decodedErrorSchema>
+export type PartView = z.infer<typeof partViewSchema>
 export type CallOutcome = z.infer<typeof callOutcomeSchema>
 export type StopOutcome = z.infer<typeof stopOutcomeSchema>
 export type ToolInvocation = z.infer<typeof toolInvocationSchema>

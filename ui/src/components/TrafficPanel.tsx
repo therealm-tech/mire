@@ -1,5 +1,5 @@
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
-import type { DecodeTrace, HookRecord, StreamView, ToolInvocation } from '../api'
+import type { DecodeTrace, HookRecord, PartView, StreamView, ToolInvocation } from '../api'
 import {
   type Exchange,
   failed,
@@ -341,6 +341,39 @@ function Body({ text }: { text: string }) {
   return <Tree value={parsed} />
 }
 
+/**
+ * The parts of a `multipart:` request, in the order they went out.
+ *
+ * Order is shown because it is the profile's and the wire's, not the alphabet's
+ * — and a reader comparing this against a `curl` that worked wants the two lists
+ * to line up.
+ */
+function FormParts({ parts }: { parts: PartView[] }) {
+  return (
+    <ul className="space-y-0.5 text-xs">
+      {parts.map((part) => (
+        // The field alone will not do: several files under one name is what an
+        // upload handler reads, so a form can legitimately repeat it.
+        <li
+          key={`${part.field}·${part.uploadId ?? part.value ?? ''}`}
+          className="flex flex-wrap items-baseline gap-2"
+        >
+          <Badge tone="neutral">{part.field}</Badge>
+          {part.filename === undefined ? (
+            <span className="break-all font-mono">{part.value}</span>
+          ) : (
+            <span className="font-mono">{part.filename}</span>
+          )}
+          <span className="text-faint">
+            {part.contentType ?? 'form field'}
+            {part.size === undefined ? null : ` · ${formatBytes(part.size)}`}
+          </span>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
 /** A parsed value, already JSON. */
 function Tree({ value }: { value: unknown }) {
   return (
@@ -415,7 +448,14 @@ function ModelCard({
             </li>
           ))}
         </ul>
-        <Body text={outcome.request.body} />
+        {outcome.request.body.length > 0 ? <Body text={outcome.request.body} /> : null}
+
+        {/*
+          A form, by the field each part went out under. The field is the half
+          the endpoint actually reads — a form carrying the right file under the
+          wrong name is refused exactly like one carrying no file at all.
+        */}
+        {outcome.request.parts.length > 0 ? <FormParts parts={outcome.request.parts} /> : null}
       </Section>
 
       <Section title="Decode">

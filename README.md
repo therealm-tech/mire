@@ -504,6 +504,12 @@ case a two-line template — a log or a CSV inlined into the question:
 A request `script:` sees the same `uploads`, because it is the same context
 serialised — nothing is reachable from one request source and not the other.
 
+The third recipe does not inline the file at all. An endpoint that wants a
+`multipart/form-data` — a transcriber, a diariser — gets the bytes as a form
+part, and the profile says so with `request.multipart:` instead of a template;
+see [When the endpoint takes a form, not
+JSON](#when-the-endpoint-takes-a-form-not-json).
+
 Two things the fields cannot tell you, both of them the price of `mire` keeping
 no state: `name` is the **sanitised** name rather than what your browser called
 the file, and `contentType` is guessed from the extension rather than taken from
@@ -512,9 +518,11 @@ thing that survives a restart. A template that knows better writes the type
 itself.
 
 Attachments are re-rendered on **every turn** of an agent loop, since the body is
-built from the template each time. And they are inlined into a request body, so
-they arrive in **Traffic** at their full base64 size — a 12 MB photo is a 16 MB
-request to scroll past. Attach the file you meant to test with.
+built from the template each time. And a template that inlines one puts it in the
+request body, so it arrives in **Traffic** at its full base64 size — a 12 MB photo
+is a 16 MB request to scroll past. Attach the file you meant to test with. (A
+`multipart:` profile does not have this problem: the panel names its parts rather
+than repeating their bytes.)
 
 What the server does with the name it is given is worth knowing, since it is the
 one place `mire` writes anything:
@@ -686,7 +694,7 @@ a model runtime, an identity provider, and a door in front of the model so that
 "is this route actually protected?" has an answer.
 
 ```sh
-docker compose up -d          # first run pulls ~800 MB of models
+docker compose up -d          # first run pulls ~950 MB of models
 export OIDC_CLIENT_SECRET=mire-dev-secret
 export MODEL_TOKEN=anything   # the gateway only checks that a credential exists
 mire
@@ -699,6 +707,7 @@ there is nothing to pass.
 | --- | --- | --- |
 | `ollama` | 11434 | The models. Unauthenticated, on purpose |
 | `gateway` | 11435 | nginx in front of Ollama, rejecting requests with no credential |
+| `whisper` | 9000 | `speaches`, so `request.multipart:` has an endpoint that takes a form rather than a JSON document |
 | `mcp` | 11436 | A minimal MCP server on `2026-07-28`, so the loop has something real to call |
 | `mcp-legacy` | 11437 | The same server on `2025-06-18`, so the revision negotiation has something to negotiate with |
 | `keycloak` | 8080 | Realm `mire`: `mire-workload` (service account) and `mire-ui` (browser login, user `mire` / `mire`) |
@@ -711,8 +720,11 @@ Models, as of August 2026 — these rankings move monthly, so revisit the choice
 - **`nomic-embed-text:v1.5`** (274 MB, 768 dimensions, MTEB 62.4). The most
   pulled embedding model in the Ollama library, and it runs on a CPU.
   `qwen3-embedding:0.6b` scores higher (70.7 on MTEB-eng-v2) at 639 MB.
+- **`Systran/faster-whisper-base`** (~145 MB), served by `whisper` rather than by
+  Ollama. Faster than real time on a laptop CPU at `int8`. `-tiny` is a third of
+  the size and audibly worse; `-small` is better and four times the download.
 
-Two profiles come with it, one per kind:
+Three profiles come with it:
 
 - **`qwen3`** — the chat one, and it carries everything `mire` does with a chat
   endpoint at once: a template driven by the call, a decode cascade, an agent
@@ -733,8 +745,23 @@ Two profiles come with it, one per kind:
   it miss and `$.embeddings` take over. No `auth:`, so it calls as `anonymous`
   and the panel says as much.
 
-Both files are commented with the edit that turns them into the next experiment
-— `qwen3` in particular is two lines away from Ollama's *own* chat API, where the
+- **`whisper`** — the odd one out, and the reason `whisper` is in the stack at
+  all: an endpoint that does not read a JSON document. The audio goes out as a
+  form part and the knobs beside it, which is [a request built a third
+  way](#when-the-endpoint-takes-a-form-not-json). Attach an audio file, press
+  **Send**, and read the parts in **Traffic**. The pyannote variant is written
+  out in a comment beside it.
+
+  Say something into a file and try it without leaving the terminal — on a Mac,
+  `say` will do:
+
+  ```sh
+  say -o /tmp/speech.wav --data-format=LEI16@16000 \
+    "Mire is a test pattern for model endpoints."
+  ```
+
+The three are commented with the edit that turns them into the next
+experiment — `qwen3` in particular is two lines away from Ollama's *own* chat API, where the
 content sits at `$.message.content`, the stop reason is called `done_reason` and
 the token counters are at the top level. Its cascades already list both shapes,
 so nothing has to change to follow it and the decode trace names the path that
@@ -1060,9 +1087,10 @@ decode:
 
 **Reach for a cascade first, every time.** A script is code in a config file: it
 is harder to read, harder to review, and it survives worse. It earns its place
-when the alternative is not supporting the endpoint at all. `template` and
-`script`, and `decode` paths and `decode.script`, are mutually exclusive — a
-profile declaring both fails to load, so there is no precedence rule to remember.
+when the alternative is not supporting the endpoint at all. `template`, `script`
+and `multipart` are mutually exclusive, and so are `decode` paths and
+`decode.script` — a profile declaring two fails to load, so there is no
+precedence rule to remember. A request is one body.
 
 Scripts are compiled when the profile loads, so a syntax error names the file at
 startup. At call time they are bounded: 500k operations, a one-second deadline,
@@ -1072,10 +1100,123 @@ test asserts it stays that way. A decode script that fails is *not* fatal: its
 message lands in the decode trace next to the raw response, exactly like a path
 that missed.
 
-Neither shipped profile uses one, on purpose: they are meant to be read, and a
-script is what you add once a cascade has already failed you. The snippet above
+Neither shipped chat profile uses one, on purpose: they are meant to be read, and
+a script is what you add once a cascade has already failed you. The snippet above
 is the real motivating case — qwen3 emits its reasoning inside a
 `<think>…</think>` block, and no path can strip a prefix.
+
+### When the endpoint takes a form, not JSON
+
+Whisper does not read a JSON document. Neither does pyannote, or any of the
+diarisers, classifiers and OCR services shaped like them: they take a
+`multipart/form-data` — the bytes in one part, a handful of knobs as ordinary
+form fields beside them. That is the third way to build a body:
+
+```yaml
+request:
+  multipart:
+    file:
+      upload: '{{ uploads[0] }}'
+    model: whisper-1
+    response_format: json
+    temperature: 0
+    prompt: '{{ messages[-1].content }}'
+```
+
+**A bare value is a text field**, and it is a template like any other — the same
+`messages`, `input`, `tools`, `model`, `params` and `uploads` a `template:` sees.
+Write a number or a boolean as itself if that is how the knob reads; a form sends
+text either way.
+
+**`upload:` is what makes a field a file.** It names uploads of the call: the
+object whole (`{{ uploads[0] }}`), the list of them (`{{ uploads }}`), or a
+string matching a file's `path`, `name` or `id`. Several files under one field go
+out as several parts under that name, which is what every server-side upload
+handler already reads.
+
+The two are never guessed at from the rendered value. A `model: whisper-1` that
+turned into a file part because something in the upload directory happened to be
+called `whisper-1` is exactly the surprise this tool exists not to have.
+
+Both kinds take an optional `type:`, and a file part also takes `filename:`:
+
+| Key | On | What it does |
+| --- | --- | --- |
+| `text` | text part | The template. The same thing a bare value is |
+| `upload` | file part | One template naming uploads, or a list of them |
+| `type` | either | The part's `content-type`, overriding the extension's guess |
+| `filename` | file part | The part's `filename`, overriding the stored name |
+
+Both overrides exist because both are guesses worth overriding. The media type
+comes from the extension — `.mp3` is `audio/mpeg`, `.wav` is `audio/wav`, and
+`application/octet-stream` when the extension said nothing — and some endpoints
+validate the name's extension before they look at a single byte. A `filename:` on
+a field carrying more than one file is refused: two parts under one name is a
+form nobody meant.
+
+`type:` on a *text* part is what a diariser usually wants, for the options blob
+that travels beside the audio:
+
+```yaml
+request:
+  multipart:
+    file:
+      upload: '{{ uploads[0] }}'
+    config:
+      text: '{{ params.config | tojson }}'
+      type: application/json
+```
+
+**Fields go out in the order the file writes them**, not in alphabetical order.
+Most parsers do not care, right up to the one that does.
+
+**A field naming a file nobody attached fails the call**, before anything leaves:
+
+```json
+{
+  "code": "multipart_error",
+  "message": "request.multipart: `file` names a file, and nothing was attached to this call"
+}
+```
+
+That refusal is the whole point of the shape. A form missing the one part the
+endpoint asked for goes out looking perfectly well-formed and comes back a `422`
+about a field nobody in the profile ever mentioned, which costs an afternoon.
+
+You never write the `content-type`: the encoder settles it at send time, boundary
+included, and a `headers.content-type` in the profile is dropped with a warning
+rather than sent beside the real one.
+
+The rest is unchanged. `auth:` still puts the credential where the provider says,
+the `401` replay still works, and a transcript still decodes like any other
+completion — `kind: chat` plus a one-line cascade, because a transcript *is* text
+in an answer:
+
+```yaml
+decode:
+  content:
+    - $.text
+```
+
+**Traffic** shows a form as its parts rather than as a body, since a form is not
+text: the field each part went out under, the value for a text field, and the
+name, type and size for a file — never its bytes. **Copy as curl** gives you `-F`
+flags with the file by its path on disk, so the command actually runs:
+
+```sh
+curl -sS -X POST \
+  'http://127.0.0.1:9000/v1/audio/transcriptions' \
+  -F 'file=@./uploads/jcnp3-qNY8cJ-speech.wav;type=audio/wav;filename=speech.wav' \
+  -F 'model=Systran/faster-whisper-base' \
+  -F 'response_format=json' \
+  -F 'temperature=0' \
+  -F 'prompt=mire, endpoints'
+```
+
+[`profiles/whisper.yaml`](profiles/whisper.yaml) is the worked example, and
+`docker compose up -d` serves something for it to talk to — see [A stack to point
+it at](#a-stack-to-point-it-at). The pyannote variant is written out in a comment
+beside it.
 
 ## Really calling tools
 

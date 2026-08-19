@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from './App'
-import type { CallOutcome, HookRecord } from './api'
+import type { CallOutcome, HookRecord, PartView } from './api'
 import {
   describeLive,
   describeStop,
@@ -144,6 +144,9 @@ function completion(status: number) {
       url: 'https://models.internal/v1/chat/completions',
       headers: { authorization: '***' },
       body: '{"messages":[]}',
+      // Typed, not inferred: a bare `[]` is `never[]`, and the one test that
+      // replaces it with real parts would be the one that stopped compiling.
+      parts: [] as PartView[],
     },
     curl: "curl -sS -X POST 'https://models.internal/v1/chat/completions'",
     response: {
@@ -2090,6 +2093,59 @@ describe('traffic', () => {
     // emptied for you every time you press Send.
     await user.click(screen.getByRole('button', { name: 'Clear' }))
     expect(screen.getByText(/Nothing on the wire yet/)).toBeInTheDocument()
+  })
+
+  /**
+   * A `multipart:` request has no body to show, so the panel shows its parts.
+   *
+   * The file is named, never repeated: the bytes went out on the wire, and a
+   * panel carrying them beside the name would cost everything and say nothing.
+   */
+  it('shows the parts of a multipart request instead of a body', async () => {
+    const call = completion(200)
+    const form = {
+      ...call,
+      request: {
+        ...call.request,
+        body: '',
+        parts: [
+          {
+            field: 'file',
+            filename: 'meeting.mp3',
+            contentType: 'audio/mpeg',
+            uploadId: 'aB3dE5gH7jK9',
+            size: 2048,
+          },
+          { field: 'model', value: 'whisper-1' },
+        ],
+      },
+    }
+
+    vi.stubGlobal(
+      'fetch',
+      mockApi({
+        'api/profiles': PROFILES,
+        'api/auth': AUTH,
+        'api/mcp': MCP,
+        'api/prompts': PROMPTS,
+        'api/agent': agentStream([{ ...answerTurn(200), call: form }]),
+      }),
+    )
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Turn 1 · model/ })).toBeInTheDocument()
+    })
+
+    const model = within(await openCard(user, /Turn 1 · model/))
+    // The field is the half the endpoint actually reads, so it leads each row.
+    expect(model.getByText('file')).toBeInTheDocument()
+    expect(model.getByText('meeting.mp3')).toBeInTheDocument()
+    expect(model.getByText(/audio\/mpeg/)).toBeInTheDocument()
+    expect(model.getByText('model')).toBeInTheDocument()
+    expect(model.getByText('whisper-1')).toBeInTheDocument()
   })
 })
 

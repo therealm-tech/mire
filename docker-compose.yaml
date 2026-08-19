@@ -64,6 +64,71 @@ services:
     volumes:
       - ./dev/gateway/nginx.conf:/etc/nginx/conf.d/default.conf:ro
 
+  # An endpoint that does not read JSON, so `request.multipart:` has something
+  # real to be pointed at. `speaches` is the current name of what used to be
+  # `faster-whisper-server`; it serves the OpenAI-compatible
+  # `/v1/audio/transcriptions`, which takes the audio as a form part and the
+  # knobs as fields beside it.
+  #
+  # Published on 9000 because that is where `profiles/whisper.yaml` looks. The
+  # container's own port is 8000 and stays that way.
+  whisper:
+    image: ghcr.io/speaches-ai/speaches:0.8.3-cpu
+    ports:
+      - 127.0.0.1:9000:8000
+    environment:
+      # Nested settings take a double underscore, and the names are the ones
+      # *this* tag reads: 0.9 renamed several of them, and a setting that has
+      # been renamed is not a setting that errors — pydantic ignores the unknown
+      # variable and you get the default with no warning at all. Both of these
+      # were read back out of the config line the server logs on startup.
+      #
+      # CTranslate2 defaults to float32 on a CPU. `int8` is several times faster
+      # for a loss you will not hear at this size, and there is no GPU to fall
+      # back on: faster-whisper does CUDA or CPU, with no Metal, so a Mac runs
+      # this on the CPU like everything else here.
+      WHISPER__COMPUTE_TYPE: int8
+      # Never unload. The default drops the model after five minutes idle and
+      # the next call pays the load again — a latency number in the traffic
+      # panel that says more about the cache than about the endpoint.
+      WHISPER__TTL: "-1"
+    volumes:
+      - whisper-models:/home/ubuntu/.cache/huggingface/hub
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --fail
+        - --silent
+        - http://localhost:8000/health
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Fetches the model once, then exits — the same shape as `ollama-pull`, and
+  # for the same reason. This tag has no preloading of its own, so left alone it
+  # downloads on the first transcription: a first call that looks like an
+  # endpoint hanging, which is the one failure mode this stack should not be
+  # teaching.
+  #
+  # `faster-whisper-base` is ~145 MB and transcribes faster than real time on a
+  # laptop CPU. `-tiny` is a third of that and noticeably worse; `-small` is
+  # better and four times the download. Change it here and in
+  # `profiles/whisper.yaml`, which names the model in the form it sends.
+  whisper-pull:
+    image: curlimages/curl:8.19.0
+    depends_on:
+      whisper:
+        condition: service_healthy
+    command:
+      - --fail
+      - --silent
+      - --show-error
+      - -X
+      - POST
+      - http://whisper:8000/v1/models/Systran/faster-whisper-base
+    restart: "no"
+
   # The identity provider behind `kind: oidc`. Dev mode, in-memory, realm
   # imported at startup.
   # Something for agent mode to really call. Standard library only, so there is
@@ -154,3 +219,4 @@ services:
 
 volumes:
   ollama-models:
+  whisper-models:

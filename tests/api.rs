@@ -2336,9 +2336,12 @@ request: {}
         .map(|issue| issue["message"].as_str().unwrap().to_owned())
         .collect();
     let all = messages.join(" | ");
-    assert!(all.contains("not both"), "{all}");
+    assert!(all.contains("a request is one body"), "{all}");
     assert!(all.contains("replaces the cascades"), "{all}");
-    assert!(all.contains("needs a `template` or a `script`"), "{all}");
+    assert!(
+        all.contains("needs a `template`, a `script` or a `multipart`"),
+        "{all}"
+    );
 }
 
 #[tokio::test]
@@ -7218,4 +7221,287 @@ async fn an_attachment_is_carried_on_every_turn_of_a_loop() {
                 .contains("data:image/png;base64,iVBORw=="),
         );
     }
+}
+
+// --- multipart requests ------------------------------------------------------
+
+/// A transcription profile: the audio as bytes, the knobs as form fields beside
+/// it. This is the shape a whisper-style endpoint actually reads, and none of it
+/// is built in Rust — the profile says what the form carries.
+fn transcription_profile(url: &str) -> String {
+    format!(
+        r#"
+name: whisper
+kind: chat
+url: {url}
+timeout_ms: 5000
+request:
+  multipart:
+    file:
+      upload: '{{{{ uploads[0] }}}}'
+    model: whisper-1
+    response_format: json
+    temperature: 0
+    prompt: '{{{{ messages[-1].content }}}}'
+decode:
+  content: ["$.text"]
+  error: ["$.error"]
+"#
+    )
+}
+
+/// The whole point of the feature, end to end: attach an audio file, and what
+/// leaves is a `multipart/form-data` a transcriber will accept.
+#[tokio::test]
+async fn a_multipart_profile_sends_the_file_and_its_knobs_as_form_parts() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/transcriptions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"text": "hello there"})))
+        .mount(&server)
+        .await;
+
+    let mire = Harness::start(&[(
+        "whisper.yaml",
+        transcription_profile(&format!("{}/v1/audio/transcriptions", server.uri())),
+    )])
+    .await;
+
+    let (_, stored) = mire.upload("meeting.mp3", b"ID3\x04audio").await;
+
+    let (status, _, body) = mire
+        .call(json!({
+            "profile": "whisper",
+            "prompt": "the speakers are French",
+            "uploads": [stored["id"].as_str().expect("id")],
+        }))
+        .await;
+    assert_eq!(status, 200);
+
+    // Decoded like any other answer: `kind: chat` plus a `$.text` cascade is all
+    // a transcriber needs, so nothing new had to be invented downstream.
+    assert_eq!(body["response"]["decoded"]["content"], "hello there");
+
+    // What actually went out.
+    let sent = &server.received_requests().await.unwrap()[0];
+    let content_type = sent
+        .headers
+        .get("content-type")
+        .expect("content-type")
+        .to_str()
+        .expect("text");
+    assert!(
+        content_type.starts_with("multipart/form-data; boundary="),
+        "{content_type}"
+    );
+    // Exactly one, which is the trap: `reqwest` appends its own, so a
+    // `content-type` surviving the header pass would go out beside it and a
+    // server reading the first would be told `json` about a form.
+    assert_eq!(sent.headers.get_all("content-type").iter().count(), 1);
+
+    let form = String::from_utf8_lossy(&sent.body);
+    assert!(form.contains(r#"name="file""#), "{form}");
+    assert!(form.contains(r#"filename="meeting.mp3""#), "{form}");
+    assert!(form.contains("audio/mpeg"), "{form}");
+    // The bytes themselves, not a description of them.
+    assert!(form.contains("ID3\u{4}audio"), "{form}");
+    // And the knobs, rendered: a literal, a number written as one, and a
+    // template reading the call.
+    assert!(form.contains(r#"name="model""#), "{form}");
+    assert!(form.contains("whisper-1"), "{form}");
+    assert!(form.contains(r#"name="temperature""#), "{form}");
+    assert!(form.contains(r#"name="prompt""#), "{form}");
+    assert!(form.contains("the speakers are French"), "{form}");
+
+    // Order is the profile's, not the alphabet's.
+    let file_at = form.find(r#"name="file""#).expect("file part");
+    let model_at = form.find(r#"name="model""#).expect("model part");
+    assert!(file_at < model_at, "{form}");
+}
+
+/// The trace has to say what went out, and for a form that is the parts — not a
+/// body, which a form does not have, and not the bytes, which nobody can read.
+#[tokio::test]
+async fn the_trace_of_a_form_names_its_parts_and_carries_none_of_the_bytes() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/transcriptions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"text": "ok"})))
+        .mount(&server)
+        .await;
+
+    let mire = Harness::start(&[(
+        "whisper.yaml",
+        transcription_profile(&format!("{}/v1/audio/transcriptions", server.uri())),
+    )])
+    .await;
+
+    let (_, stored) = mire.upload("meeting.mp3", b"ID3\x04audio").await;
+    let (status, _, body) = mire
+        .call(json!({
+            "profile": "whisper",
+            "prompt": "ping",
+            "uploads": [stored["id"].as_str().expect("id")],
+        }))
+        .await;
+    assert_eq!(status, 200);
+
+    // A form is not text, so there is no body to show.
+    assert_eq!(body["request"]["body"], "");
+
+    let parts = body["request"]["parts"].as_array().expect("parts");
+    let file = &parts[0];
+    assert_eq!(file["field"], "file");
+    assert_eq!(file["filename"], "meeting.mp3");
+    assert_eq!(file["contentType"], "audio/mpeg");
+    assert_eq!(file["size"], 9);
+    assert_eq!(file["uploadId"], stored["id"]);
+    // Named, never repeated: a panel carrying the bytes beside them would cost
+    // everything and tell the reader nothing.
+    assert!(file.get("value").is_none(), "{file}");
+
+    let model = &parts[1];
+    assert_eq!(model["field"], "model");
+    assert_eq!(model["value"], "whisper-1");
+    assert!(model.get("filename").is_none(), "{model}");
+
+    // The `curl` is one somebody can run: `-F` flags, and the file by the path
+    // `--uploads` put it at.
+    let curl = body["curl"].as_str().expect("curl");
+    assert!(curl.contains("-F 'model=whisper-1'"), "{curl}");
+    assert!(curl.contains("-F 'file=@"), "{curl}");
+    assert!(curl.contains("meeting.mp3;type=audio/mpeg"), "{curl}");
+    assert!(!curl.contains("--data-raw"), "{curl}");
+}
+
+/// A form field naming a file nobody attached is refused before anything leaves,
+/// the same way a hook's is. A `422` from the endpoint about a field nobody in
+/// the profile ever mentioned is exactly the afternoon this avoids.
+#[tokio::test]
+async fn a_form_with_nothing_attached_is_refused_before_anything_is_sent() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/transcriptions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"text": "ok"})))
+        .mount(&server)
+        .await;
+
+    let mire = Harness::start(&[(
+        "whisper.yaml",
+        transcription_profile(&format!("{}/v1/audio/transcriptions", server.uri())),
+    )])
+    .await;
+
+    let (status, _, body) = mire
+        .call(json!({"profile": "whisper", "prompt": "transcribe this"}))
+        .await;
+
+    assert_eq!(status, 422);
+    assert_eq!(body["code"], "multipart_error");
+    let message = body["message"].as_str().expect("message");
+    assert!(message.contains("nothing was attached"), "{message}");
+    assert!(message.contains("`file`"), "{message}");
+
+    // And nothing left: the endpoint was never asked to explain our own profile
+    // back to us.
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+/// A diarisation-shaped profile: the audio, plus a JSON blob beside it. The
+/// second is what `type:` on a text field exists for, and the overrides on the
+/// file part are for a store that could not classify the extension.
+#[tokio::test]
+async fn a_text_part_can_declare_its_own_content_type() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/diarize"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"text": "ok"})))
+        .mount(&server)
+        .await;
+
+    let profile = format!(
+        r#"
+name: pyannote
+kind: chat
+url: {}/diarize
+timeout_ms: 5000
+request:
+  multipart:
+    file:
+      upload: '{{{{ uploads[0] }}}}'
+      type: audio/wav
+      filename: input.wav
+    config:
+      text: '{{{{ params.config | tojson }}}}'
+      type: application/json
+decode:
+  content: ["$.text"]
+"#,
+        server.uri()
+    );
+
+    let mire = Harness::start(&[("pyannote.yaml", profile)]).await;
+    let (_, stored) = mire.upload("recording", b"RIFF").await;
+
+    let (status, _, _) = mire
+        .call(json!({
+            "profile": "pyannote",
+            "prompt": "who spoke",
+            "uploads": [stored["id"].as_str().expect("id")],
+            "params": {"config": {"num_speakers": 2}},
+        }))
+        .await;
+    assert_eq!(status, 200);
+
+    let sent = server.received_requests().await.unwrap();
+    let form = String::from_utf8_lossy(&sent[0].body);
+    assert!(form.contains(r#"filename="input.wav""#), "{form}");
+    assert!(form.contains("audio/wav"), "{form}");
+    assert!(form.contains("application/json"), "{form}");
+    assert!(form.contains(r#"{"num_speakers":2}"#), "{form}");
+}
+
+/// Everything the JSON path already had still works when the body is a form: the
+/// credential goes where the provider says, and it never comes back out.
+#[tokio::test]
+async fn a_form_is_authenticated_and_redacted_like_any_other_request() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/transcriptions"))
+        .and(header("authorization", "Bearer s3cr3t-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"text": "ok"})))
+        .mount(&server)
+        .await;
+
+    let mire = Harness::start(&[
+        (
+            "auth.yaml",
+            "providers:\n  - name: pasted\n    kind: token\n".to_owned(),
+        ),
+        (
+            "whisper.yaml",
+            transcription_profile(&format!("{}/v1/audio/transcriptions", server.uri())),
+        ),
+    ])
+    .await;
+
+    let (_, stored) = mire.upload("meeting.mp3", b"ID3").await;
+    let (status, _, body) = mire
+        .call(json!({
+            "profile": "whisper",
+            "auth": "pasted",
+            "prompt": "ping",
+            "token": "s3cr3t-token",
+            "uploads": [stored["id"].as_str().expect("id")],
+        }))
+        .await;
+
+    // The endpoint only answers a request carrying the credential, so a `200`
+    // here is the credential having made it onto a form request.
+    assert_eq!(status, 200);
+    assert_eq!(body["response"]["http"]["status"], 200);
+
+    let curl = body["curl"].as_str().expect("curl");
+    assert!(!curl.contains("s3cr3t-token"), "{curl}");
+    assert!(!body.to_string().contains("s3cr3t-token"), "{body}");
 }

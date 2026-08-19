@@ -214,7 +214,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use minijinja::value::{Value as Rendered, ValueKind};
+use minijinja::value::Value as Rendered;
 use minijinja::{Environment, UndefinedBehavior};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use reqwest::multipart::{Form, Part};
@@ -230,7 +230,7 @@ use super::headers::HeaderTemplates;
 use super::{McpCredentials, McpError};
 use crate::auth::AuthProvider;
 use crate::redact::Redactor;
-use crate::uploads::UploadRef;
+use crate::uploads::{UploadRef, carrying, mime_of, resolve};
 use crate::vars::Captured;
 
 /// Body templates render strictly, for the same reason header templates do: a
@@ -1353,69 +1353,6 @@ fn attach<'a>(parts: &[PartSpec], rendering: &Rendering<'a>) -> Result<Vec<Attac
     Ok(attached)
 }
 
-/// The uploads one rendered value names.
-///
-/// Three forms, because a template can sensibly produce three things: an upload
-/// whole (`{{ uploads[0] }}`), a list of them (`{{ uploads }}`), or a string
-/// naming one — its `path`, its `name` or its `id`. Anything else is an error
-/// rather than a part quietly left out of the form.
-fn resolve<'a>(
-    value: &Rendered,
-    uploads: &'a [UploadRef],
-    field: &str,
-) -> Result<Vec<&'a UploadRef>, String> {
-    if let Some(text) = value.as_str() {
-        return named(text, uploads, field).map(|upload| vec![upload]);
-    }
-
-    if value.kind() == ValueKind::Seq {
-        let items = value
-            .try_iter()
-            .map_err(|error| format!("`{field}`: {}", root(&error)))?;
-        let mut found = Vec::new();
-        for item in items {
-            found.extend(resolve(&item, uploads, field)?);
-        }
-        return Ok(found);
-    }
-
-    // An upload as the context carries it. Any of the three identifying fields
-    // will do, and `path` is the one a file is most likely to have written.
-    for attribute in ["path", "id", "name"] {
-        if let Ok(inner) = value.get_attr(attribute)
-            && let Some(text) = inner.as_str()
-        {
-            return named(text, uploads, field).map(|upload| vec![upload]);
-        }
-    }
-
-    Err(format!(
-        "`{field}`: that is not a file, and not the name of one"
-    ))
-}
-
-/// The upload a path, name or id points at.
-fn named<'a>(text: &str, uploads: &'a [UploadRef], field: &str) -> Result<&'a UploadRef, String> {
-    uploads
-        .iter()
-        .find(|upload| upload.path == text || upload.name == text || upload.id == text)
-        .ok_or_else(|| {
-            format!(
-                "`{field}`: `{text}` is not a file this run is carrying ({})",
-                carrying(uploads)
-            )
-        })
-}
-
-/// What the run has to offer, for the error saying it had none of it.
-fn carrying(uploads: &[UploadRef]) -> String {
-    if uploads.is_empty() {
-        return "nothing was attached to this run".to_owned();
-    }
-    let names: Vec<&str> = uploads.iter().map(|upload| upload.name.as_str()).collect();
-    format!("it is carrying {}", names.join(", "))
-}
-
 /// One upload on its way out, as the trace describes it. Everything but bytes.
 fn describe(attached: &Attached<'_>) -> Attachment {
     Attachment {
@@ -1425,18 +1362,6 @@ fn describe(attached: &Attached<'_>) -> Attachment {
         size: attached.upload.size,
         content_type: mime_of(attached.upload).to_owned(),
     }
-}
-
-/// The media type a file's part goes out as.
-///
-/// The extension's guess, made by the upload store. `application/octet-stream`
-/// when the extension gave nothing away, which is what a part with no better
-/// idea is supposed to say.
-fn mime_of(upload: &UploadRef) -> &str {
-    upload
-        .content_type
-        .as_deref()
-        .unwrap_or("application/octet-stream")
 }
 
 /// The multipart form: one part per file, under the field that named it.
