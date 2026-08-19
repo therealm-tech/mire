@@ -10,6 +10,7 @@ const PROFILE: ProfileSummary = {
   source: '/tmp/chat.yaml',
   hasPrompt: true,
   hasDecode: true,
+  requiresUpload: false,
 }
 
 const PROVIDER: AuthDescriptor = {
@@ -28,6 +29,7 @@ function run(overrides: {
   token?: string
   /** A chat profile with servers unless a test says otherwise. */
   usesMcp?: boolean
+  uploads?: number
   mcpOff?: string[]
 }) {
   const provider =
@@ -42,6 +44,7 @@ function run(overrides: {
     servers: overrides.servers ?? [],
     token: overrides.token ?? '',
     usesMcp: overrides.usesMcp ?? true,
+    uploads: overrides.uploads ?? 0,
     mcpOff: overrides.mcpOff ?? [],
   })
 }
@@ -85,6 +88,23 @@ describe('preflight', () => {
     expect(state.blockers[0]?.message).toContain('ghost')
     // Nothing to press: the fix is in a file, not in this tab.
     expect(state.blockers[0]?.signIn).toBeUndefined()
+  })
+
+  it('blocks a requires_upload profile until a file is attached', () => {
+    const empty = run({ profile: { name: 'whisper', requiresUpload: true } })
+    expect(empty.blockers).toHaveLength(1)
+    expect(empty.blockers[0]?.message).toContain('whisper')
+    // The fix is a button on the composer, not one on the bar.
+    expect(empty.blockers[0]?.needsUpload).toBe(true)
+    expect(empty.blockers[0]?.signIn).toBeUndefined()
+
+    // Any file clears it: the profile asked for one, not for a particular one.
+    expect(run({ profile: { requiresUpload: true }, uploads: 1 }).blockers).toEqual([])
+  })
+
+  it('says nothing about attachments a profile never asked for', () => {
+    expect(run({ uploads: 0 }).blockers).toEqual([])
+    expect(run({ uploads: 3 }).blockers).toEqual([])
   })
 
   it('blocks a credential pinned away from where the profile points', () => {

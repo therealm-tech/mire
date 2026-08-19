@@ -31,6 +31,8 @@ export interface Blocker {
   signIn?: string
   /** Set when the fix is a field inside the auth panel, which is otherwise shut. */
   opensAuth?: boolean
+  /** Set when the fix is **Attach**, which is a button on the composer. */
+  needsUpload?: boolean
 }
 
 /** What the next call would do, and whether it can happen at all. */
@@ -68,6 +70,7 @@ export function preflight({
   servers,
   token,
   usesMcp,
+  uploads = 0,
   mcpOff = [],
 }: {
   profile: ProfileSummary
@@ -95,6 +98,15 @@ export function preflight({
    * that is going to go through.
    */
   usesMcp: boolean
+  /**
+   * How many files this tab has attached.
+   *
+   * Only a blocker against a `requires_upload:` profile, and a count rather than
+   * a flag because that is what the rule is: the profile asks for a file, not for
+   * a particular one. Which of them the request actually uses is the template's
+   * business, and it is not read here.
+   */
+  uploads?: number
 }): Preflight {
   const blockers: Blocker[] = []
   const notes: string[] = []
@@ -104,6 +116,16 @@ export function preflight({
   const names = servers.map((server) => server.name)
   const declared = usesMcp ? names.filter((name) => !mcpOff.includes(name)) : []
   const off = usesMcp ? names.filter((name) => mcpOff.includes(name)) : []
+
+  // Said first, because it is the one blocker fixed by a button on the composer
+  // rather than by anything in the auth panel — and on a transcriber it is the
+  // only thing between an empty run and an answer.
+  if (profile.requiresUpload && uploads === 0) {
+    blockers.push({
+      message: `${profile.name} needs a file: attach one, since the request is built around it.`,
+      needsUpload: true,
+    })
+  }
 
   if (provider === undefined) {
     blockers.push({

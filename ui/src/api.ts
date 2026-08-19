@@ -48,6 +48,13 @@ export const profileSummarySchema = z.object({
   auth: z.string().nullable(),
   source: z.string(),
   hasDecode: z.boolean(),
+  /**
+   * Whether a call to this profile has to carry a file.
+   *
+   * The server refuses one that does not, whichever endpoint it arrives at, so
+   * this is here to say it before **Send** rather than to be the rule.
+   */
+  requiresUpload: z.boolean(),
 })
 
 export const profilesResponseSchema = z.object({

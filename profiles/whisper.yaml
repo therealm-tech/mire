@@ -33,6 +33,16 @@ url: http://127.0.0.1:9000/v1/audio/transcriptions
 # Transcribing an hour of audio is not a 30-second request.
 timeout_ms: 600000
 
+# And with nothing to type, this is the only thing left holding **Send** back —
+# which is the point. A run with no file attached would render a form around a
+# part that is not there, so the button stays greyed until **Attach** has been
+# pressed, and every API endpoint refuses the same call with a `422` naming this
+# profile.
+#
+# The `upload:` field below refuses it too, one step later — while the form is
+# being built. This one is the earlier half, and the half a button can read.
+requires_upload: true
+
 # One entry per form field, in the order they go out.
 #
 # A bare value is a text field, and it is a template like any other — so

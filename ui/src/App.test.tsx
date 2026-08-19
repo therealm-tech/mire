@@ -21,6 +21,7 @@ const PROFILES = {
       source: '/tmp/chat.yaml',
       hasPrompt: true,
       hasDecode: true,
+      requiresUpload: false,
     },
     {
       name: 'embed',
@@ -30,6 +31,7 @@ const PROFILES = {
       source: '/tmp/embed.yaml',
       hasPrompt: true,
       hasDecode: true,
+      requiresUpload: false,
     },
     // Names a credential this tab has to be asked for.
     {
@@ -40,6 +42,7 @@ const PROFILES = {
       source: '/tmp/guarded.yaml',
       hasPrompt: true,
       hasDecode: true,
+      requiresUpload: false,
     },
     // Calls as a human, which is the one identity nobody can put in a file.
     {
@@ -50,6 +53,7 @@ const PROFILES = {
       source: '/tmp/as-me.yaml',
       hasPrompt: true,
       hasDecode: true,
+      requiresUpload: false,
     },
     // Reads a file rather than a sentence, and says so: `has_prompt: false` in
     // its YAML, which is the composer's cue to drop its box.
@@ -61,6 +65,7 @@ const PROFILES = {
       source: '/tmp/transcribe.yaml',
       hasPrompt: false,
       hasDecode: true,
+      requiresUpload: false,
     },
     // Broken on purpose: `gateway` may only be sent to 127.0.0.1, and this
     // points somewhere else. Every call it makes is refused before it goes out.
@@ -72,6 +77,7 @@ const PROFILES = {
       source: '/tmp/pinned.yaml',
       hasPrompt: true,
       hasDecode: true,
+      requiresUpload: false,
     },
   ],
   issues: [],
@@ -3402,6 +3408,114 @@ function bodySentTo(
   }
   return JSON.parse(String((sent[1] as RequestInit).body)) as Record<string, unknown>
 }
+
+/**
+ * A profile whose request is built around a file, and which still has a question
+ * to ask about it — an OCR service, a vision endpoint. Both fields on, and they
+ * are independent: `has_prompt:` says whether there is a box, `requires_upload:`
+ * whether there is a call.
+ */
+const NEEDS_A_FILE = {
+  profiles: [
+    {
+      name: 'describe-image',
+      kind: 'chat',
+      url: 'https://models.internal/v1/describe',
+      auth: null,
+      source: '/tmp/describe-image.yaml',
+      hasPrompt: true,
+      hasDecode: true,
+      requiresUpload: true,
+    },
+  ],
+  issues: [],
+}
+
+/** What `profiles/whisper.yaml` declares: no box, and no call without a file. */
+const NEEDS_A_FILE_AND_NOTHING_ELSE = {
+  profiles: [
+    {
+      name: 'whisper',
+      kind: 'chat',
+      url: 'http://127.0.0.1:9000/v1/audio/transcriptions',
+      auth: null,
+      source: '/tmp/whisper.yaml',
+      hasPrompt: false,
+      hasDecode: true,
+      requiresUpload: true,
+    },
+  ],
+  issues: [],
+}
+
+describe('a profile that requires a file', () => {
+  it('holds Send shut until one is attached, and says why', async () => {
+    const fetchMock = mockApi({
+      'api/profiles': NEEDS_A_FILE,
+      'api/auth': AUTH,
+      'api/mcp': MCP,
+      'api/prompts': PROMPTS,
+      'api/uploads': UPLOADED,
+      'api/agent': agentStream([answerTurn(200, 'a known signal')]),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+
+    const send = await screen.findByRole('button', { name: 'Send' })
+    expect(send).toBeDisabled()
+    // Said on the bar, in the same place every other refusal is said.
+    expect(screen.getByText(/describe-image needs a file/)).toBeInTheDocument()
+
+    // Whatever the mock stores is what comes back, and any file clears the
+    // blocker: the profile asked for one, not for a particular one.
+    pick([new File(['a known signal'], 'report.pdf', { type: 'application/pdf' })])
+    await screen.findByText('report.pdf')
+
+    await waitFor(() => expect(send).toBeEnabled())
+    expect(screen.queryByText(/needs a file/)).not.toBeInTheDocument()
+  })
+
+  it('holds it shut on a profile with no box either', async () => {
+    vi.stubGlobal(
+      'fetch',
+      mockApi({
+        'api/profiles': NEEDS_A_FILE_AND_NOTHING_ELSE,
+        'api/auth': AUTH,
+        'api/mcp': MCP,
+        'api/prompts': PROMPTS,
+      }),
+    )
+    render(<App />)
+
+    // `has_prompt: false` is what makes **Send** live with an empty box, so the
+    // file is the only thing left holding it — and it does.
+    expect(await screen.findByRole('button', { name: 'Send' })).toBeDisabled()
+    expect(screen.queryByLabelText('Message')).not.toBeInTheDocument()
+    expect(screen.getByText(/whisper needs a file/)).toBeInTheDocument()
+  })
+
+  /**
+   * Enter is the other Send, and a shortcut that ignored the rule the button
+   * obeys would be the one door left open onto a `422`.
+   */
+  it('does not let Enter send it either', async () => {
+    const user = userEvent.setup()
+    const fetchMock = mockApi({
+      'api/profiles': NEEDS_A_FILE,
+      'api/auth': AUTH,
+      'api/mcp': MCP,
+      'api/prompts': PROMPTS,
+      'api/agent': agentStream([answerTurn(200, 'a known signal')]),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+
+    await screen.findByRole('button', { name: 'Send' })
+    await user.type(screen.getByLabelText('Message'), '{Enter}')
+
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('api/agent'))).toBe(false)
+  })
+})
 
 describe('attaching a file', () => {
   it('sends it as multipart and shows what the server stored', async () => {

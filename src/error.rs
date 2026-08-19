@@ -185,6 +185,12 @@ impl From<ExecError> for ApiError {
         let message = error.to_string();
         match error {
             ExecError::UnknownProfile(_) => Self::not_found("unknown_profile", message),
+            // The request is well formed and names a profile that exists; what it
+            // is missing is an ingredient that profile requires, which is what
+            // `422` is for.
+            ExecError::UploadRequired { .. } => {
+                Self::new(StatusCode::UNPROCESSABLE_ENTITY, "upload_required", message)
+            }
             ExecError::InvalidHeader { .. } => {
                 Self::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_header", message)
             }

@@ -224,6 +224,7 @@ impl Runner {
             .profiles
             .get(&input.profile)
             .ok_or_else(|| ExecError::UnknownProfile(input.profile.clone()))?;
+        check_uploads(profile, &input.uploads)?;
 
         let auth_name = input
             .auth
@@ -338,6 +339,7 @@ impl Runner {
             .profiles
             .get(&input.profile)
             .ok_or_else(|| ExecError::UnknownProfile(input.profile.clone()))?;
+        check_uploads(profile, &input.uploads)?;
 
         let auth_name = input
             .auth
@@ -740,6 +742,26 @@ fn millis(from: std::time::Instant, to: std::time::Instant) -> u64 {
     u64::try_from(to.saturating_duration_since(from).as_millis()).unwrap_or(u64::MAX)
 }
 
+/// Refuses a call to a `requires_upload:` profile that carries no file.
+///
+/// Checked here rather than only at the composer, because the composer is one of
+/// three ways in — `POST /api/call`, `/api/call/stream` and `/api/agent` all land
+/// on a runner, and a rule that only the UI enforced would not be a rule. Every
+/// turn of a loop goes through this too, which costs nothing: the same call input
+/// carries the same attachments to the last turn as to the first.
+///
+/// # Errors
+///
+/// [`ExecError::UploadRequired`], naming the profile that asked for the file.
+pub fn check_uploads(profile: &Profile, uploads: &[UploadRef]) -> Result<(), ExecError> {
+    if profile.requires_upload && uploads.is_empty() {
+        return Err(ExecError::UploadRequired {
+            profile: profile.name.clone(),
+        });
+    }
+    Ok(())
+}
+
 fn render_context(profile: &Profile, input: &CallInput) -> RenderContext {
     RenderContext {
         messages: input.messages.clone(),
@@ -945,6 +967,13 @@ pub enum ExecError {
     /// No such profile in the directory.
     #[error("unknown profile `{0}`")]
     UnknownProfile(String),
+
+    /// The profile declares `requires_upload:` and the call attached nothing.
+    #[error("profile `{profile}` needs a file attached, and this call carries none")]
+    UploadRequired {
+        /// Profile that asked for one.
+        profile: String,
+    },
 
     /// A header declared in the profile is not usable.
     #[error("profile `{profile}`: header `{header}` is not a valid HTTP header")]
