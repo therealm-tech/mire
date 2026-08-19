@@ -328,13 +328,18 @@ editor's — and it holds no logic of its own: it shows what the API returns.
 - **Conversation**, for chat profiles. A transcript: your question on the right,
   the answer on the left, the tools the run called in between, and a composer at
   the bottom. `Enter` sends, `Shift`+`Enter` starts a line. There is one button,
-  **Send**, and a **mode** dropdown next to it saying how it goes out. **Agent**,
-  which is how it starts: the [loop](#agent-mode), which answers the tool calls
-  the model makes until it stops making them, and which a profile with no tools
-  ends on turn one anyway — the same one turn a single call would have made.
-  **Chat**: one turn, streamed — read chunk by chunk, the text appearing as it
-  arrives, the only way to see time to first token. **max turns** is shown as
-  inert on **Chat**, because a stream has no second turn to cap, and **Servers**
+  **Send**, and two controls next to it saying how it goes out. A **mode**
+  dropdown, which is how many turns: **Agent**, which is how it starts, is the
+  [loop](#agent-mode) — it answers the tool calls the model makes until it stops
+  making them, and a profile with no tools ends on turn one anyway, the same one
+  turn a single call would have made. **Chat** is that one turn on purpose. And a
+  **stream** box, which is how the answer arrives: ticked, it is read chunk by
+  chunk, the text appearing as it is written and the only way to see time to
+  first token. The two are independent — a streamed loop and a whole-bodied chat
+  are both a tick away — and the box is **off by default**, in either mode. More
+  on what that costs a loop [below](#streaming-and-the-number-everybody-actually-wants).
+  **max turns** is shown as inert on **Chat**, because one turn has no second one
+  to cap — streaming has no say in it either way — and **Servers**
   and **Protocol** go away entirely, because there is no server for either of
   them to be about. **Servers** is a checkbox per server `mcp.yaml` declares:
   untick one and this run does not set it up, does not sign in to it and is not
@@ -420,9 +425,10 @@ Four things follow, each of which is a decision:
   without their results is how you get a `400` from an endpoint that was working
   fine. They still appear in the transcript, where they happened, as a line
   naming the tool, whether it really ran, and any variable it captured — the
-  full exchange, and what that variable is worth, is in **Traffic**. A tool call that *does* land in the history — from a streamed
-  send, which does not loop, or from a run that stopped on one — is flagged on
-  its bubble, because most endpoints refuse the next turn until it has a result.
+  full exchange, and what that variable is worth, is in **Traffic**. A tool call that *does* land in the history — from a
+  **Chat** send, which does not loop, or from a run that stopped on one — is
+  flagged on its bubble, because most endpoints refuse the next turn until it has
+  a result.
 - **Nothing waits for the endpoint.** The question appears the moment you press
   Enter, tool calls appear as the loop makes them, streamed text appears as it
   arrives. A call that fails leaves the question in the history, which is
@@ -1861,9 +1867,12 @@ decode:
 ```
 
 `stream` comes from the call, not from the file, so one profile serves both
-modes: the **mode** dropdown next to **Send** is what asks for chunks rather than
-a whole answer, and **Chat** is the mode to be on when time to first token is the
-number you came for. Keep the `| tojson`. MiniJinja renders a bare boolean as
+shapes: the **stream** box next to **Send** is what asks for chunks rather than a
+whole answer, and it asks it of whichever run the **mode** picked — one turn or
+the whole loop. It is off by default, because streaming is a second thing for an
+endpoint to get right and a first run should fail for one reason at a time. Tick
+it when time to first token is the number you came for. Keep the `| tojson`.
+MiniJinja renders a bare boolean as
 `True`, which is Python and is not JSON — rendering catches it and shows you the
 body, but it is a nicer trap to avoid than to diagnose.
 
@@ -1918,10 +1927,34 @@ cannot see:
 A stream that dies halfway is **not** an error. Whatever arrived is decoded,
 shown, and marked as unterminated — the partial answer is the evidence.
 
-Tool calls are not reassembled from a stream: OpenAI splits a call's arguments
-across chunks, and stitching those back together is guesswork this tool would
-rather not do on your behalf. Agent mode calls whole, which is where tool calling
-is tested anyway.
+### Streaming a loop, and what it costs
+
+The **stream** box is not a mode, so agent mode reads it too: tick it and every
+turn of the loop arrives chunk by chunk. `POST /api/agent` then emits one `delta`
+event per chunk, each naming the turn it belongs to, before that turn's own
+`turn` event — which still carries the whole exchange, so a client can ignore
+every delta and lose nothing.
+
+```console
+$ curl -N -X POST localhost:8787/api/agent \
+    -d '{"profile":"qwen3","prompt":"weather in Lyon?","stream":true}'
+event: delta
+data: {"event":"delta","turn":1,"text":"Let me"}
+…
+event: turn
+data: {"event":"turn","index":1,…}
+```
+
+**One thing to know before you tick it.** Tool calls are not reassembled from a
+stream. `mire` decodes a streamed answer from its *last* chunk, and OpenAI splits
+a call's arguments across chunks — stitching those back together is guesswork
+this tool would rather not do on your behalf. So against such an endpoint a turn
+that really did ask for a tool comes back looking like a turn that asked for
+nothing, and the loop stops on `noToolCalls` at turn one. That is the endpoint's
+behaviour made visible rather than a setting to fix, and it is why the box is off
+by default: **untick it to test tool calling**. An endpoint that puts the whole
+call in its final chunk streams and loops perfectly well, which is precisely the
+sort of difference between two backends this tool exists to surface.
 
 ## Embeddings
 
@@ -2025,10 +2058,13 @@ is not met, answer the tool calls with their simulated results, feed them back,
 go round again. `POST /api/call` runs one turn of exactly the same thing.
 
 Which is why the UI's two modes are not two profiles: **Send** on **Agent** is
-the loop, whatever the profile declares, and **Send** on **Chat** is one streamed
-turn of the very same thing. A profile that declares no tool stops on turn one,
-and turn one is the single call **Chat** would have made — so the choice is about
-how the answer arrives, not about which of two mechanisms the profile is for.
+the loop, whatever the profile declares, and **Send** on **Chat** is one turn of
+the very same thing. A profile that declares no tool stops on turn one, and turn
+one is the single call **Chat** would have made — so the choice is about how many
+turns there are, not about which of two mechanisms the profile is for. How the
+answer *arrives* is the **stream** box, which is a
+[separate question](#streaming-and-the-number-everybody-actually-wants) with its
+own answer, asked of either mode.
 
 The one thing that does not carry over is the servers. Only the loop sets an MCP
 server up, so **Chat** speaks to none of them — `POST /api/call` and `POST
@@ -2083,7 +2119,10 @@ tool the profile never declared gets an error back rather than silence.
 
 `POST /api/agent` streams server-sent events: one `setup` event if the profile
 has MCP servers, a `turn` event per turn as it happens, then one `done` carrying
-the whole trace. Each turn holds the rendered request, the masked headers, the
+the whole trace. Send `"stream": true` and each turn is preceded by one `delta`
+event per chunk it was written in, each naming its turn — see
+[above](#streaming-a-loop-and-what-it-costs), including the reason that is off by
+default. Each turn holds the rendered request, the masked headers, the
 `curl` equivalent, the raw response, the decode trace and the tool results — the
 same shape `POST /api/call` returns — plus `mcp`, every JSON-RPC round trip that
 turn made, request and response, credentials already masked, and `hooks`,
@@ -2131,7 +2170,7 @@ ninety seconds.
 | `POST /api/auth/{name}/logout` | Forget the session `mire` holds |
 | `POST /api/call` | Render, authenticate, send, decode |
 | `POST /api/call/stream` | The same, read chunk by chunk, with time to first token |
-| `POST /api/agent` | The same, in a loop, streamed as server-sent events |
+| `POST /api/agent` | The same, in a loop, served as server-sent events — one turn at a time, and with `"stream": true` one chunk at a time as well |
 | `POST /api/uploads` | Store one attached file; returns the id a call names it by |
 | `GET /auth/callback` | Where the identity provider sends the browser back |
 | `GET /healthz` | Liveness |

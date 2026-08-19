@@ -377,11 +377,17 @@ pub struct CallRequest {
     #[serde(default)]
     pub token: Option<Secret>,
 
-    /// Ask the endpoint to stream. `kind: chat`, and `POST /api/call/stream`
-    /// only.
+    /// Ask the endpoint to stream. `kind: chat`.
     ///
     /// Reaches the template as `stream`, so it only takes effect if the template
     /// passes it on — nothing here makes an endpoint chunk its answer.
+    ///
+    /// Off by default, and independent of which endpoint is asked: `POST
+    /// /api/agent` streams every turn of the loop when it is on, and `POST
+    /// /api/call/stream` forces it on because reading chunks is the whole of what
+    /// that route does. `POST /api/call` reads a whole body, so asking it for a
+    /// stream is asking it to parse an event stream as JSON — which it will
+    /// report as a body it could not read, honestly and uselessly.
     #[serde(default)]
     pub stream: bool,
 
@@ -614,6 +620,19 @@ pub enum AgentEvent {
         /// The exchanges, in the order they happened.
         mcp: Vec<crate::mcp::McpExchange>,
     },
+    /// A chunk of the turn in flight carried text. Only when the request asked
+    /// the run to `stream`.
+    ///
+    /// It names its turn, because a loop writes several answers one after
+    /// another and a client aggregating deltas has nothing else to tell them
+    /// apart. Every one of them is in the `turn` event that follows anyway —
+    /// these are the live copy, not the only one.
+    Delta {
+        /// The turn being written, counting from one.
+        turn: u32,
+        /// The text of this chunk alone, not the aggregate.
+        text: String,
+    },
     /// A turn completed. Sent as it happens, not at the end.
     Turn(Box<Turn>),
     /// The loop ended. Carries the whole trace, so a client that missed events
@@ -635,6 +654,7 @@ impl AgentEvent {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Setup { .. } => "setup",
+            Self::Delta { .. } => "delta",
             Self::Turn(_) => "turn",
             Self::Done(_) => "done",
             Self::Failed { .. } => "failed",

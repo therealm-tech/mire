@@ -23,9 +23,10 @@ import { SavedPrompts } from './SavedPrompts'
  * How **Send** sends what is in the box.
  *
  * `agent` is the loop: render, call, answer the tool calls, go round again until
- * the profile says stop. `chat` is one turn, read chunk by chunk as it arrives —
- * which is the only way to see time to first token, and the reason chat mode is
- * the streamed one rather than a slower spelling of the same request.
+ * the profile says stop. `chat` is one turn of the same thing, and turn one of a
+ * loop is the call a chat would have made — so the mode is about how many turns
+ * there are, and nothing else. Whether either of them is read chunk by chunk is
+ * the composer's `stream` box, which is a separate question with its own answer.
  *
  * A schema rather than a bare union, because this is remembered across a reload
  * and a value coming back out of storage is untrusted input like any other.
@@ -70,6 +71,7 @@ export function ChatPanel({
   prompts,
   maxIterations,
   mode,
+  streaming,
   error,
   revisions,
   mcpProtocol,
@@ -82,6 +84,7 @@ export function ChatPanel({
   onPrompt,
   onMaxIterations,
   onMode,
+  onStreaming,
   onMcpProtocol,
   onMcpServer,
   onMcpServers,
@@ -105,8 +108,10 @@ export function ChatPanel({
   /** The library `prompts.yaml` declares, offered above the box. */
   prompts: PromptsResponse
   maxIterations: number
-  /** How **Send** sends: the loop on every turn, or one turn read chunk by chunk. */
+  /** How **Send** sends: the loop, or a single turn. */
   mode: RunMode
+  /** Whether that run is read chunk by chunk. Orthogonal to the mode. */
+  streaming: boolean
   error: { code: string; message: string; detail?: unknown } | null
   revisions: string[]
   mcpProtocol: string | null
@@ -124,6 +129,7 @@ export function ChatPanel({
   onPrompt: (value: string) => void
   onMaxIterations: (value: number) => void
   onMode: (value: RunMode) => void
+  onStreaming: (value: boolean) => void
   onMcpProtocol: (revision: string | null) => void
   onMcpServer: (name: string, on: boolean) => void
   onMcpServers: (on: boolean) => void
@@ -224,6 +230,7 @@ export function ChatPanel({
           busy={busy}
           maxIterations={maxIterations}
           mode={mode}
+          streaming={streaming}
           revisions={revisions}
           mcpProtocol={mcpProtocol}
           mcpServers={mcpServers}
@@ -235,6 +242,7 @@ export function ChatPanel({
           onPrompt={onPrompt}
           onMaxIterations={onMaxIterations}
           onMode={onMode}
+          onStreaming={onStreaming}
           onMcpProtocol={onMcpProtocol}
           onMcpServer={onMcpServer}
           onMcpServers={onMcpServers}
@@ -679,6 +687,7 @@ function Composer({
   busy,
   maxIterations,
   mode,
+  streaming,
   revisions,
   mcpProtocol,
   mcpServers,
@@ -690,6 +699,7 @@ function Composer({
   onPrompt,
   onMaxIterations,
   onMode,
+  onStreaming,
   onMcpProtocol,
   onMcpServer,
   onMcpServers,
@@ -704,6 +714,7 @@ function Composer({
   busy: boolean
   maxIterations: number
   mode: RunMode
+  streaming: boolean
   revisions: string[]
   mcpProtocol: string | null
   mcpServers: string[]
@@ -715,6 +726,7 @@ function Composer({
   onPrompt: (value: string) => void
   onMaxIterations: (value: number) => void
   onMode: (value: RunMode) => void
+  onStreaming: (value: boolean) => void
   onMcpProtocol: (revision: string | null) => void
   onMcpServer: (name: string, on: boolean) => void
   onMcpServers: (on: boolean) => void
@@ -732,10 +744,11 @@ function Composer({
   // nobody wins, so it stays hidden and gets clicked from here.
   const picker = useRef<HTMLInputElement>(null)
 
-  // Chat is the streamed one. The controls below ask this rather than the mode
-  // itself, because what makes them inert is the streaming: one turn has no
-  // second turn to cap, and calls no tool, so it speaks to no server at all.
-  const streaming = mode === 'chat'
+  // A chat is one turn, whether or not it is read chunk by chunk. That is what
+  // makes **max turns** inert here — a cap on a loop there is no loop for —
+  // rather than the streaming, which is now a separate question about how the
+  // answer arrives and not about how many of them there are.
+  const single = mode === 'chat'
 
   return (
     <div className="space-y-2 border-line border-t pt-3">
@@ -789,8 +802,8 @@ function Composer({
           disabled={busy || empty}
           onClick={onSend}
           title={
-            streaming
-              ? 'One turn, read chunk by chunk. Tool calls do not reassemble in a stream, so this does not loop.'
+            single
+              ? 'One turn of this profile.'
               : 'Run the profile in a loop, answering its tools. A profile with none stops on turn one.'
           }
         >
@@ -813,6 +826,25 @@ function Composer({
               </option>
             ))}
           </select>
+        </label>
+
+        {/*
+          A box you tick rather than a third entry in the dropdown, because it is
+          not a third way to send: it is one question — chunks or a whole body —
+          asked of whichever run the mode picked. Off by default. A stream is the
+          only way to see time to first token, and it is also the harder thing
+          for an endpoint to get right, so having it on is a choice somebody
+          makes rather than one they inherit.
+        */}
+        <label className="flex items-center gap-1.5 text-muted text-xs">
+          <input
+            type="checkbox"
+            checked={streaming}
+            disabled={busy}
+            onChange={(event) => onStreaming(event.target.checked)}
+            className="disabled:opacity-50"
+          />
+          stream
         </label>
 
         {/*
@@ -855,13 +887,14 @@ function Composer({
         ) : null}
         {/*
           Inert in chat mode, and shown as inert rather than quietly ignored: a
-          stream is one turn, so there is no second one to cap.
+          chat is one turn, so there is no second one to cap. Streaming has no
+          say in it either way — how the answer arrives is not how many there are.
         */}
         <label
           className={`ml-auto flex items-center gap-1.5 text-muted text-xs ${
-            streaming ? 'opacity-50' : ''
+            single ? 'opacity-50' : ''
           }`}
-          title={streaming ? 'A chat is one turn. Pick Agent to run the loop.' : undefined}
+          title={single ? 'A chat is one turn. Pick Agent to run the loop.' : undefined}
         >
           max turns
           <input
@@ -869,7 +902,7 @@ function Composer({
             min={1}
             max={50}
             value={maxIterations}
-            disabled={streaming}
+            disabled={single}
             onChange={(event) => onMaxIterations(Number(event.target.value))}
             className={`${INPUT_CLASSES} w-16`}
           />
@@ -879,13 +912,24 @@ function Composer({
       <Attachments files={attachments} error={attachError} busy={attaching} onDetach={onDetach} />
 
       <p className="text-faint text-xs">
-        On <strong className="font-medium">Chat</strong>, <strong>Send</strong> is one turn,
-        streamed — read as it arrives, which is the only way to see time to first token and the only
-        way to watch the answer being written. Tool calls do not reassemble in a stream, so a chat
-        never loops. On <strong className="font-medium">Agent</strong>, <strong>Send</strong> runs
-        the loop instead, whole answers rather than chunks, answering the tools the model asks for
-        until it stops asking.
+        On <strong className="font-medium">Chat</strong>, <strong>Send</strong> is one turn of this
+        profile. On <strong className="font-medium">Agent</strong>, it runs the loop, answering the
+        tools the model asks for until it stops asking. <strong>stream</strong> is the other
+        question, and it is asked of either: read the answer chunk by chunk as it arrives, which is
+        the only way to see time to first token and the only way to watch it being written. It
+        reaches the wire only if the profile's template passes <code>stream</code> on.
       </p>
+      {streaming && !single ? (
+        <p className="text-faint text-xs">
+          A streamed loop is worth knowing one thing about:{' '}
+          <strong className="font-medium">tool calls do not reassemble from a stream</strong>.{' '}
+          <code>mire</code> decodes a streamed answer from its last chunk, and an endpoint that
+          splits a call's arguments across chunks has none there — so a turn that really did ask for
+          a tool can come back looking like a turn that asked for nothing, and the loop stops on it.
+          That is the endpoint's behaviour rather than a setting to fix; untick{' '}
+          <strong>stream</strong> to test tool calling.
+        </p>
+      ) : null}
 
       {/*
         A run parameter, so it sits with the other one. It used to live in the

@@ -730,6 +730,10 @@ pub async fn agent(
         let outcome = agent::run(&runner, input, |update| {
             let event = match update {
                 agent::AgentUpdate::Setup(mcp) => AgentEvent::Setup { mcp: mcp.to_vec() },
+                agent::AgentUpdate::Delta { turn, text } => AgentEvent::Delta {
+                    turn,
+                    text: text.to_owned(),
+                },
                 agent::AgentUpdate::Turn(turn) => AgentEvent::Turn(Box::new(turn.clone())),
             };
             // Unbounded so the loop is never blocked by a client that stopped
@@ -768,7 +772,8 @@ pub async fn agent(
 
     Ok(EventStream::new(
         Sse::new(stream).keep_alive(KeepAlive::default()),
-        "one `turn` event per turn, then a single `done` or `failed` event",
+        "one `turn` event per turn — preceded by one `delta` per chunk when the \
+         run streams — then a single `done` or `failed` event",
     ))
 }
 

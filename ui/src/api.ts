@@ -490,6 +490,9 @@ export const agentEventSchema = z.discriminatedUnion('event', [
   // Arrives before the first turn, because that is when it happened: a run that
   // dies negotiating has no turn to hang the reason off.
   z.object({ event: z.literal('setup'), mcp: z.array(mcpExchangeSchema) }),
+  // Only when the run streams. It names its turn, because a loop writes several
+  // answers in a row and the deltas of one are not a continuation of the last.
+  z.object({ event: z.literal('delta'), turn: z.number(), text: z.string() }),
   z.object({ event: z.literal('turn'), ...turnSchema.shape }),
   z.object({ event: z.literal('done'), ...traceSchema.shape }),
   z.object({ event: z.literal('failed'), code: z.string(), message: z.string() }),
@@ -561,7 +564,13 @@ export interface CallRequest {
   token?: string
   includeVectors?: boolean
   repeat?: number
-  /** Told to the template as `stream`. `POST /api/call/stream` forces it on. */
+  /**
+   * Told to the template as `stream`, whichever endpoint reads this.
+   *
+   * `POST /api/agent` streams every turn of the loop when it is on; `POST
+   * /api/call/stream` forces it on, that route being nothing but this. `POST
+   * /api/call` reads a whole body and has no use for it.
+   */
   stream?: boolean
   /**
    * Ids of stored files, from `uploadFile`.

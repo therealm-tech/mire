@@ -6817,6 +6817,154 @@ async fn arguments_that_arrived_as_an_object_are_replayed_as_one() {
     );
 }
 
+// --- a loop that streams ------------------------------------------------------
+
+/// An agent profile that passes `stream` on and knows where a chunk keeps its
+/// text.
+///
+/// Same shape as [`agent_profile`] with the two streaming lines added, because
+/// that is the whole difference: streaming is a flag on the run, not a second
+/// kind of profile.
+fn streaming_agent_profile(url: &str) -> String {
+    format!(
+        r#"
+name: agent
+kind: chat
+url: {url}
+timeout_ms: 5000
+request:
+  template: |
+    {{"model": "m", "messages": {{{{ messages | tojson }}}}, "stream": {{{{ stream | tojson }}}}}}
+decode:
+  content: ["$.choices[0].message.content"]
+  delta: ["$.choices[0].delta.content"]
+  tool_calls: ["$.choices[0].message.tool_calls"]
+  finish_reason: ["$.choices[0].finish_reason"]
+agent:
+  stop_when:
+    no_tool_calls: true
+  max_iterations: 3
+"#
+    )
+}
+
+/// An agent run reads whole answers unless the request asks otherwise, and the
+/// template is told which it is.
+#[tokio::test]
+async fn a_loop_does_not_stream_unless_the_run_asks_for_it() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(final_answer("whole")))
+        .mount(&server)
+        .await;
+
+    let harness = Harness::start(&[("agent.yaml", streaming_agent_profile(&server.uri()))]).await;
+
+    let (status, events) = harness
+        .agent(json!({"profile": "agent", "prompt": "hi"}))
+        .await;
+    assert_eq!(status, 200);
+
+    let names: Vec<&str> = events.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, vec!["turn", "done"], "{events:?}");
+
+    // Not merely "no deltas arrived": the flag reached the template as `false`,
+    // which is what an endpoint serving both shapes actually reads.
+    let requests = server.received_requests().await.expect("requests");
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("body");
+    assert_eq!(body["stream"], false);
+}
+
+/// The same loop, streamed: every turn arrives chunk by chunk, and each delta
+/// says which turn it belongs to.
+#[tokio::test]
+async fn a_streamed_loop_reports_deltas_per_turn() {
+    let server = MockServer::start().await;
+    // Turn one asks for a tool, and the call is in the *last* chunk — the only
+    // place `mire` reads one from in a stream. An endpoint that split it across
+    // chunks would end the loop here instead, which is a fact about the endpoint
+    // rather than a thing to work around.
+    Mock::given(method("POST"))
+        .respond_with(event_stream(concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"look\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ing\"}}]}\n\n",
+            "data: {\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"c1\",\
+             \"function\":{\"name\":\"get_weather\",\"arguments\":\"{}\"}}]},\
+             \"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        )))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(event_stream(concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"21 \"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"degrees\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        )))
+        .mount(&server)
+        .await;
+
+    let mut profile = streaming_agent_profile(&server.uri());
+    profile.push_str(
+        "tools:\n  - name: get_weather\n    schema:\n      type: object\n    \
+         response: '{\"temp\": 21}'\n",
+    );
+    let harness = Harness::start(&[("agent.yaml", profile)]).await;
+
+    let (status, events) = harness
+        .agent(json!({"profile": "agent", "prompt": "weather in Lyon?", "stream": true}))
+        .await;
+    assert_eq!(status, 200);
+
+    let names: Vec<&str> = events.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["delta", "delta", "turn", "delta", "delta", "turn", "done"],
+        "{events:?}"
+    );
+
+    // Each one says whose it is, which is the only thing separating the end of
+    // one answer from the start of the next.
+    let deltas: Vec<(u64, &str)> = events
+        .iter()
+        .filter(|(name, _)| name == "delta")
+        .map(|(_, payload)| {
+            (
+                payload["turn"].as_u64().expect("a turn"),
+                payload["text"].as_str().expect("text"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        deltas,
+        vec![(1, "look"), (1, "ing"), (2, "21 "), (2, "degrees")]
+    );
+
+    // And the turns are the ordinary ones: the loop read a streamed answer the
+    // same way it reads any other, tool call included.
+    assert_eq!(
+        events[2].1["call"]["response"]["decoded"]["content"],
+        "looking"
+    );
+    assert_eq!(events[2].1["tools"][0]["call"]["name"], "get_weather");
+    assert_eq!(
+        events[5].1["call"]["response"]["decoded"]["content"],
+        "21 degrees"
+    );
+    assert_eq!(events[6].1["stop"]["outcome"], "stopped");
+
+    // Every turn streamed, not only the first: a loop that changed its mind
+    // halfway would be measuring two different things and calling them one run.
+    let requests = server.received_requests().await.expect("requests");
+    assert_eq!(requests.len(), 2);
+    for request in &requests {
+        let body: Value = serde_json::from_slice(&request.body).expect("body");
+        assert_eq!(body["stream"], true);
+    }
+}
+
 // --- uploads -----------------------------------------------------------------
 
 #[tokio::test]

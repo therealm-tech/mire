@@ -272,12 +272,13 @@ async function openCard(
 }
 
 /**
- * Picks a mode in the composer, which is what decides where **Send** goes.
+ * Picks a mode in the composer, which is what decides how many turns **Send**
+ * runs.
  *
- * **Agent** is the default and the loop; **Chat** is one streamed turn that
- * answers no tools. Said out loud in every test that depends on it, default or
- * not: a test that reads as "the loop" because nobody has touched the dropdown
- * is a test that quietly changes meaning the day the default does.
+ * **Agent** is the default and the loop; **Chat** is one turn that answers no
+ * tools. Said out loud in every test that depends on it, default or not: a test
+ * that reads as "the loop" because nobody has touched the dropdown is a test
+ * that quietly changes meaning the day the default does.
  */
 async function agentMode(user: ReturnType<typeof userEvent.setup>): Promise<void> {
   await user.selectOptions(await screen.findByLabelText('mode'), 'agent')
@@ -285,6 +286,17 @@ async function agentMode(user: ReturnType<typeof userEvent.setup>): Promise<void
 
 async function chatMode(user: ReturnType<typeof userEvent.setup>): Promise<void> {
   await user.selectOptions(await screen.findByLabelText('mode'), 'chat')
+}
+
+/**
+ * Ticks the composer's **stream** box, which is the other half of the question
+ * and is off by default in either mode.
+ *
+ * Spelled out for the same reason as the mode: a streamed test that relies on
+ * the default is a test that stops testing streaming the day the default moves.
+ */
+async function streamOn(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+  await user.click(await screen.findByLabelText('stream'))
 }
 
 /** The `<section>` a titled panel renders, for assertions scoped to one panel. */
@@ -896,14 +908,18 @@ describe('agent mode', () => {
     expect(screen.queryByLabelText(/max turns/)).not.toBeInTheDocument()
   })
 
-  it('streams on Chat and loops on Agent, and only ever offers one Send', async () => {
+  it('picks the endpoint from the mode and the streaming from the box', async () => {
     const user = userEvent.setup()
     const urls: string[] = []
+    const bodies: unknown[] = []
     vi.stubGlobal(
       'fetch',
-      vi.fn((input: RequestInfo | URL) => {
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input)
         urls.push(url)
+        if (typeof init?.body === 'string') {
+          bodies.push(JSON.parse(init.body))
+        }
         if (url.endsWith('api/profiles')) {
           return Promise.resolve(Response.json(PROFILES))
         }
@@ -919,6 +935,9 @@ describe('agent mode', () => {
         if (url.endsWith('api/agent')) {
           return Promise.resolve(sse(agentStream([answerTurn(200)])))
         }
+        if (url.endsWith('api/call')) {
+          return Promise.resolve(Response.json(completion(200)))
+        }
         return Promise.resolve(sse(''))
       }),
     )
@@ -926,20 +945,159 @@ describe('agent mode', () => {
     render(<App />)
 
     // Nothing is chosen, nothing is typed but the draft that was already there:
-    // pressing the one button runs the loop.
+    // pressing the one button runs the loop, and runs it whole. The box is off
+    // to start with, which is the fact this first leg is really about.
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => expect(urls.some((url) => url.endsWith('api/agent'))).toBe(true))
+    expect(bodies.some((body) => (body as { stream?: boolean }).stream === true)).toBe(false)
+
+    // The box is what asks for chunks, and it asks for them of the loop: same
+    // endpoint, same one button, one flag different.
+    await streamOn(user)
+    await user.type(screen.getByRole('textbox', { name: /message/i }), 'again')
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() =>
+      expect(bodies.some((body) => (body as { stream?: boolean }).stream === true)).toBe(true),
+    )
     expect(urls.some((url) => url.endsWith('api/call/stream'))).toBe(false)
 
-    // Picking **Chat** is what asks for the stream, and it is the only thing
-    // that does: there is no second button to press.
+    // The mode is the other question: **Chat** is one turn, and with the box
+    // still ticked that turn is the streamed route.
     await chatMode(user)
-    await user.type(screen.getByRole('textbox', { name: /message/i }), 'again')
+    await user.type(screen.getByRole('textbox', { name: /message/i }), 'once')
     await user.click(screen.getByRole('button', { name: 'Send' }))
     await waitFor(() => expect(urls.some((url) => url.endsWith('api/call/stream'))).toBe(true))
 
+    // And untick it: one turn, read whole, on the plain endpoint. Four
+    // combinations, two controls, still one **Send**.
+    await user.click(screen.getByLabelText('stream'))
+    await user.type(screen.getByRole('textbox', { name: /message/i }), 'plainly')
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(urls.some((url) => url.endsWith('api/call'))).toBe(true))
+
     expect(screen.getAllByRole('button', { name: 'Send' })).toHaveLength(1)
     expect(screen.queryByRole('button', { name: 'Stream' })).not.toBeInTheDocument()
+  })
+
+  it('writes a streamed loop into the transcript as it arrives', async () => {
+    const user = userEvent.setup()
+    const turn = answerTurn(200)
+    const trace = {
+      profile: 'chat',
+      auth: 'anonymous',
+      turns: [turn],
+      stop: { outcome: 'stopped', reason: { predicate: 'noToolCalls' } },
+      durationMs: 120,
+    }
+    // The deltas of a turn, then the turn itself: the loop's own event order,
+    // which is what a client aggregating them has to survive.
+    const stream = [
+      'event: delta',
+      `data: ${JSON.stringify({ event: 'delta', turn: 1, text: 'po' })}`,
+      '',
+      'event: delta',
+      `data: ${JSON.stringify({ event: 'delta', turn: 1, text: 'ng' })}`,
+      '',
+      'event: turn',
+      `data: ${JSON.stringify({ event: 'turn', ...turn })}`,
+      '',
+      'event: done',
+      `data: ${JSON.stringify({ event: 'done', ...trace })}`,
+      '',
+      '',
+    ].join('\n')
+
+    vi.stubGlobal(
+      'fetch',
+      mockApi({
+        'api/profiles': PROFILES,
+        'api/auth': AUTH,
+        'api/mcp': MCP,
+        'api/prompts': PROMPTS,
+        'api/agent': stream,
+      }),
+    )
+
+    render(<App />)
+    await agentMode(user)
+    await streamOn(user)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    // One `pong`, not two: the half-written copy the deltas built is replaced by
+    // the answer the run finished on rather than left sitting above it.
+    await waitFor(() => {
+      expect(within(panel('Conversation')).getAllByText('pong')).toHaveLength(1)
+    })
+  })
+
+  it('says what a streamed loop was refused with rather than dropping the bubble', async () => {
+    const user = userEvent.setup()
+    // A turn that answered `400` decodes to nothing, so nothing is promoted to a
+    // bubble and the live one is all that is left to say how the run went — the
+    // loop's side of what a streamed chat already does.
+    const turn = answerTurn(400, null)
+    const trace = {
+      profile: 'chat',
+      auth: 'anonymous',
+      turns: [turn],
+      stop: { outcome: 'stopped', reason: { predicate: 'noToolCalls' } },
+      durationMs: 30,
+    }
+    const stream = [
+      'event: turn',
+      `data: ${JSON.stringify({ event: 'turn', ...turn })}`,
+      '',
+      'event: done',
+      `data: ${JSON.stringify({ event: 'done', ...trace })}`,
+      '',
+      '',
+    ].join('\n')
+
+    vi.stubGlobal(
+      'fetch',
+      mockApi({
+        'api/profiles': PROFILES,
+        'api/auth': AUTH,
+        'api/mcp': MCP,
+        'api/prompts': PROMPTS,
+        'api/agent': stream,
+      }),
+    )
+
+    render(<App />)
+    await agentMode(user)
+    await streamOn(user)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    const conversation = within(panel('Conversation'))
+    await waitFor(() => {
+      expect(conversation.getByText('answered 400')).toBeInTheDocument()
+    })
+    expect(conversation.queryByText('complete')).not.toBeInTheDocument()
+  })
+
+  it('leaves max turns live on a streamed loop and inert on a chat', async () => {
+    const user = userEvent.setup()
+    vi.stubGlobal(
+      'fetch',
+      mockApi({
+        'api/profiles': PROFILES,
+        'api/auth': AUTH,
+        'api/mcp': MCP,
+        'api/prompts': PROMPTS,
+      }),
+    )
+
+    render(<App />)
+    await agentMode(user)
+    await streamOn(user)
+
+    // Streaming says how the answer arrives, not how many answers there are, so
+    // the cap on the loop is still a cap on this one.
+    expect(await screen.findByLabelText(/max turns/)).toBeEnabled()
+
+    await chatMode(user)
+    expect(screen.getByLabelText(/max turns/)).toBeDisabled()
   })
 
   it('sends a chat profile through the loop and an embedding one straight out', async () => {
@@ -1030,6 +1188,7 @@ describe('agent mode', () => {
 
     render(<App />)
     await chatMode(user)
+    await streamOn(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     // The answer joins the conversation as a turn rather than staying in a
@@ -1084,6 +1243,7 @@ describe('agent mode', () => {
 
     render(<App />)
     await chatMode(user)
+    await streamOn(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     // What arrived is still shown: a truncated answer is the finding.
@@ -1121,6 +1281,7 @@ describe('agent mode', () => {
 
     render(<App />)
     await chatMode(user)
+    await streamOn(user)
     await user.click(await screen.findByRole('button', { name: 'Send' }))
 
     const conversation = within(panel('Conversation'))
