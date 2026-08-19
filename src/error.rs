@@ -86,13 +86,6 @@ impl From<crate::agent::AgentError> for ApiError {
                 "not_a_chat_profile",
                 error.to_string(),
             ),
-            // Not a `404`: the profile is fine and the set is fine, it is the
-            // pair that does not hold. Naming both is the whole fix.
-            crate::agent::AgentError::UnknownCaptureSet { .. } => Self::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "unknown_capture_set",
-                error.to_string(),
-            ),
             crate::agent::AgentError::Turn(exec) => Self::from(exec),
             crate::agent::AgentError::Mcp(mcp) => Self::from(mcp),
         }

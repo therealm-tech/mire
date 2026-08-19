@@ -126,7 +126,7 @@ line means never getting their next change.
 Directories are layered in the order given, and **the last one wins**: a name
 declared in more than one belongs to the last directory that declares it. That
 is true of every kind of name in there — profiles, and the entries of
-`auth.yaml`, `mcp.yaml`, `prompts.yaml` and `captures.yaml` alike, each merged on
+`auth.yaml`, `mcp.yaml` and `prompts.yaml` alike, each merged on
 its own. Names
 nobody else claimed are simply added, so the usual case is a base you leave
 alone and a short directory of your own on top.
@@ -545,8 +545,7 @@ makes it call the tool, the one that makes it refuse, the paragraph that
 reproduces the bug. Retyping those from memory is how a comparison quietly stops
 being one.
 
-They live in `prompts.yaml`, next to the profiles, `auth.yaml`, `mcp.yaml` and
-`captures.yaml`:
+They live in `prompts.yaml`, next to the profiles, `auth.yaml` and `mcp.yaml`:
 
 ```yaml
 prompts:
@@ -602,7 +601,7 @@ Three kinds of card, each showing what went out and what came back:
 | **Request** | Method, URL, masked headers, body, *Copy as curl* | The JSON-RPC that went out, with its headers and the revision it went out on | The arguments the model produced |
 | **Decode** | Which configured path matched which field, which missed, and everything that was tried | — | Whether those arguments match the schema the tool was declared with |
 | **Response** | Status, latency, decoded content and tool calls, whatever the endpoint said went wrong, stream counters, the body, the raw JSON as a tree | Status, latency, and the JSON-RPC that came back | Status, latency, what the tool handed back, and whether it reported a problem |
-| **Captured** | — | — | Every variable [`agent.capture`](#keeping-something-a-tool-call-answered) pulled out of that answer, by name and by worth — only when a rule matched |
+| **Captured** | — | — | Every variable the answering server's [`capture:`](#keeping-something-a-tool-call-answered) pulled out of that answer, by name and by worth — only when a rule matched |
 
 **The transcript points at the cards.** A tool row in the conversation is a
 summary of one of these, so it takes you to it: the tool's name opens its own
@@ -1553,18 +1552,28 @@ not look like a slow tool).
 ### Keeping something a tool call answered
 
 A tool answers, and something in that answer is what the next thing needs: a
-session id, a job handle, the path a server just wrote. `capture:` in a profile's
-`agent:` block names those, by JSONPath, per tool:
+session id, a job handle, the path a server just wrote. `capture:` on a server in
+`mcp.yaml` names those, by JSONPath, per tool:
 
 ```yaml
-agent:
-  capture:
-    - tools:
-        - create_session
-      vars:
-        session:
-          - $.sessionId
+servers:
+  - name: files
+    url: https://mcp.internal/mcp
+    capture:
+      - tools:
+          - create_session
+        vars:
+          session:
+            - $.sessionId
 ```
+
+**It lives on the server, not on a model's profile.** A rule is a statement about
+a **tool**, and a tool does not belong to a model: `create_session` answers a
+session id at `$.sessionId` whether the model that called it is the one you
+deployed or the one you are comparing it against. Written once beside the server
+that advertises the tool, every `kind: chat` profile gets it — and the comparison
+between two models is not a comparison between two copies of a rule that have to
+be kept identical by hand.
 
 and a hook reads them back as `vars` — in its `url:`, its `json:`, its
 `multipart:` and its `headers:`:
@@ -1625,17 +1634,18 @@ order, first hit wins:
           - $.session.id
 ```
 
-Paths and `tools:` patterns compile when the profile loads, so a typo names the
+Paths and `tools:` patterns compile when `mcp.yaml` loads, so a typo names the
 file and the field at startup. So does a variable name a template could not read:
 `{{ vars.my id }}` is not a thing, and finding that out in a rendered URL is
 finding it out too late.
 
 Three rules, each of them a decision rather than an accident:
 
-- **Simulated and live tools capture alike.** What a variable is worth does not
-  depend on which of the two answered, and stubbing `create_session` is how you
-  try a capture rule out before pointing it at a server. `tools:` is the same
-  anchored-regex list a hook's is; empty is every tool.
+- **Only a real server's tools capture.** A profile's simulated
+  [`tools:`](#agent-mode) are answered inside this process and belong to no
+  server, so nothing is read out of them however JSON-shaped their answer is.
+  `tools:` inside a rule is the same anchored-regex list a hook's is; empty is
+  every tool the server offers.
 - **An `after` hook sees what its own call just captured.** The capture happens
   as soon as the result lands, before the `after` hooks fire — which is the only
   ordering that lets a hook report on the session the call it wrapped has opened.
@@ -1676,106 +1686,53 @@ that fired after it rendered. A variable a template names and nobody captured
 fails loudly, and the message **names the variable** — `undefined value — `session` is
 not set`, the way a header template already reports a missing `env` or `auth` —
 rather than rendering away to `/sessions//tool-calls`, which is a different
-endpoint that may well answer `200`. The bag lasts one run, is shared by every
-server that run talks to, and last write wins.
+endpoint that may well answer `200`.
 
-#### The same rules, for every model
+#### One bag, however many servers
 
-A rule is a statement about a **tool**, and a tool does not belong to a model.
-`create_session` answers a session id at `$.sessionId` whether the model that
-called it is the one you deployed or the one you are comparing it against — so
-writing the rule into each profile means a comparison between two files that have
-to be kept identical by hand. That is exactly the shape of thing that quietly
-stops being identical, and a capture that silently stopped happening on one side
-of a comparison is a bad way to spend an afternoon.
-
-Declare it once in `captures.yaml`, next to the profiles:
+`capture:` is a list, because "what this server's tools leave behind" is usually
+more than one statement, and the rules run in the order the file writes them:
 
 ```yaml
-captures:
-  - name: session
-    rules:
+servers:
+  - name: files
+    url: https://mcp.internal/mcp
+    capture:
       - tools:
           - create_session
         vars:
           session:
             - $.sessionId
             - $.session.id
+      - tools:
+          - read_.*
+        vars:
+          path:
+            - $.path
 ```
 
-and name it from every profile that wants it:
+The **rules** belong to a server; the **bag** they fill does not. A run reaching
+`files` and `audit` applies each server's rules only to its own tools — pooling
+them would let one server's `$.sessionId` claim another's answer — and both write
+into one set of variables, so a session `files` opened is an address an `audit`
+hook can render. One bag per run, thrown away with it, last write wins.
 
-```yaml
-agent:
-  capture:
-    - use: session
-```
-
-A set is a **list** of rules, because "what this family of tools leaves behind"
-is usually more than one statement. `tools:`, `vars:` and the cascades mean
-exactly what they mean in a profile, and are checked the same way when the file
-loads.
-
-An entry of `capture:` is either a rule or a `use:`, and a profile mixes the two
-freely:
-
-```yaml
-agent:
-  capture:
-    - use: session
-    - tools:
-        - get_weather
-      vars:
-        temp:
-          - $.temp
-```
-
-**A `use:` expands where it is written.** The list stays one list and the order
-stays the file's, so "a later rule wins on a name an earlier one also set" reads
-the same whether a rule came from here or from there — which is the only ordering
-anybody can reason about without opening both files.
-
-What a `use:` cannot do is narrow the set it names. A set carries the `tools:` of
-each of its rules, and re-stating them from outside would have to pick a meaning
-— intersect? replace? — so it is refused when the profile loads rather than
-guessed:
-
-```text
-`use:` names a shared set, which carries the `tools:` of each of its rules
-```
-
-Copy the rule inline if you want a different scope. That is a different rule, and
-it should look like one.
-
-A profile naming a set nothing declares **does not run**:
+Reloading and issue reporting are the same as everywhere else in the directory: a
+broken rule is skipped along with the server that declared it, the rest still
+work, and the issue comes back on `GET /api/mcp` naming the file, the server and
+what is wrong with it:
 
 ```json
 {
-  "code": "unknown_capture_set",
-  "message": "profile `qwen3` names the capture set `session`, which `captures.yaml` does not declare"
+  "file": "/etc/mire/profiles/mcp.yaml",
+  "message": "MCP server `files`: capture rule 1: `my id` cannot be read as `vars.my id`: use letters, digits and underscores"
 }
 ```
 
-`422` before the stream opens, like a run asking for an MCP server `mcp.yaml` does
-not declare: the profile has said those variables get captured, and the
-alternative to stopping is a run that goes ahead and fails three turns later in a
-rendered URL — which is the failure this whole section exists to avoid. It is
-checked when the run starts rather than when the profile loads, for the same
-reason a server name is: a profile is read on its own, and the file beside it is
-a separate file with its own edits.
-
-Layering, reloading and issue reporting are the same as everywhere else in the
-directory. A broken entry is skipped and the rest still work; a set declared in
-two layered directories is the later one's. The issues come back on
-`GET /api/profiles` rather than an endpoint of their own — `captures.yaml` exists
-only to serve a profile's `agent.capture:`, and each issue names its own file:
-
-```json
-{
-  "file": "/etc/mire/profiles/captures.yaml",
-  "message": "capture set `session`: vars: `my id` cannot be read as `vars.my id`: use letters, digits and underscores"
-}
-```
+`GET /api/mcp` also lists what each server captures — the tool patterns and the
+variable **names**, never a path and never a value. A hook's templated URL a few
+lines above it is unreadable without knowing where `vars.session` is supposed to
+come from.
 
 #### A hook that waits for one
 
@@ -1842,9 +1799,10 @@ something that is not callable — is a different thing, and it is a hook failur
 like any other: `on_error` decides what it does to the call. The expression
 itself is compiled when `mcp.yaml` loads, so a syntax error is a startup issue
 naming the hook rather than a surprise on the first tool call. What it *reads* is
-checked against nothing — `mcp.yaml` does not know which profiles will use the
-server — so a condition naming a variable no profile ever captures shows up as a
-skip quoting it, run after run, which is the readable version of that mistake.
+checked against nothing — a variable may be captured by this server, by another
+one the run happens to reach, or by nobody — so a condition naming a variable
+nothing ever captures shows up as a skip quoting it, run after run, which is the
+readable version of that mistake.
 
 ## Streaming, and the number everybody actually wants
 
@@ -2105,9 +2063,8 @@ tools:
     response: '{"temp": 21, "conditions": "clear"}'
 ```
 
-`agent:` also takes `capture:`, which keeps something out of a tool's result for
-a hook to use later — inline, or `use:` naming a set from `captures.yaml` so
-several models share the same rules. See
+These tools capture nothing: `capture:` is declared on an MCP server, and a
+simulated tool belongs to none. See
 [above](#keeping-something-a-tool-call-answered).
 
 **Nothing is executed.** The tools are simulated — a fixed string, or a Rhai
@@ -2160,11 +2117,11 @@ ninety seconds.
 
 | Route | What it does |
 | --- | --- |
-| `GET /api/profiles` | Every profile, plus the files that failed to load and why — `captures.yaml` included, since it exists to serve one |
+| `GET /api/profiles` | Every profile, plus the files that failed to load and why |
 | `GET /api/profiles/{name}` | One profile, as declared |
 | `GET /api/prompts` | Prompts declared in `prompts.yaml`, plus the entries that did not load |
 | `GET /api/auth` | Auth providers, with session status |
-| `GET /api/mcp` | MCP servers declared in `mcp.yaml` |
+| `GET /api/mcp` | MCP servers declared in `mcp.yaml` — what each one authenticates with, the hooks around its calls, and what it captures — plus the entries that did not load |
 | `GET /api/mcp/{name}/tools` | Ask a server what it offers, right now, and on which revision |
 | `POST /api/auth/{name}/login` | Start a browser login; returns where to send it |
 | `POST /api/auth/{name}/logout` | Forget the session `mire` holds |

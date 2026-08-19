@@ -806,9 +806,9 @@ function nothingCameBack(hook: HookRecord): string {
  * the server that answered and how long it took, which is the same statement
  * made in the only terms that can be checked.
  *
- * **Captured** is the fourth part, and only shows up when `agent.capture` pulled
- * something out of that answer. It is the one part that is not a wire: it is
- * what a later hook's URL, header or body will render, and reading it here is
+ * **Captured** is the fourth part, and only shows up when the answering server's
+ * `capture:` pulled something out of that answer. It is the one part that is not
+ * a wire: it is what a later hook's URL, header or body will render, and reading it here is
  * the difference between a rendered address you can explain and one you cannot.
  * A rule that matched nothing captures nothing, so the section is simply absent
  * — which is the same answer, and the log says which path was tried.

@@ -4163,7 +4163,8 @@ async fn a_hook_fires_on_both_sides_of_a_tool_call_and_says_what_it_sent() {
     assert!(after["result"]["latencyMs"].is_number());
 }
 
-/// A chat profile that captures `session` out of whatever `get_weather` answers.
+/// A chat profile that reaches a server. It says nothing about capturing —
+/// that is the server's to declare.
 fn capturing_profile(url: &str) -> String {
     format!(
         r#"
@@ -4182,10 +4183,6 @@ agent:
   stop_when:
     no_tool_calls: true
   max_iterations: 4
-  capture:
-    - tools: [get_weather]
-      vars:
-        session: [$.sessionId]
 "#
     )
 }
@@ -4218,9 +4215,10 @@ async fn a_hook_url_is_addressed_with_what_the_tool_call_captured() {
         (
             "mcp.yaml",
             format!(
-                "servers:\n  - name: weather\n    url: {}/mcp\n    hooks:\n      - name: audit\n        \
-                 on:\n          - after\n        actions:\n          - http:\n              \
-                 url: {}/sessions/{{{{ vars.session }}}}/audit\n",
+                "servers:\n  - name: weather\n    url: {}/mcp\n    capture:\n      - tools: \
+                 [get_weather]\n        vars:\n          session: [$.sessionId]\n    hooks:\n      \
+                 - name: audit\n        on:\n          - after\n        actions:\n          \
+                 - http:\n              url: {}/sessions/{{{{ vars.session }}}}/audit\n",
                 mcp.uri(),
                 hook.uri()
             ),
@@ -4264,8 +4262,9 @@ async fn a_hook_url_is_addressed_with_what_the_tool_call_captured() {
     assert_eq!(sent[0].url.path(), "/sessions/abc-123/audit");
 }
 
-/// The same profile, saying it in one word instead of four lines.
-fn profile_using_a_capture_set(name: &str, url: &str) -> String {
+/// A second chat profile pointed at its own endpoint, capturing nothing of its
+/// own — like every profile now.
+fn plain_chat_profile(name: &str, url: &str) -> String {
     format!(
         r#"
 name: {name}
@@ -4283,17 +4282,15 @@ agent:
   stop_when:
     no_tool_calls: true
   max_iterations: 4
-  capture:
-    - use: session
 "#
     )
 }
 
-/// The whole point of `captures.yaml`: the rule is written once, and comparing
-/// two models is not comparing two copies of it that have to stay identical by
-/// hand.
+/// The whole point of putting `capture:` on the server: the rule is written
+/// once, and comparing two models is not comparing two copies of it that have
+/// to stay identical by hand.
 #[tokio::test]
-async fn two_profiles_share_one_capture_set_and_both_capture_the_same_thing() {
+async fn two_profiles_reaching_one_server_both_capture_what_it_declares() {
     let answer = json!({
         "resultType": "complete",
         "content": [{"type": "text", "text": "{\"sessionId\": \"abc-123\", \"temp\": 21}"}],
@@ -4311,21 +4308,19 @@ async fn two_profiles_share_one_capture_set_and_both_capture_the_same_thing() {
     let harness = Harness::start(&[
         (
             "mcp.yaml",
-            format!("servers:\n  - name: weather\n    url: {}/mcp\n", mcp.uri()),
-        ),
-        (
-            "captures.yaml",
-            "captures:\n  - name: session\n    rules:\n      - tools: [get_weather]\n        \
-             vars:\n          session: [$.sessionId]\n"
-                .to_owned(),
+            format!(
+                "servers:\n  - name: weather\n    url: {}/mcp\n    capture:\n      - tools: \
+                 [get_weather]\n        vars:\n          session: [$.sessionId]\n",
+                mcp.uri()
+            ),
         ),
         (
             "one.yaml",
-            profile_using_a_capture_set("one", &format!("{}/v1/chat/completions", first.uri())),
+            plain_chat_profile("one", &format!("{}/v1/chat/completions", first.uri())),
         ),
         (
             "two.yaml",
-            profile_using_a_capture_set("two", &format!("{}/v1/chat/completions", second.uri())),
+            plain_chat_profile("two", &format!("{}/v1/chat/completions", second.uri())),
         ),
     ])
     .await;
@@ -4344,66 +4339,19 @@ async fn two_profiles_share_one_capture_set_and_both_capture_the_same_thing() {
     }
 }
 
-/// The set is gone, or was never there, and the run is about to fill a hook's
-/// URL with a variable nobody is going to capture. It stops instead, naming both
-/// halves — the profile that asked and the set that is missing.
+/// A rule naming a variable no template could write is refused where it was
+/// written, with the rest of `mcp.yaml` still loading around it.
 #[tokio::test]
-async fn a_profile_naming_a_capture_set_nothing_declares_is_refused_before_the_first_turn() {
-    let mcp = mcp_server(weather_tool(), vec![]).await;
-    let endpoint = MockServer::start().await;
-    model_using_a_tool(&endpoint).await;
-
-    let harness = Harness::start(&[
-        (
-            "mcp.yaml",
-            format!("servers:\n  - name: weather\n    url: {}/mcp\n", mcp.uri()),
-        ),
-        (
-            "chat.yaml",
-            profile_using_a_capture_set("chat", &format!("{}/v1/chat/completions", endpoint.uri())),
-        ),
-    ])
+async fn a_broken_capture_rule_is_reported_with_the_server_that_declared_it() {
+    let harness = Harness::start(&[(
+        "mcp.yaml",
+        "servers:\n  - name: broken\n    url: https://mcp.internal/mcp\n    capture:\n      \
+         - vars:\n          'my id': [$.id]\n  - name: fine\n    url: https://other.internal/mcp\n"
+            .to_owned(),
+    )])
     .await;
 
-    let response = harness
-        .client
-        .post(format!("{}/api/agent", harness.base))
-        .json(&json!({"profile": "chat", "prompt": "weather in Paris?"}))
-        .send()
-        .await
-        .expect("call mire");
-
-    assert_eq!(response.status(), 422);
-    let body: Value = response.json().await.unwrap();
-    assert_eq!(body["code"], "unknown_capture_set");
-    assert!(
-        body["message"].as_str().unwrap().contains("session"),
-        "{body}"
-    );
-    assert!(body["message"].as_str().unwrap().contains("chat"), "{body}");
-
-    // And the model was never asked, so nothing was spent finding this out.
-    assert!(endpoint.received_requests().await.unwrap().is_empty());
-}
-
-/// A broken `captures.yaml` has no panel of its own, so it rides along with the
-/// profiles — the place somebody is already looking when a capture went missing.
-#[tokio::test]
-async fn a_broken_capture_set_is_reported_with_the_profiles() {
-    let harness = Harness::start(&[
-        (
-            "captures.yaml",
-            "captures:\n  - name: session\n    rules:\n      - vars:\n          'my id': [$.id]\n"
-                .to_owned(),
-        ),
-        (
-            "chat.yaml",
-            mcp_profile("https://models.internal/v1/chat/completions"),
-        ),
-    ])
-    .await;
-
-    let body = harness.get("/api/profiles").await;
+    let body = harness.get("/api/mcp").await;
 
     let issues = body["issues"].as_array().expect("the issues");
     assert_eq!(issues.len(), 1, "{issues:#?}");
@@ -4411,13 +4359,44 @@ async fn a_broken_capture_set_is_reported_with_the_profiles() {
         issues[0]["file"]
             .as_str()
             .expect("the file")
-            .ends_with("captures.yaml"),
+            .ends_with("mcp.yaml"),
         "{issues:#?}"
     );
-    assert!(issues[0]["message"].as_str().unwrap().contains("my id"));
+    let message = issues[0]["message"].as_str().expect("the reason");
+    assert!(message.contains("my id"), "{message}");
+    assert!(message.contains("broken"), "{message}");
+    // The sentence, without validator's `__all__:` in front of it — that is the
+    // internal name for "not about one field", and nobody wrote it in mcp.yaml.
+    assert!(!message.contains("__all__"), "{message}");
 
-    // And the profile beside it still loaded.
-    assert_eq!(body["profiles"][0]["name"], "chat");
+    // Only that server was dropped.
+    let servers = body["servers"].as_array().expect("the servers");
+    assert_eq!(servers.len(), 1, "{servers:#?}");
+    assert_eq!(servers[0]["name"], "fine");
+}
+
+/// What a server captures is part of "what is this about to do": a hook's
+/// templated URL a few lines above is unreadable without knowing where
+/// `vars.session` comes from. Names only — a captured value is a session id as
+/// often as not.
+#[tokio::test]
+async fn a_server_lists_what_it_captures_without_listing_a_single_value() {
+    let harness = Harness::start(&[(
+        "mcp.yaml",
+        "servers:\n  - name: weather\n    url: https://mcp.internal/mcp\n    capture:\n      \
+         - tools: [get_weather]\n        vars:\n          session: [$.sessionId, $.session.id]\n"
+            .to_owned(),
+    )])
+    .await;
+
+    let body = harness.get("/api/mcp").await;
+
+    let capture = &body["servers"][0]["capture"];
+    assert_eq!(capture[0]["tools"][0], "get_weather");
+    assert_eq!(capture[0]["vars"][0], "session");
+    // The paths are how it finds the value, and the value is the thing not to
+    // put in a listing — neither belongs here.
+    assert!(!body.to_string().contains("sessionId"), "{body:#?}");
 }
 
 #[tokio::test]
@@ -4440,9 +4419,10 @@ async fn a_hook_url_naming_a_variable_nobody_captured_fails_the_call_rather_than
         (
             "mcp.yaml",
             format!(
-                "servers:\n  - name: weather\n    url: {}/mcp\n    hooks:\n      - name: audit\n        \
-                 on:\n          - after\n        actions:\n          - http:\n              \
-                 url: {}/sessions/{{{{ vars.session }}}}/audit\n",
+                "servers:\n  - name: weather\n    url: {}/mcp\n    capture:\n      - tools: \
+                 [get_weather]\n        vars:\n          session: [$.sessionId]\n    hooks:\n      \
+                 - name: audit\n        on:\n          - after\n        actions:\n          \
+                 - http:\n              url: {}/sessions/{{{{ vars.session }}}}/audit\n",
                 mcp.uri(),
                 hook.uri()
             ),
@@ -4499,9 +4479,11 @@ async fn a_hook_header_carries_what_the_tool_call_captured() {
         (
             "mcp.yaml",
             format!(
-                "servers:\n  - name: weather\n    url: {}/mcp\n    hooks:\n      - name: audit\n        \
-                 on:\n          - after\n        actions:\n          - http:\n              \
-                 url: {}/hook\n              headers:\n                x-session: '{{{{ vars.session }}}}'\n",
+                "servers:\n  - name: weather\n    url: {}/mcp\n    capture:\n      - tools: \
+                 [get_weather]\n        vars:\n          session: [$.sessionId]\n    hooks:\n      \
+                 - name: audit\n        on:\n          - after\n        actions:\n          \
+                 - http:\n              url: {}/hook\n              headers:\n                \
+                 x-session: '{{{{ vars.session }}}}'\n",
                 mcp.uri(),
                 hook.uri()
             ),
@@ -4588,7 +4570,8 @@ async fn a_server_header_picks_up_a_session_a_tool_opened_on_an_earlier_turn() {
         (
             "mcp.yaml",
             format!(
-                "servers:\n  - name: weather\n    url: {}/mcp\n    headers:\n      \
+                "servers:\n  - name: weather\n    url: {}/mcp\n    capture:\n      - tools: \
+                 [get_weather]\n        vars:\n          session: [$.sessionId]\n    headers:\n      \
                  x-session: \"{{{{ vars.session | default('') }}}}\"\n",
                 mcp.uri()
             ),
@@ -4664,9 +4647,11 @@ async fn a_hook_sits_out_the_calls_its_condition_refuses_then_fires_once_it_hold
         (
             "mcp.yaml",
             format!(
-                "servers:\n  - name: weather\n    url: {}/mcp\n    hooks:\n      - name: audit\n        \
-                 on:\n          - after\n        if: '{{{{ vars.session is defined }}}}'\n        actions:\n          \
-                 - http:\n              url: {}/sessions/{{{{ vars.session }}}}/audit\n",
+                "servers:\n  - name: weather\n    url: {}/mcp\n    capture:\n      - tools: \
+                 [get_weather]\n        vars:\n          session: [$.sessionId]\n    hooks:\n      \
+                 - name: audit\n        on:\n          - after\n        if: '{{{{ vars.session is \
+                 defined }}}}'\n        actions:\n          - http:\n              \
+                 url: {}/sessions/{{{{ vars.session }}}}/audit\n",
                 mcp.uri(),
                 hook.uri()
             ),

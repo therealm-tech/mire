@@ -15,7 +15,6 @@ use serde_json_path::JsonPath;
 use url::Url;
 use validator::{Validate, ValidationError};
 
-use crate::capture::CaptureEntry;
 use crate::script::ScriptSource;
 
 /// Default request timeout when a profile does not set `timeout_ms`.
@@ -302,17 +301,6 @@ pub struct AgentSpec {
     /// Hard cap on wall-clock time for the whole loop.
     #[serde(default)]
     pub max_duration_ms: Option<u64>,
-    /// What to keep out of the tool results this run produces.
-    ///
-    /// Applied in declaration order, to simulated and live tools alike: what a
-    /// captured variable is worth does not depend on which of the two answered.
-    ///
-    /// An entry is a rule, or `use:` naming a set from `captures.yaml` — the
-    /// same rules, written once for every model that wants them. Resolved when
-    /// the run starts; see [`crate::capture::CaptureRegistry::resolve`].
-    #[serde(default)]
-    #[validate(nested)]
-    pub capture: Vec<CaptureEntry>,
 }
 
 /// What a simulated tool answers with.
@@ -485,116 +473,6 @@ tools:
       required: [city]
     response: '{"temp": 21}'
 "#;
-
-    /// A chat profile whose `agent:` block is whatever the test needs.
-    fn with_agent(agent: &str) -> Result<Profile, String> {
-        let yaml = format!(
-            r"
-name: agent
-kind: chat
-url: https://models.internal/v1
-request:
-  template: '{{}}'
-agent:
-{agent}
-"
-        );
-        let profile: Profile = serde_yaml_ng::from_str(&yaml).map_err(|error| error.to_string())?;
-        profile.validate().map_err(|error| error.to_string())?;
-        Ok(profile)
-    }
-
-    /// The rule itself is [`crate::capture`]'s; what these check is that a
-    /// profile still carries one, patterns and cascades compiled.
-    fn rule(entry: &CaptureEntry) -> &crate::capture::CaptureRule {
-        match entry {
-            CaptureEntry::Rule(rule) => rule,
-            CaptureEntry::Use(name) => panic!("expected a rule, got `use: {name}`"),
-        }
-    }
-
-    #[test]
-    fn a_capture_rule_loads_with_its_patterns_and_its_cascades() {
-        let profile = with_agent(
-            "  capture:\n    - tools: [create_.*]\n      vars:\n        session: [$.sessionId, $.session.id]\n",
-        )
-        .expect("it loads");
-
-        let entries = &profile.agent.as_ref().unwrap().capture;
-        assert_eq!(entries.len(), 1);
-        let rule = rule(&entries[0]);
-        assert!(rule.covers("create_session"));
-        assert!(!rule.covers("read_file"));
-        assert_eq!(rule.vars["session"].len(), 2);
-        assert_eq!(rule.vars["session"][0].source(), "$.sessionId");
-    }
-
-    #[test]
-    fn a_capture_rule_with_no_tools_covers_every_tool() {
-        let profile =
-            with_agent("  capture:\n    - vars:\n        id: [$.id]\n").expect("it loads");
-
-        assert!(rule(&profile.agent.as_ref().unwrap().capture[0]).covers("anything_at_all"));
-    }
-
-    /// The point of the whole thing: a profile names a set instead of repeating
-    /// it. What the name resolves to is the registry's business and is not in
-    /// front of us here — the profile only has to carry the reference.
-    #[test]
-    fn a_profile_can_name_a_shared_set_beside_its_own_rules() {
-        let profile = with_agent(
-            "  capture:\n    - use: session\n    - tools: [read_file]\n      vars:\n        path: [$.path]\n",
-        )
-        .expect("it loads");
-
-        let entries = &profile.agent.as_ref().unwrap().capture;
-        assert_eq!(entries.len(), 2);
-        assert!(matches!(&entries[0], CaptureEntry::Use(name) if name == "session"));
-        assert!(rule(&entries[1]).covers("read_file"));
-    }
-
-    #[test]
-    fn a_capture_path_that_is_not_a_jsonpath_is_caught_at_load() {
-        let error = with_agent("  capture:\n    - vars:\n        id: ['not a path']\n")
-            .expect_err("`not a path` is not a JSONPath");
-
-        assert!(error.contains("id") || error.contains("path"), "{error}");
-    }
-
-    #[test]
-    fn a_capture_pattern_that_is_not_a_regex_is_caught_at_load() {
-        let error =
-            with_agent("  capture:\n    - tools: ['create_(']\n      vars:\n        id: [$.id]\n")
-                .expect_err("an unclosed group is not a regex");
-
-        assert!(error.contains("create_("), "{error}");
-    }
-
-    #[test]
-    fn a_variable_name_a_template_could_not_read_is_refused_where_it_was_written() {
-        // `{{ vars.my id }}` is not a thing, and finding that out in a rendered
-        // URL is finding it out too late.
-        let error = with_agent("  capture:\n    - vars:\n        'my id': [$.id]\n")
-            .expect_err("a space is not an identifier");
-
-        assert!(error.contains("my id"), "{error}");
-        assert!(error.contains("vars.my id"), "{error}");
-    }
-
-    #[test]
-    fn a_capture_rule_that_captures_nothing_says_so() {
-        let error = with_agent("  capture:\n    - tools: [create_session]\n      vars: {}\n")
-            .expect_err("a rule with no vars is a rule that does nothing");
-
-        assert!(error.contains("vars"), "{error}");
-    }
-
-    #[test]
-    fn a_profile_that_captures_nothing_is_the_ordinary_case() {
-        let profile: Profile = serde_yaml_ng::from_str(CHAT_YAML).unwrap();
-
-        assert!(profile.agent.as_ref().unwrap().capture.is_empty());
-    }
 
     #[test]
     fn parses_a_chat_profile() {

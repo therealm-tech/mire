@@ -17,9 +17,10 @@
 //!   x-api-key: '{{ auth["keycloak-workload"] }}'
 //! ```
 //!
-//! `vars` is what the run's tool calls have captured, per the profile's
-//! `agent.capture:` — see [`crate::vars`]. It is what lets a tool that opens a
-//! session put that session on every later request:
+//! `vars` is what the run's tool calls have captured, per the `capture:` of the
+//! server that answered each of them — see [`super::capture`] and
+//! [`crate::vars`]. It is what lets a tool that opens a session put that session
+//! on every later request:
 //!
 //! ```yaml
 //! headers:

@@ -356,9 +356,10 @@ const toolInvocationSchema = z.object({
   result: z.string(),
   error: z.string().optional(),
   /**
-   * What this call put in the run's variables, per the profile's
-   * `agent.capture`. Omitted on the wire when a call captured nothing, which is
-   * every call in every profile that declares no rule.
+   * What this call put in the run's variables, per the `capture:` of the server
+   * that answered it. Omitted on the wire when a call captured nothing, which is
+   * every call on a server that declares no rule — and every simulated call,
+   * since those belong to no server.
    */
   captured: z.record(z.string(), z.unknown()).default({}),
 })
