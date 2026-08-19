@@ -1,0 +1,106 @@
+# Capture sets, referenced by name from a profile's `agent.capture:`.
+#
+# A capture rule says that a tool answers something worth keeping — a session id,
+# a job handle, the path a server just wrote — and where inside the answer to
+# find it. What the value is then read as is `vars`, by a hook's `url:`, `json:`
+# and `headers:`, and by a server's own `headers:` — see mcp.yaml.
+#
+# The rule is a statement about a **tool**, and a tool does not belong to a
+# model. `create_session` answers a session id at `$.sessionId` whether the model
+# that called it is qwen3 or the one you are comparing it against — which is the
+# whole reason this file exists. Writing the rule into each profile means a
+# comparison between two files that have to be kept identical by hand, and that
+# is exactly the shape of thing that quietly stops being identical.
+#
+# So: declare it once here, and name it there.
+#
+#   # captures.yaml
+#   captures:
+#     - name: session
+#       rules:
+#         - tools:
+#             - create_session
+#           vars:
+#             session:
+#               - $.sessionId
+#
+#   # qwen3.yaml, and every other profile that wants it
+#   agent:
+#     capture:
+#       - use: session
+#
+# Read-only, like everything else in this directory. This file is the source of
+# truth, your editor writes it, and `mire` picks the change up without a restart.
+# A bad entry is reported with the profiles and skipped; the rest still work.
+---
+captures:
+  # The one the rest of the directory talks about. `dev` in mcp.yaml offers
+  # `get_weather`, which opens no session — this is here as the shape to copy,
+  # and as the thing a `- use: session` in a profile resolves to.
+  #
+  # `tools:` is a list of anchored regexes, exactly like a hook's: `create_session`
+  # means that one tool and `create_.*` is how you ask for the wider net. Naming
+  # it is worth the line — an empty list covers *every* tool, so it warns on
+  # every call that does not carry the variable.
+  #
+  # `vars:` is one JSONPath cascade per variable, tried in order, first hit wins,
+  # exactly like a `decode:` field. Two paths here because a server that renames
+  # `sessionId` to `session.id` between versions is a thing that happens, and
+  # covering both is one line rather than one release.
+  #
+  # Paths, patterns and variable names are all checked when this file loads: a
+  # name only `{{ vars["my id"] }}` could read is refused here rather than in a
+  # rendered URL three turns into a run.
+  - name: session
+    rules:
+      - tools:
+          - create_session
+        vars:
+          session:
+            - $.sessionId
+            - $.session.id
+
+  # A set is a *list* of rules, because "what this family of tools leaves behind"
+  # is usually more than one statement. They apply in the order written, and a
+  # later one wins on a name an earlier one also set.
+  #
+  # Commented out because nothing in this directory offers these tools. Delete
+  # the comments once yours does.
+  #
+  # - name: jobs
+  #   rules:
+  #     - tools:
+  #         - submit_.*
+  #       vars:
+  #         job:
+  #           - $.jobId
+  #     - tools:
+  #         - write_file
+  #       vars:
+  #         path:
+  #           - $.path
+  #           - $.result.path
+
+  # A profile mixes shared sets and its own rules in one list, and the order is
+  # the profile's:
+  #
+  #   agent:
+  #     capture:
+  #       - use: session
+  #       - use: jobs
+  #       - tools:
+  #           - get_weather
+  #         vars:
+  #           temp:
+  #             - $.temp
+  #
+  # A `use:` expands where it is written, so "later wins" reads the same whether
+  # a rule came from this file or from that one. What a `use:` cannot do is
+  # narrow the set it names — a set carries the `tools:` of each of its rules,
+  # and re-stating them outside would have to pick a meaning (intersect?
+  # replace?), so it is refused rather than guessed. Copy the rule inline if you
+  # want a different scope; that is a different rule, and it should look like one.
+  #
+  # A profile naming a set nothing here declares does not start: the profile has
+  # said those variables get captured, and a run that goes ahead without them
+  # fails later, further away, in a rendered URL.

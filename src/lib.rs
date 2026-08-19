@@ -24,6 +24,8 @@
 //! * [`uploads`] — the one thing here that writes to disk, and the rules that
 //!   keep it from writing anywhere it was not pointed at.
 //! * [`vars`] — what a tool call left behind, for the hooks that fire after it.
+//! * [`capture`] — the rules that put it there, and the file declaring the ones
+//!   worth sharing between models.
 //!
 //! # A note on wire naming
 //!
@@ -35,6 +37,7 @@
 pub mod agent;
 pub mod api;
 pub mod auth;
+pub mod capture;
 pub mod config;
 pub mod decode;
 pub mod error;

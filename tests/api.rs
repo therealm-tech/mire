@@ -4189,6 +4189,162 @@ async fn a_hook_url_is_addressed_with_what_the_tool_call_captured() {
     assert_eq!(sent[0].url.path(), "/sessions/abc-123/audit");
 }
 
+/// The same profile, saying it in one word instead of four lines.
+fn profile_using_a_capture_set(name: &str, url: &str) -> String {
+    format!(
+        r#"
+name: {name}
+kind: chat
+url: {url}
+timeout_ms: 5000
+request:
+  template: |
+    {{"model": "m", "messages": {{{{ messages | tojson }}}}, "tools": {{{{ tools | tojson }}}}}}
+decode:
+  content: ["$.choices[0].message.content"]
+  tool_calls: ["$.choices[0].message.tool_calls"]
+  finish_reason: ["$.choices[0].finish_reason"]
+agent:
+  stop_when:
+    no_tool_calls: true
+  max_iterations: 4
+  capture:
+    - use: session
+"#
+    )
+}
+
+/// The whole point of `captures.yaml`: the rule is written once, and comparing
+/// two models is not comparing two copies of it that have to stay identical by
+/// hand.
+#[tokio::test]
+async fn two_profiles_share_one_capture_set_and_both_capture_the_same_thing() {
+    let answer = json!({
+        "resultType": "complete",
+        "content": [{"type": "text", "text": "{\"sessionId\": \"abc-123\", \"temp\": 21}"}],
+        "isError": false,
+    });
+    let mcp = mcp_server(weather_tool(), vec![answer.clone(), answer]).await;
+
+    // One endpoint each: the mock that asks for a tool only answers once, and
+    // both runs have to get that far.
+    let first = MockServer::start().await;
+    let second = MockServer::start().await;
+    model_using_a_tool(&first).await;
+    model_using_a_tool(&second).await;
+
+    let harness = Harness::start(&[
+        (
+            "mcp.yaml",
+            format!("servers:\n  - name: weather\n    url: {}/mcp\n", mcp.uri()),
+        ),
+        (
+            "captures.yaml",
+            "captures:\n  - name: session\n    rules:\n      - tools: [get_weather]\n        \
+             vars:\n          session: [$.sessionId]\n"
+                .to_owned(),
+        ),
+        (
+            "one.yaml",
+            profile_using_a_capture_set("one", &format!("{}/v1/chat/completions", first.uri())),
+        ),
+        (
+            "two.yaml",
+            profile_using_a_capture_set("two", &format!("{}/v1/chat/completions", second.uri())),
+        ),
+    ])
+    .await;
+
+    for profile in ["one", "two"] {
+        let (status, events) = harness
+            .agent(json!({"profile": profile, "prompt": "weather in Paris?"}))
+            .await;
+        assert_eq!(status, 200, "{profile}: {events:?}");
+
+        let turn = &events.iter().find(|(name, _)| name == "turn").unwrap().1;
+        assert_eq!(
+            turn["tools"][0]["captured"]["session"], "abc-123",
+            "{profile} captured nothing: {turn:#?}"
+        );
+    }
+}
+
+/// The set is gone, or was never there, and the run is about to fill a hook's
+/// URL with a variable nobody is going to capture. It stops instead, naming both
+/// halves — the profile that asked and the set that is missing.
+#[tokio::test]
+async fn a_profile_naming_a_capture_set_nothing_declares_is_refused_before_the_first_turn() {
+    let mcp = mcp_server(weather_tool(), vec![]).await;
+    let endpoint = MockServer::start().await;
+    model_using_a_tool(&endpoint).await;
+
+    let harness = Harness::start(&[
+        (
+            "mcp.yaml",
+            format!("servers:\n  - name: weather\n    url: {}/mcp\n", mcp.uri()),
+        ),
+        (
+            "chat.yaml",
+            profile_using_a_capture_set("chat", &format!("{}/v1/chat/completions", endpoint.uri())),
+        ),
+    ])
+    .await;
+
+    let response = harness
+        .client
+        .post(format!("{}/api/agent", harness.base))
+        .json(&json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .send()
+        .await
+        .expect("call mire");
+
+    assert_eq!(response.status(), 422);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["code"], "unknown_capture_set");
+    assert!(
+        body["message"].as_str().unwrap().contains("session"),
+        "{body}"
+    );
+    assert!(body["message"].as_str().unwrap().contains("chat"), "{body}");
+
+    // And the model was never asked, so nothing was spent finding this out.
+    assert!(endpoint.received_requests().await.unwrap().is_empty());
+}
+
+/// A broken `captures.yaml` has no panel of its own, so it rides along with the
+/// profiles — the place somebody is already looking when a capture went missing.
+#[tokio::test]
+async fn a_broken_capture_set_is_reported_with_the_profiles() {
+    let harness = Harness::start(&[
+        (
+            "captures.yaml",
+            "captures:\n  - name: session\n    rules:\n      - vars:\n          'my id': [$.id]\n"
+                .to_owned(),
+        ),
+        (
+            "chat.yaml",
+            mcp_profile("https://models.internal/v1/chat/completions"),
+        ),
+    ])
+    .await;
+
+    let body = harness.get("/api/profiles").await;
+
+    let issues = body["issues"].as_array().expect("the issues");
+    assert_eq!(issues.len(), 1, "{issues:#?}");
+    assert!(
+        issues[0]["file"]
+            .as_str()
+            .expect("the file")
+            .ends_with("captures.yaml"),
+        "{issues:#?}"
+    );
+    assert!(issues[0]["message"].as_str().unwrap().contains("my id"));
+
+    // And the profile beside it still loaded.
+    assert_eq!(body["profiles"][0]["name"], "chat");
+}
+
 #[tokio::test]
 async fn a_hook_url_naming_a_variable_nobody_captured_fails_the_call_rather_than_guessing() {
     let mcp = mcp_server(

@@ -171,6 +171,21 @@ agent:
   #       session:
   #         - $.sessionId
   #         - $.session.id
+  #
+  # A rule written here belongs to this model, which is rarely what it is about:
+  # `create_session` answers a session id at the same path whoever called it. An
+  # entry can be `use:` instead, naming a set from captures.yaml — the same rule,
+  # written once, for every profile in this directory that wants it. Mix the two
+  # freely; a `use:` expands where it is written, so the order is still this
+  # file's:
+  #
+  # capture:
+  #   - use: session
+  #   - tools:
+  #       - get_weather
+  #     vars:
+  #       temp:
+  #         - $.temp
 
 # The tools are not declared here, and neither are the servers they come from.
 # Every server mcp.yaml declares is offered to every `kind: chat` profile: they

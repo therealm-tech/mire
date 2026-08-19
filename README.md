@@ -126,7 +126,8 @@ line means never getting their next change.
 Directories are layered in the order given, and **the last one wins**: a name
 declared in more than one belongs to the last directory that declares it. That
 is true of every kind of name in there — profiles, and the entries of
-`auth.yaml`, `mcp.yaml` and `prompts.yaml` alike, each merged on its own. Names
+`auth.yaml`, `mcp.yaml`, `prompts.yaml` and `captures.yaml` alike, each merged on
+its own. Names
 nobody else claimed are simply added, so the usual case is a base you leave
 alone and a short directory of your own on top.
 
@@ -537,7 +538,8 @@ makes it call the tool, the one that makes it refuse, the paragraph that
 reproduces the bug. Retyping those from memory is how a comparison quietly stops
 being one.
 
-They live in `prompts.yaml`, next to the profiles, `auth.yaml` and `mcp.yaml`:
+They live in `prompts.yaml`, next to the profiles, `auth.yaml`, `mcp.yaml` and
+`captures.yaml`:
 
 ```yaml
 prompts:
@@ -1540,9 +1542,11 @@ session id, a job handle, the path a server just wrote. `capture:` in a profile'
 ```yaml
 agent:
   capture:
-    - tools: [create_session]
+    - tools:
+        - create_session
       vars:
-        session: [$.sessionId]
+        session:
+          - $.sessionId
 ```
 
 and a hook reads them back as `vars` — in its `url:`, its `json:`, its
@@ -1599,7 +1603,9 @@ order, first hit wins:
 
 ```yaml
       vars:
-        session: [$.sessionId, $.session.id]
+        session:
+          - $.sessionId
+          - $.session.id
 ```
 
 Paths and `tools:` patterns compile when the profile loads, so a typo names the
@@ -1655,6 +1661,104 @@ not set`, the way a header template already reports a missing `env` or `auth` �
 rather than rendering away to `/sessions//tool-calls`, which is a different
 endpoint that may well answer `200`. The bag lasts one run, is shared by every
 server that run talks to, and last write wins.
+
+#### The same rules, for every model
+
+A rule is a statement about a **tool**, and a tool does not belong to a model.
+`create_session` answers a session id at `$.sessionId` whether the model that
+called it is the one you deployed or the one you are comparing it against — so
+writing the rule into each profile means a comparison between two files that have
+to be kept identical by hand. That is exactly the shape of thing that quietly
+stops being identical, and a capture that silently stopped happening on one side
+of a comparison is a bad way to spend an afternoon.
+
+Declare it once in `captures.yaml`, next to the profiles:
+
+```yaml
+captures:
+  - name: session
+    rules:
+      - tools:
+          - create_session
+        vars:
+          session:
+            - $.sessionId
+            - $.session.id
+```
+
+and name it from every profile that wants it:
+
+```yaml
+agent:
+  capture:
+    - use: session
+```
+
+A set is a **list** of rules, because "what this family of tools leaves behind"
+is usually more than one statement. `tools:`, `vars:` and the cascades mean
+exactly what they mean in a profile, and are checked the same way when the file
+loads.
+
+An entry of `capture:` is either a rule or a `use:`, and a profile mixes the two
+freely:
+
+```yaml
+agent:
+  capture:
+    - use: session
+    - tools:
+        - get_weather
+      vars:
+        temp:
+          - $.temp
+```
+
+**A `use:` expands where it is written.** The list stays one list and the order
+stays the file's, so "a later rule wins on a name an earlier one also set" reads
+the same whether a rule came from here or from there — which is the only ordering
+anybody can reason about without opening both files.
+
+What a `use:` cannot do is narrow the set it names. A set carries the `tools:` of
+each of its rules, and re-stating them from outside would have to pick a meaning
+— intersect? replace? — so it is refused when the profile loads rather than
+guessed:
+
+```text
+`use:` names a shared set, which carries the `tools:` of each of its rules
+```
+
+Copy the rule inline if you want a different scope. That is a different rule, and
+it should look like one.
+
+A profile naming a set nothing declares **does not run**:
+
+```json
+{
+  "code": "unknown_capture_set",
+  "message": "profile `qwen3` names the capture set `session`, which `captures.yaml` does not declare"
+}
+```
+
+`422` before the stream opens, like a run asking for an MCP server `mcp.yaml` does
+not declare: the profile has said those variables get captured, and the
+alternative to stopping is a run that goes ahead and fails three turns later in a
+rendered URL — which is the failure this whole section exists to avoid. It is
+checked when the run starts rather than when the profile loads, for the same
+reason a server name is: a profile is read on its own, and the file beside it is
+a separate file with its own edits.
+
+Layering, reloading and issue reporting are the same as everywhere else in the
+directory. A broken entry is skipped and the rest still work; a set declared in
+two layered directories is the later one's. The issues come back on
+`GET /api/profiles` rather than an endpoint of their own — `captures.yaml` exists
+only to serve a profile's `agent.capture:`, and each issue names its own file:
+
+```json
+{
+  "file": "/etc/mire/profiles/captures.yaml",
+  "message": "capture set `session`: vars: `my id` cannot be read as `vars.my id`: use letters, digits and underscores"
+}
+```
 
 #### A hook that waits for one
 
@@ -1916,7 +2020,8 @@ tools:
 ```
 
 `agent:` also takes `capture:`, which keeps something out of a tool's result for
-a hook to use later — see
+a hook to use later — inline, or `use:` naming a set from `captures.yaml` so
+several models share the same rules. See
 [above](#keeping-something-a-tool-call-answered).
 
 **Nothing is executed.** The tools are simulated — a fixed string, or a Rhai
@@ -1966,7 +2071,7 @@ ninety seconds.
 
 | Route | What it does |
 | --- | --- |
-| `GET /api/profiles` | Every profile, plus the files that failed to load and why |
+| `GET /api/profiles` | Every profile, plus the files that failed to load and why — `captures.yaml` included, since it exists to serve one |
 | `GET /api/profiles/{name}` | One profile, as declared |
 | `GET /api/prompts` | Prompts declared in `prompts.yaml`, plus the entries that did not load |
 | `GET /api/auth` | Auth providers, with session status |

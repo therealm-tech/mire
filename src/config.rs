@@ -23,6 +23,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::auth::{AuthRegistry, SessionStore};
+use crate::capture::CaptureRegistry;
 use crate::issue::LoadIssue;
 use crate::mcp::McpRegistry;
 use crate::profile::loader::{self, ProfileSet};
@@ -47,6 +48,9 @@ pub struct Config {
     /// Saved prompts the UI can drop in the box, plus the entries that did not
     /// load.
     pub prompts: PromptRegistry,
+    /// Capture sets a profile's `agent.capture:` can name, plus the entries that
+    /// did not load.
+    pub captures: CaptureRegistry,
 }
 
 impl Config {
@@ -58,6 +62,7 @@ impl Config {
             .chain(self.registry.issues().iter())
             .chain(self.mcp.issues().iter())
             .chain(self.prompts.issues().iter())
+            .chain(self.captures.issues().iter())
     }
 }
 
@@ -165,6 +170,7 @@ fn read(dirs: &[PathBuf], http: &Client, sessions: &Arc<SessionStore>) -> std::i
         registry: AuthRegistry::load_dirs(dirs, http, sessions),
         mcp: McpRegistry::load_dirs(dirs, http),
         prompts: PromptRegistry::load_dirs(dirs),
+        captures: CaptureRegistry::load_dirs(dirs),
     })
 }
 

@@ -15,7 +15,7 @@ use serde_json_path::JsonPath;
 use url::Url;
 use validator::{Validate, ValidationError};
 
-use crate::pattern::NamePattern;
+use crate::capture::CaptureEntry;
 use crate::script::ScriptSource;
 
 /// Default request timeout when a profile does not set `timeout_ms`.
@@ -306,65 +306,13 @@ pub struct AgentSpec {
     ///
     /// Applied in declaration order, to simulated and live tools alike: what a
     /// captured variable is worth does not depend on which of the two answered.
+    ///
+    /// An entry is a rule, or `use:` naming a set from `captures.yaml` — the
+    /// same rules, written once for every model that wants them. Resolved when
+    /// the run starts; see [`crate::capture::CaptureRegistry::resolve`].
     #[serde(default)]
     #[validate(nested)]
-    pub capture: Vec<CaptureRule>,
-}
-
-/// Variables to pull out of a tool's result, and the tools they come from.
-///
-/// One rule is one `tools:`-plus-`vars:` pair rather than a flat map of
-/// name-to-path, because the tool a value comes from is part of what the value
-/// *means*: `$.id` is a different thing on `create_session` than on `read_file`,
-/// and a bag keyed only by path would make that a coincidence.
-///
-/// See [`crate::vars`] for what happens with them.
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Validate)]
-#[serde(deny_unknown_fields)]
-#[validate(schema(function = usable_variable_names))]
-pub struct CaptureRule {
-    /// Tools it applies to, as patterns matched against the whole name. Empty —
-    /// the default — is every tool the run offers.
-    #[serde(default)]
-    pub tools: Vec<NamePattern>,
-    /// Variable name to the `JSONPath` cascade that fills it. Tried in order,
-    /// first hit wins, exactly like a `decode:` field.
-    #[validate(length(min = 1, message = "a capture rule with no `vars` captures nothing"))]
-    pub vars: BTreeMap<String, Vec<JsonPathExpr>>,
-}
-
-impl CaptureRule {
-    /// Whether this rule has anything to say about `tool`.
-    #[must_use]
-    pub fn covers(&self, tool: &str) -> bool {
-        NamePattern::any_matches(&self.tools, tool)
-    }
-}
-
-/// A captured name has to be one a template can actually write.
-///
-/// `{{ vars.session }}` needs an identifier, and a name that only works as
-/// `{{ vars["my var"] }}` is a trap set at load time and sprung in a URL — so it
-/// is refused where it was written instead.
-fn usable_variable_names(rule: &CaptureRule) -> Result<(), ValidationError> {
-    for (name, cascade) in &rule.vars {
-        let usable = !name.is_empty()
-            && name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-        if !usable {
-            return Err(ValidationError::new("unusable_variable_name").with_message(
-                format!(
-                    "`{name}` cannot be read as `vars.{name}`: use letters, digits and underscores"
-                )
-                .into(),
-            ));
-        }
-        if cascade.is_empty() {
-            return Err(ValidationError::new("empty_capture_cascade")
-                .with_message(format!("`{name}` needs at least one JSONPath").into()));
-        }
-    }
-    Ok(())
+    pub capture: Vec<CaptureEntry>,
 }
 
 /// What a simulated tool answers with.
@@ -556,6 +504,15 @@ agent:
         Ok(profile)
     }
 
+    /// The rule itself is [`crate::capture`]'s; what these check is that a
+    /// profile still carries one, patterns and cascades compiled.
+    fn rule(entry: &CaptureEntry) -> &crate::capture::CaptureRule {
+        match entry {
+            CaptureEntry::Rule(rule) => rule,
+            CaptureEntry::Use(name) => panic!("expected a rule, got `use: {name}`"),
+        }
+    }
+
     #[test]
     fn a_capture_rule_loads_with_its_patterns_and_its_cascades() {
         let profile = with_agent(
@@ -563,12 +520,13 @@ agent:
         )
         .expect("it loads");
 
-        let rules = &profile.agent.as_ref().unwrap().capture;
-        assert_eq!(rules.len(), 1);
-        assert!(rules[0].covers("create_session"));
-        assert!(!rules[0].covers("read_file"));
-        assert_eq!(rules[0].vars["session"].len(), 2);
-        assert_eq!(rules[0].vars["session"][0].source(), "$.sessionId");
+        let entries = &profile.agent.as_ref().unwrap().capture;
+        assert_eq!(entries.len(), 1);
+        let rule = rule(&entries[0]);
+        assert!(rule.covers("create_session"));
+        assert!(!rule.covers("read_file"));
+        assert_eq!(rule.vars["session"].len(), 2);
+        assert_eq!(rule.vars["session"][0].source(), "$.sessionId");
     }
 
     #[test]
@@ -576,7 +534,23 @@ agent:
         let profile =
             with_agent("  capture:\n    - vars:\n        id: [$.id]\n").expect("it loads");
 
-        assert!(profile.agent.as_ref().unwrap().capture[0].covers("anything_at_all"));
+        assert!(rule(&profile.agent.as_ref().unwrap().capture[0]).covers("anything_at_all"));
+    }
+
+    /// The point of the whole thing: a profile names a set instead of repeating
+    /// it. What the name resolves to is the registry's business and is not in
+    /// front of us here — the profile only has to carry the reference.
+    #[test]
+    fn a_profile_can_name_a_shared_set_beside_its_own_rules() {
+        let profile = with_agent(
+            "  capture:\n    - use: session\n    - tools: [read_file]\n      vars:\n        path: [$.path]\n",
+        )
+        .expect("it loads");
+
+        let entries = &profile.agent.as_ref().unwrap().capture;
+        assert_eq!(entries.len(), 2);
+        assert!(matches!(&entries[0], CaptureEntry::Use(name) if name == "session"));
+        assert!(rule(&entries[1]).covers("read_file"));
     }
 
     #[test]

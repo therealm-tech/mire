@@ -79,8 +79,9 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 use tracing::{debug, warn};
 
+use crate::capture::CaptureRule;
 use crate::decode::paths::resolve_one;
-use crate::profile::{CaptureRule, JsonPathExpr};
+use crate::profile::JsonPathExpr;
 
 /// Variables by name, in the order a template will see them.
 pub type Captured = BTreeMap<String, Value>;
