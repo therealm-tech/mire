@@ -316,8 +316,7 @@ export function App() {
    * the `mode` this tab remembers is about the profile you were on before, not
    * about this one.
    */
-  const usesMcp =
-    mode === 'agent' && profile?.kind === 'chat' && (mcp?.servers.length ?? 0) > 0
+  const usesMcp = mode === 'agent' && profile?.kind === 'chat' && (mcp?.servers.length ?? 0) > 0
 
   /** Every declared server, which is what a chat profile is offered. */
   const declaredMcp = useMemo(() => (mcp ? mcp.servers.map((server) => server.name) : []), [mcp])
