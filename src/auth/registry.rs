@@ -7,7 +7,8 @@
 //! Loading follows the same policy as profiles: one bad entry is reported and
 //! skipped, the rest still work, and [`ANONYMOUS`] always exists. A registry you
 //! cannot load at all is exactly when you most want the tool to come up and tell
-//! you why.
+//! you why. Layered directories follow the profiles' rule too: a provider
+//! declared in two of them is the later one's, said out loud in the log.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -17,7 +18,7 @@ use reqwest::Client;
 use reqwest::header::HeaderName;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, warn};
 use url::Url;
 
 use super::browser::{OidcBrowserAuth, OidcBrowserConfig};
@@ -111,6 +112,10 @@ impl AuthDescriptor {
 pub struct AuthRegistry {
     providers: BTreeMap<String, Auth>,
     descriptors: Vec<AuthDescriptor>,
+    /// Which file each provider came from, so that a second declaration can be
+    /// told apart from a second *file* declaring it. One is a typo, the other is
+    /// a layered directory doing its job.
+    sources: BTreeMap<String, PathBuf>,
     issues: Vec<LoadIssue>,
 }
 
@@ -121,50 +126,63 @@ impl Default for AuthRegistry {
 }
 
 impl AuthRegistry {
-    /// Loads `auth.yaml` from the profiles directory.
+    /// Loads `auth.yaml` from each of the profile directories, in order.
     ///
     /// `http` is the shared client, handed to OIDC providers so that discovery and
     /// the token exchange go through the same CA bundle and redirect policy as
     /// every other outbound call. `sessions` is the browser-login store, which
     /// deliberately outlives this registry: a reload must not sign anyone out.
     ///
-    /// Never fails. A missing file gives you [`ANONYMOUS`] alone; an unreadable or
-    /// malformed one gives you the same plus an issue explaining it; a single bad
-    /// provider is skipped and reported while the others load.
+    /// Never fails. No file anywhere gives you [`ANONYMOUS`] alone; an unreadable
+    /// or malformed one gives you the same plus an issue explaining it; a single
+    /// bad provider is skipped and reported while the others load.
+    #[must_use]
+    pub fn load_dirs(
+        dirs: &[impl AsRef<Path>],
+        http: &Client,
+        sessions: &Arc<SessionStore>,
+    ) -> Self {
+        let mut registry = Self::with_builtins();
+        for dir in dirs {
+            registry.read(&dir.as_ref().join(AUTH_REGISTRY_FILE), http, sessions);
+        }
+        registry
+    }
+
+    /// Loads `auth.yaml` from a single profiles directory.
     #[must_use]
     pub fn load(dir: &Path, http: &Client, sessions: &Arc<SessionStore>) -> Self {
-        let path = dir.join(AUTH_REGISTRY_FILE);
-        let mut registry = Self::with_builtins();
+        Self::load_dirs(&[dir], http, sessions)
+    }
 
+    /// Folds one `auth.yaml` in, on top of whatever earlier directories declared.
+    fn read(&mut self, path: &Path, http: &Client, sessions: &Arc<SessionStore>) {
         if !path.exists() {
             debug!(path = %path.display(), "no auth registry, anonymous only");
-            return registry;
+            return;
         }
 
-        let text = match std::fs::read_to_string(&path) {
+        let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(error) => {
-                registry
-                    .issues
-                    .push(LoadIssue::new(&path, error.to_string()));
-                return registry;
+                self.issues.push(LoadIssue::new(path, error.to_string()));
+                return;
             }
         };
 
         let file: RegistryFile = match serde_yaml_ng::from_str(&text) {
             Ok(file) => file,
             Err(error) => {
-                registry.issues.push(LoadIssue::from_yaml(&path, &error));
-                return registry;
+                self.issues.push(LoadIssue::from_yaml(path, &error));
+                return;
             }
         };
 
         for config in file.providers {
-            if let Err(issue) = registry.insert(&path, config, http, sessions) {
-                registry.issues.push(issue);
+            if let Err(issue) = self.insert(path, config, http, sessions) {
+                self.issues.push(issue);
             }
         }
-        registry
     }
 
     /// A registry holding only the built-in anonymous provider.
@@ -173,6 +191,7 @@ impl AuthRegistry {
         let mut registry = Self {
             providers: BTreeMap::new(),
             descriptors: Vec::new(),
+            sources: BTreeMap::new(),
             issues: Vec::new(),
         };
         registry.providers.insert(
@@ -212,19 +231,34 @@ impl AuthRegistry {
     ) -> Result<(), LoadIssue> {
         let (name, provider, descriptor) = build(path, config, http, sessions)?;
 
-        // Redeclaring `anonymous` is allowed — it is how you scope it with
-        // `allowed_hosts`. Any other collision is a mistake.
-        if self.providers.contains_key(&name) && name != ANONYMOUS {
-            return Err(LoadIssue::new(
-                path,
-                format!("duplicate auth provider `{name}`"),
-            ));
+        match self.sources.get(&name) {
+            // Same file twice. Redeclaring `anonymous` is allowed — it is how you
+            // scope it with `allowed_hosts`. Any other collision is a mistake.
+            Some(previous) if previous == path => {
+                if name != ANONYMOUS {
+                    return Err(LoadIssue::new(
+                        path,
+                        format!("duplicate auth provider `{name}`"),
+                    ));
+                }
+            }
+            // A later directory redeclaring it, which is what layering is for.
+            // Not an issue, but not silent either: an OIDC provider quietly
+            // swapped for a token one is a long afternoon.
+            Some(previous) => warn!(
+                %name,
+                path = %path.display(),
+                shadowed = %previous.display(),
+                "auth provider overridden by a later directory"
+            ),
+            None => {}
         }
 
         debug!(name = %provider.name(), "auth provider registered");
         self.descriptors.retain(|existing| existing.name != name);
         self.descriptors.push(descriptor);
         self.descriptors.sort_by(|a, b| a.name.cmp(&b.name));
+        self.sources.insert(name.clone(), path.to_path_buf());
         self.providers.insert(name, provider);
         Ok(())
     }
@@ -504,6 +538,91 @@ mod tests {
         assert!(registry.get(ANONYMOUS).is_some());
         assert_eq!(registry.descriptors().len(), 1);
         assert!(registry.issues().is_empty());
+    }
+
+    #[test]
+    fn a_later_directory_takes_a_provider_the_earlier_one_declared() {
+        let base = write_registry(
+            "layer-base",
+            "providers:\n  - name: gateway\n    kind: token\n    value:\n      env: MODEL_TOKEN\n",
+        );
+        let mine = write_registry(
+            "layer-mine",
+            "providers:\n  - name: gateway\n    kind: anonymous\n",
+        );
+
+        let registry = AuthRegistry::load_dirs(
+            &[&base, &mine],
+            &Client::new(),
+            &Arc::new(SessionStore::default()),
+        );
+
+        assert!(matches!(registry.get("gateway"), Some(Auth::Anonymous(_))));
+        // One descriptor, not two: the UI's selector must not offer the ghost.
+        assert_eq!(
+            registry
+                .descriptors()
+                .iter()
+                .filter(|descriptor| descriptor.name == "gateway")
+                .count(),
+            1
+        );
+        assert!(registry.issues().is_empty(), "{:?}", registry.issues());
+    }
+
+    /// Scoping `anonymous` in a base directory must survive a second directory
+    /// that says nothing about it — the built-in is not a redeclaration.
+    #[test]
+    fn a_later_directory_that_is_silent_leaves_a_scoped_anonymous_alone() {
+        let base = write_registry(
+            "layer-anon-base",
+            "providers:\n  - name: anonymous\n    kind: anonymous\n    allowed_hosts:\n      - models.internal\n",
+        );
+        let mine = write_registry(
+            "layer-anon-mine",
+            "providers:\n  - name: gateway\n    kind: anonymous\n",
+        );
+
+        let registry = AuthRegistry::load_dirs(
+            &[&base, &mine],
+            &Client::new(),
+            &Arc::new(SessionStore::default()),
+        );
+
+        let anonymous = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.name == ANONYMOUS)
+            .unwrap();
+        assert_eq!(anonymous.allowed_hosts, ["models.internal"]);
+        assert!(registry.issues().is_empty(), "{:?}", registry.issues());
+    }
+
+    /// Overriding is only ever *across* directories. Twice in one file is still
+    /// the typo it always was.
+    #[test]
+    fn a_duplicate_inside_the_later_directory_is_still_reported() {
+        let base = write_registry(
+            "layer-dup-base",
+            "providers:\n  - name: gateway\n    kind: anonymous\n",
+        );
+        let mine = write_registry(
+            "layer-dup-mine",
+            "providers:\n  - name: gateway\n    kind: anonymous\n  - name: gateway\n    kind: anonymous\n",
+        );
+
+        let registry = AuthRegistry::load_dirs(
+            &[&base, &mine],
+            &Client::new(),
+            &Arc::new(SessionStore::default()),
+        );
+
+        assert_eq!(registry.issues().len(), 1);
+        assert!(
+            registry.issues()[0]
+                .message
+                .contains("duplicate auth provider")
+        );
     }
 
     #[test]

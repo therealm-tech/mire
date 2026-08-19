@@ -2,6 +2,10 @@
 //!
 //! A broken file never stops the others from loading — see [`crate::issue`] for
 //! why.
+//!
+//! Several directories can be layered, and then a name declared twice is not a
+//! mistake but the point: the last directory to declare it wins, loudly. Within
+//! one directory it is still a mistake, and still reported as one.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -65,6 +69,28 @@ impl ProfileSet {
     }
 }
 
+/// Reads every `*.yaml` / `*.yml` file in each of `dirs` as a profile.
+///
+/// The directories are layered in the order given: a name declared in two of
+/// them is the later one's, and the shadowed profile is logged rather than kept.
+/// That is the whole point of listing more than one — a directory you cannot
+/// edit, and one of your own on top of it.
+///
+/// # Errors
+///
+/// Fails when one of the directories cannot be read. The error names it: with a
+/// list, "no such file or directory" on its own does not say which.
+pub fn load_dirs(dirs: &[impl AsRef<Path>]) -> std::io::Result<ProfileSet> {
+    let mut set = ProfileSet::default();
+    for dir in dirs {
+        let dir = dir.as_ref();
+        read_dir_into(&mut set, dir).map_err(|error| {
+            std::io::Error::new(error.kind(), format!("`{}`: {error}", dir.display()))
+        })?;
+    }
+    Ok(set)
+}
+
 /// Reads every `*.yaml` / `*.yml` file in `dir` as a profile.
 ///
 /// Not recursive, and the registry files are skipped. Returns the set even when
@@ -75,7 +101,20 @@ impl ProfileSet {
 /// Fails only when the directory itself cannot be read.
 pub fn load_dir(dir: &Path) -> std::io::Result<ProfileSet> {
     let mut set = ProfileSet::default();
-    let mut names: BTreeMap<String, PathBuf> = BTreeMap::new();
+    read_dir_into(&mut set, dir)?;
+    Ok(set)
+}
+
+/// Folds one directory into `set`, which may already hold earlier directories.
+///
+/// Two names collide for two different reasons, and they are not the same event.
+/// Twice in *this* directory is a mistake nobody meant to make: it is reported,
+/// and the first file keeps the name. Once here and once in a directory read
+/// earlier is a deliberate override: this one takes it, and the one it displaced
+/// is named in the log so that a profile behaving unexpectedly has somewhere to
+/// be explained.
+fn read_dir_into(set: &mut ProfileSet, dir: &Path) -> std::io::Result<()> {
+    let mut here: BTreeMap<String, PathBuf> = BTreeMap::new();
 
     let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)?
         .filter_map(Result::ok)
@@ -91,7 +130,7 @@ pub fn load_dir(dir: &Path) -> std::io::Result<ProfileSet> {
     for path in paths {
         match load_file(&path) {
             Ok(profile) => {
-                if let Some(previous) = names.insert(profile.name.clone(), path.clone()) {
+                if let Some(previous) = here.insert(profile.name.clone(), path.clone()) {
                     set.issues.push(LoadIssue::new(
                         &path,
                         format!(
@@ -101,6 +140,14 @@ pub fn load_dir(dir: &Path) -> std::io::Result<ProfileSet> {
                         ),
                     ));
                     continue;
+                }
+                if let Some(shadowed) = set.profiles.get(&profile.name) {
+                    warn!(
+                        name = %profile.name,
+                        path = %path.display(),
+                        shadowed = %shadowed.source.display(),
+                        "profile overridden by a later directory"
+                    );
                 }
                 debug!(name = %profile.name, kind = ?profile.kind, path = %profile.source.display(), "profile loaded");
                 set.profiles.insert(profile.name.clone(), Arc::new(profile));
@@ -112,7 +159,7 @@ pub fn load_dir(dir: &Path) -> std::io::Result<ProfileSet> {
         }
     }
 
-    Ok(set)
+    Ok(())
 }
 
 /// Reads and validates a single profile file.
@@ -215,6 +262,83 @@ request:
         let set = load_dir(&dir).unwrap();
         assert_eq!(set.len(), 1);
         assert!(set.issues()[0].message.contains("duplicate profile name"));
+    }
+
+    #[test]
+    fn a_later_directory_takes_a_name_the_earlier_one_declared() {
+        let base = temp_dir("layer-base");
+        let mine = temp_dir("layer-mine");
+        write(&base, "good.yaml", GOOD);
+        write(
+            &mine,
+            "override.yaml",
+            &GOOD.replace(
+                "https://models.internal/good",
+                "https://staging.internal/good",
+            ),
+        );
+
+        let set = load_dirs(&[&base, &mine]).unwrap();
+
+        assert_eq!(set.len(), 1);
+        assert_eq!(
+            set.get("good").unwrap().url.as_str(),
+            "https://staging.internal/good"
+        );
+        assert!(set.get("good").unwrap().source.starts_with(&mine));
+        // The override is a warning, not a load failure: nothing here is broken.
+        assert!(set.issues().is_empty(), "{:?}", set.issues());
+    }
+
+    #[test]
+    fn layered_directories_add_up_rather_than_replace_each_other() {
+        let base = temp_dir("layer-add-base");
+        let mine = temp_dir("layer-add-mine");
+        write(&base, "good.yaml", GOOD);
+        write(
+            &mine,
+            "other.yaml",
+            &GOOD.replace("name: good", "name: other"),
+        );
+
+        let set = load_dirs(&[&base, &mine]).unwrap();
+
+        assert_eq!(set.len(), 2);
+        assert!(set.get("good").is_some());
+        assert!(set.get("other").is_some());
+    }
+
+    /// Overriding is only ever *across* directories. Two files in the same one
+    /// still cannot both hold the name — nobody writes that on purpose.
+    #[test]
+    fn a_duplicate_inside_the_later_directory_is_still_reported() {
+        let base = temp_dir("layer-dup-base");
+        let mine = temp_dir("layer-dup-mine");
+        write(&base, "good.yaml", GOOD);
+        write(&mine, "a.yaml", GOOD);
+        write(&mine, "b.yaml", GOOD);
+
+        let set = load_dirs(&[&base, &mine]).unwrap();
+
+        assert_eq!(set.len(), 1);
+        assert_eq!(set.issues().len(), 1);
+        assert!(set.issues()[0].message.contains("duplicate profile name"));
+        // Named against the file that actually holds the name, not the base's.
+        assert!(
+            set.issues()[0].message.contains("a.yaml"),
+            "{:?}",
+            set.issues()
+        );
+    }
+
+    #[test]
+    fn a_directory_that_cannot_be_read_is_named_in_the_error() {
+        let base = temp_dir("layer-missing");
+        let missing = base.join("nowhere");
+
+        let error = load_dirs(&[&base, &missing]).unwrap_err();
+
+        assert!(error.to_string().contains("nowhere"), "{error}");
     }
 
     #[test]

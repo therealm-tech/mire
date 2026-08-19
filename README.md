@@ -35,7 +35,7 @@ also an environment variable:
 
 | Flag | Variable | Default | What it does |
 | --- | --- | --- | --- |
-| `--profiles` | `PROFILES_DIR` | `./profiles` | Directory of profile YAML files |
+| `--profiles` | `PROFILES_DIR` | `./profiles` | Directories of profile YAML files — see [below](#more-than-one-profiles-directory) |
 | `--uploads` | `UPLOADS_DIR` | `./uploads` | Where **Attach** writes — see [below](#attaching-a-file) |
 | `--host` | `HOST` | `127.0.0.1` | Listen address; widening it is deliberate |
 | `--port` | `PORT` | `8787` | Listen port |
@@ -44,12 +44,66 @@ also an environment variable:
 | `--ca-bundle` | `CA_BUNDLE` | *(none)* | PEM bundle of extra trusted CAs |
 | `--log-filter` | `LOG_FILTER` | `info` | `tracing` filter, e.g. `mire=debug` |
 
+### More than one profiles directory
+
+`--profiles` takes more than one directory, repeated or `:`-separated the way
+`PATH` is:
+
+```sh
+mire --profiles /etc/mire/profiles --profiles ~/.config/mire/profiles
+PROFILES_DIR=/etc/mire/profiles:~/.config/mire/profiles mire
+```
+
+This is for the case where the profiles are somebody else's. A team keeps a
+directory of endpoints under review, checked into a repository, mounted
+read-only; you want the same thing plus two of your own, and one of theirs
+pointed at staging for the afternoon. Copying the whole directory to change one
+line means never getting their next change.
+
+Directories are layered in the order given, and **the last one wins**: a name
+declared in more than one belongs to the last directory that declares it. That
+is true of every kind of name in there — profiles, and the entries of
+`auth.yaml`, `mcp.yaml` and `prompts.yaml` alike, each merged on its own. Names
+nobody else claimed are simply added, so the usual case is a base you leave
+alone and a short directory of your own on top.
+
+An override is a warning rather than an error, naming both files:
+
+```
+WARN mire::profile::loader: profile overridden by a later directory
+  name=mistral-small path=/home/you/.config/mire/profiles/mistral-small.yaml
+  shadowed=/etc/mire/profiles/mistral-small.yaml
+```
+
+Deliberate, so it does not belong in the UI's list of things that failed to
+load — but not silent either, because "why is this profile pointing at staging"
+is a question that deserves an answer in the log rather than an afternoon.
+
+The rule is about *different* directories. Two files in the **same** directory
+claiming one name is still what it always was — a mistake, reported as a load
+issue, with the first file keeping the name.
+
+Every listed directory is watched, so editing your layer reloads exactly as
+editing a single directory always did. All of them must exist: a directory you
+named and `mire` cannot read is a typo worth stopping for, and the startup error
+says which one.
+
 ### In a container
 
 ```sh
 docker build -t mire:0.1.0 .
 docker run --rm --read-only -p 127.0.0.1:8787:8787 \
   -v "$PWD/profiles:/etc/mire/profiles:ro" mire:0.1.0
+```
+
+Layering works the same way, and is most of the reason it exists — a shared
+directory mounted read-only, yours writable on top:
+
+```sh
+docker run --rm --read-only -p 127.0.0.1:8787:8787 \
+  -v "$PWD/team-profiles:/etc/mire/profiles:ro" \
+  -v "$PWD/profiles:/etc/mire/profiles.local:ro" \
+  -e PROFILES_DIR=/etc/mire/profiles:/etc/mire/profiles.local mire:0.1.0
 ```
 
 One static binary on `distroless/static` — a certificate bundle, timezone data,

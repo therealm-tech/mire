@@ -22,7 +22,9 @@ struct Harness {
     /// The server root, whatever the base path is.
     root: String,
     client: reqwest::Client,
-    dir: TempDir,
+    /// Every watched configuration directory, in precedence order. Usually one;
+    /// [`Harness::start_layered`] is what makes it more.
+    dirs: Vec<TempDir>,
     /// Where `POST /api/uploads` writes. Held so it outlives the server.
     uploads: TempDir,
     /// Dropping this stops the file watcher, so it has to be held.
@@ -37,13 +39,25 @@ impl Harness {
 
     /// Same, mounted under a base path — what a notebook proxy does to you.
     async fn start_at(files: &[(&str, String)], base_path: &str) -> Self {
-        let dir = TempDir::new().expect("temp dir");
-        for (name, body) in files {
-            std::fs::write(dir.path().join(name), body).expect("write file");
-        }
+        Self::start_layered(&[files], base_path).await
+    }
+
+    /// Starts `mire` over several configuration directories, in the order given.
+    async fn start_layered(layers: &[&[(&str, String)]], base_path: &str) -> Self {
+        let dirs: Vec<TempDir> = layers
+            .iter()
+            .map(|files| {
+                let dir = TempDir::new().expect("temp dir");
+                for (name, body) in *files {
+                    std::fs::write(dir.path().join(name), body).expect("write file");
+                }
+                dir
+            })
+            .collect();
+        let paths: Vec<&std::path::Path> = dirs.iter().map(TempDir::path).collect();
 
         let http = transport::build_client(&TransportOptions::default()).expect("http client");
-        let config = ConfigStore::load(dir.path(), http.clone()).expect("load configuration");
+        let config = ConfigStore::load(&paths, http.clone()).expect("load configuration");
         let watcher = mire::config::watch(std::sync::Arc::clone(&config)).expect("watch");
 
         // Its own directory, not a corner of the watched one: an upload landing
@@ -72,7 +86,7 @@ impl Harness {
             base: format!("http://{address}{base_path}"),
             root: format!("http://{address}"),
             client: reqwest::Client::new(),
-            dir,
+            dirs,
             uploads,
             _watcher: watcher,
         }
@@ -150,9 +164,14 @@ impl Harness {
             .expect("get")
     }
 
-    /// Writes a file into the watched directory.
+    /// Writes a file into the first watched directory.
     fn write(&self, name: &str, body: &str) {
-        std::fs::write(self.dir.path().join(name), body).expect("write file");
+        self.write_in(0, name, body);
+    }
+
+    /// Writes a file into the `index`-th watched directory.
+    fn write_in(&self, index: usize, name: &str, body: &str) {
+        std::fs::write(self.dirs[index].path().join(name), body).expect("write file");
     }
 
     /// Polls `route` until `ready` accepts the response, or gives up.
@@ -820,6 +839,54 @@ request:
     assert_eq!(status, 422);
     assert_eq!(body["code"], "rendered_body_is_not_json");
     assert_eq!(body["detail"]["rendered"], r#"{"a": 1,}"#);
+}
+
+/// The point of listing several directories: a base somebody else maintains,
+/// and yours on top, without copying theirs to change one line.
+#[tokio::test]
+async fn a_later_directory_overrides_a_profile_the_earlier_one_declared() {
+    let harness = Harness::start_layered(
+        &[
+            &[("chat.yaml", openai_profile("https://models.internal/v1"))],
+            &[("chat.yaml", openai_profile("https://staging.internal/v1"))],
+        ],
+        "",
+    )
+    .await;
+
+    let body = harness.get("/api/profiles").await;
+
+    assert_eq!(body["profiles"].as_array().unwrap().len(), 1);
+    assert_eq!(body["profiles"][0]["url"], "https://staging.internal/v1");
+    // An override is not a load failure, so it belongs in the log and not here.
+    assert!(body["issues"].as_array().unwrap().is_empty());
+}
+
+/// Every listed directory is watched, not just the first: an override you have
+/// to restart for is an override you stop using.
+#[tokio::test]
+async fn editing_the_second_directory_reloads_too() {
+    let harness = Harness::start_layered(
+        &[
+            &[("chat.yaml", openai_profile("https://models.internal/v1"))],
+            &[],
+        ],
+        "",
+    )
+    .await;
+
+    harness.write_in(
+        1,
+        "chat.yaml",
+        &openai_profile("https://staging.internal/v1"),
+    );
+
+    let body = harness
+        .wait_for("/api/profiles", |body| {
+            body["profiles"][0]["url"] == "https://staging.internal/v1"
+        })
+        .await;
+    assert_eq!(body["profiles"].as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]
