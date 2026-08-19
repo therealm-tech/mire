@@ -189,6 +189,7 @@ mod tests {
             timeout: std::time::Duration::from_secs(5),
             protocol_version: None,
             hooks: Vec::new(),
+            capture: Vec::new(),
         }
     }
 

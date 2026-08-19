@@ -32,6 +32,7 @@
 //! same move this tool exists for.
 
 pub mod auth;
+pub mod capture;
 pub mod client;
 pub mod headers;
 pub mod hook;
@@ -48,6 +49,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use auth::McpCredentials;
+pub use capture::CaptureRule;
 pub use client::{McpClient, McpServer};
 pub use headers::HeaderTemplates;
 pub use hook::{

@@ -38,6 +38,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, warn};
 use url::Url;
 
+use super::capture::CaptureRule;
 use super::headers::HeaderTemplates;
 use super::hook::{self, Hook, HookJournal, HookPhase, HookRecord, Payload, ToolOutcome};
 use super::negotiate::{self, Session};
@@ -81,6 +82,12 @@ pub struct McpServer {
     pub protocol_version: Option<Revision>,
     /// What fires around a `tools/call` on this server, in declaration order.
     pub hooks: Vec<Hook>,
+    /// What to keep out of this server's tool results, in declaration order.
+    ///
+    /// Here rather than on a profile because a rule is a statement about a tool,
+    /// and the tool is this server's — see [`super::capture`]. What the run then
+    /// does with the value is [`crate::vars`]'s.
+    pub capture: Vec<CaptureRule>,
 }
 
 impl McpServer {
@@ -117,10 +124,10 @@ pub struct McpClient {
     /// The run's attached files, for hooks that ask for some. Empty off a
     /// registry client: files arrive with a call, not with a server.
     uploads: Arc<[UploadRef]>,
-    /// The run's variables: what its tool calls have captured, and the rules
-    /// that fill them. Per run for the same reason the journals are — a bag
-    /// living on the registry's shared client would be one run reading another
-    /// one's session id.
+    /// The run's variables: what its tool calls have captured. Per run for the
+    /// same reason the journals are — a bag living on the registry's shared
+    /// client would be one run reading another one's session id. The rules that
+    /// fill it are the server's, and travel with it.
     vars: Arc<Vars>,
 }
 
@@ -135,7 +142,7 @@ impl McpClient {
             journal: None,
             hooks: None,
             uploads: Arc::from(Vec::new()),
-            vars: Vars::none(),
+            vars: Vars::new(),
         }
     }
 
@@ -156,9 +163,9 @@ impl McpClient {
 
     /// The same client, capturing into the run's variables.
     ///
-    /// A client without this captures nothing, which is what every caller
-    /// outside the agent loop wants: `GET /api/mcp/{name}/tools` is a
-    /// connectivity check, not a run, and it has no variables to fill.
+    /// A client without this gets a bag of its own that nobody reads, which is
+    /// what every caller outside the agent loop wants: `GET /api/mcp/{name}/tools`
+    /// is a connectivity check, not a run, and it has no variables to fill.
     #[must_use]
     pub fn capturing(&self, vars: Arc<Vars>) -> Self {
         Self {
@@ -414,9 +421,12 @@ impl McpClient {
         // wrapped has just opened is the whole point of a templated URL. A call
         // that failed captures nothing: there is no result to read.
         if let Ok(result) = &mut called {
-            result.captured =
-                self.vars
-                    .capture(&tool.name, result.structured.as_ref(), &result.text);
+            result.captured = self.vars.capture(
+                &self.server.capture,
+                &tool.name,
+                result.structured.as_ref(),
+                &result.text,
+            );
         }
 
         // The `after` hooks see what happened either way. An audit trail that
@@ -1577,6 +1587,7 @@ mod tests {
             timeout: Duration::from_secs(30),
             protocol_version: None,
             hooks: Vec::new(),
+            capture: Vec::new(),
         };
         assert!(server.offers("anything"));
 
@@ -1597,6 +1608,7 @@ mod tests {
                 timeout: Duration::from_secs(30),
                 protocol_version: None,
                 hooks: Vec::new(),
+                capture: Vec::new(),
             },
             Client::new(),
         );

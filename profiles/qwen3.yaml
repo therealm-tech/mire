@@ -148,45 +148,6 @@ agent:
   max_iterations: 6
   max_duration_ms: 600000
 
-  # What to keep out of a tool's result, for a hook to address itself with
-  # later. Each rule names the tools it applies to — anchored regexes, like a
-  # hook's `tools:`, empty being every tool — and a JSONPath cascade per
-  # variable, tried in order like a `decode:` field.
-  #
-  # Simulated and live tools capture alike, the paths compile when this file
-  # loads, and every tool card in the trace says what it set. They are then read
-  # as `vars` by a hook's `url:`, `json:` and `headers:`, and by a server's own
-  # `headers:` — see mcp.yaml.
-  #
-  # A rule that covers a tool and captures nothing from it warns, naming the
-  # paths it tried: the rule has said that tool produces that variable, and the
-  # alternative is finding out three turns later from a rendered URL. Which is
-  # also why `tools:` is worth naming — an empty one covers every tool, so it
-  # warns on every call that does not carry the variable.
-  #
-  # capture:
-  #   - tools:
-  #       - create_session
-  #     vars:
-  #       session:
-  #         - $.sessionId
-  #         - $.session.id
-  #
-  # A rule written here belongs to this model, which is rarely what it is about:
-  # `create_session` answers a session id at the same path whoever called it. An
-  # entry can be `use:` instead, naming a set from captures.yaml — the same rule,
-  # written once, for every profile in this directory that wants it. Mix the two
-  # freely; a `use:` expands where it is written, so the order is still this
-  # file's:
-  #
-  # capture:
-  #   - use: session
-  #   - tools:
-  #       - get_weather
-  #     vars:
-  #       temp:
-  #         - $.temp
-
 # The tools are not declared here, and neither are the servers they come from.
 # Every server mcp.yaml declares is offered to every `kind: chat` profile: they
 # are fetched at the start of the run and **really called**, which is the

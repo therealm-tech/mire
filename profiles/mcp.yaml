@@ -37,6 +37,46 @@ servers:
     tools:
       - get_weather
 
+    # What to keep out of a tool's result, for a hook or a header to address
+    # itself with later. Each rule names the tools it applies to — anchored
+    # regexes, like a hook's `tools:`, empty being every tool — and a JSONPath
+    # cascade per variable, tried in order like a `decode:` field.
+    #
+    # It belongs here, on the server, rather than on a model's profile: a rule
+    # is a statement about a **tool**, and a tool does not belong to a model.
+    # `create_session` answers a session id at `$.sessionId` whether the model
+    # that called it is qwen3 or the one you are comparing it against — so
+    # writing the rule into each profile meant two files that had to be kept
+    # identical by hand, which is exactly the shape of thing that quietly stops
+    # being identical. Written once here, every chat profile gets it.
+    #
+    # The paths compile when this file loads, and every tool card in the trace
+    # says what it set. They are then read as `vars` by a hook's `url:`, `json:`
+    # and `headers:`, and by a server's own `headers:` — both below.
+    #
+    # A rule that covers a tool and captures nothing from it warns, naming the
+    # paths it tried: the rule has said that tool produces that variable, and
+    # the alternative is finding out three turns later from a rendered URL.
+    # Which is also why `tools:` is worth naming — an empty one covers every
+    # tool, so it warns on every call that does not carry the variable.
+    #
+    # `dev` opens no session, so this is here as the shape to copy. A profile's
+    # simulated `tools:` capture nothing at all, whatever they answer: they run
+    # in-process and belong to no server.
+    #
+    # capture:
+    #   - tools:
+    #       - create_session
+    #     vars:
+    #       session:
+    #         - $.sessionId
+    #         - $.session.id
+    #   - tools:
+    #       - get_weather
+    #     vars:
+    #       temp:
+    #         - $.temp
+
   # `protocol_version:` skips the negotiation and states the revision outright.
   # Reach for it when the version is the thing under test rather than a detail:
   # pinning one the server refuses gets you the refusal, which is the answer you
@@ -154,9 +194,9 @@ servers:
 
   # --- 7b. A session an earlier tool call opened -----------------------------
   #
-  # `vars` is what this run's tool calls have captured, per the profile's
-  # `agent.capture:` — see captures.yaml. This is how a tool that opens a session
-  # puts that session on every later request to the same server.
+  # `vars` is what this run's tool calls have captured, per the `capture:` of
+  # the server that answered each of them. This is how a tool that opens a
+  # session puts that session on every later request to the same server.
   #
   # The `| default('')` is **not** decoration here. These headers render on
   # every request, and the first is the `tools/list` at setup — before any tool
@@ -318,8 +358,9 @@ servers:
   #               file: '{{ uploads[0].path }}'
   #
   #     # A hook addressed with what an earlier call answered. `vars` is filled
-  #     # by the profile's `agent.capture:` — see captures.yaml — and is in scope
-  #     # for `url:`, `headers:`, `json:` and `multipart:` alike.
+  #     # by a server's `capture:` — this server's, or any other the run reached
+  #     # — and is in scope for `url:`, `headers:`, `json:` and `multipart:`
+  #     # alike.
   #     #
   #     # `url:` is a template only when it contains one, so every URL above is
   #     # still parsed and checked when this file loads. A variable nobody

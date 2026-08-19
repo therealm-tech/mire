@@ -109,10 +109,10 @@
 //!
 //! The expression is compiled when `mcp.yaml` loads, so a typo in its syntax is
 //! a startup issue naming the hook. What it *reads* is checked against nothing:
-//! `mcp.yaml` does not know which profiles will use the server, so a condition
-//! naming a variable no profile ever captures shows up as a skip quoting it, run
-//! after run, rather than as a startup error about a file that may be perfectly
-//! correct.
+//! a variable may be captured by this server, by another one the run happens to
+//! reach, or by nobody — so a condition naming a variable nothing ever captures
+//! shows up as a skip quoting it, run after run, rather than as a startup error
+//! about a file that may be perfectly correct.
 //!
 //! # What it sends
 //!

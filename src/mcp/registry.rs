@@ -18,7 +18,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 use url::Url;
+use validator::{Validate, ValidationErrors};
 
+use super::capture::CaptureRule;
 use super::client::{McpClient, McpServer};
 use super::headers::HeaderTemplates;
 use super::hook::{
@@ -66,6 +68,25 @@ pub struct McpDescriptor {
     /// to include the third party it is about to tell.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hooks: Vec<HookDescriptor>,
+    /// What it keeps out of its tool results, and from which tools.
+    ///
+    /// **Names only** — a captured value is a session id as often as not, and
+    /// this listing is read before a run rather than during one, so there is
+    /// nothing to show anyway. Listed because a hook's templated URL above is
+    /// unreadable without knowing where `vars.session` is supposed to come from.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub capture: Vec<CaptureDescriptor>,
+}
+
+/// One capture rule, as advertised to the UI. Carries no captured value.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureDescriptor {
+    /// Tools it applies to, as the patterns `mcp.yaml` wrote. Empty means every
+    /// tool.
+    pub tools: Vec<String>,
+    /// The variables it fills, by name.
+    pub vars: Vec<String>,
 }
 
 /// A hook as advertised to the UI. Carries no credential.
@@ -225,6 +246,11 @@ impl McpRegistry {
                 }
             };
 
+            if let Err(message) = check_capture(&config.name, &config.capture) {
+                self.issues.push(LoadIssue::new(path, message));
+                continue;
+            }
+
             let server = McpServer {
                 name: config.name.clone(),
                 url: config.url,
@@ -234,25 +260,20 @@ impl McpRegistry {
                 timeout: Duration::from_millis(config.timeout_ms),
                 protocol_version,
                 hooks,
+                capture: config.capture,
             };
 
             debug!(
                 name = %server.name,
                 url = %server.url,
                 hooks = server.hooks.len(),
+                capture = server.capture.len(),
                 "MCP server registered"
             );
             self.descriptors
                 .retain(|existing| existing.name != server.name);
-            self.descriptors.push(McpDescriptor {
-                name: server.name.clone(),
-                url: server.url.to_string(),
-                auth: server.auth.clone(),
-                tools: server.tools.clone(),
-                headers: config.headers.keys().cloned().collect(),
-                uses_auth: server.headers.providers().map(str::to_owned).collect(),
-                hooks: server.hooks.iter().map(describe).collect(),
-            });
+            self.descriptors
+                .push(describe_server(&server, config.headers.keys()));
             self.sources.insert(server.name.clone(), path.to_path_buf());
             self.clients
                 .insert(server.name.clone(), McpClient::new(server, http.clone()));
@@ -334,6 +355,14 @@ struct ServerConfig {
     /// What fires before and after a `tools/call` on this server.
     #[serde(default)]
     hooks: Vec<HookConfig>,
+    /// What to keep out of this server's tool results, for a hook or a header
+    /// to use later.
+    ///
+    /// Deserialised straight into the rules, so a bad `JSONPath` or an
+    /// uncompilable pattern is a load issue naming this file — and validated
+    /// below, so a name no template could write is one too.
+    #[serde(default)]
+    capture: Vec<CaptureRule>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -427,6 +456,47 @@ impl PartConfig {
             Self::Many(sources) => sources.clone(),
         }
     }
+}
+
+/// Checks a server's capture rules, or says which one is wrong and why.
+///
+/// The paths and the patterns are already compiled by the time this runs — serde
+/// did that, and a bad one never got here. What is left is the pair of things
+/// only a whole rule can answer: a rule that captures nothing, and a variable
+/// name `{{ vars.… }}` could not write.
+fn check_capture(server: &str, rules: &[CaptureRule]) -> Result<(), String> {
+    for (index, rule) in rules.iter().enumerate() {
+        // Numbered rather than named: a rule has no name, and "the third one"
+        // is what somebody counts down the file to find.
+        rule.validate().map_err(|errors| {
+            format!(
+                "MCP server `{server}`: capture rule {}: {}",
+                index + 1,
+                complaints(&errors)
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// The sentences a `ValidationErrors` holds, without the machinery around them.
+///
+/// `Display` renders the whole tree, keys and all, which puts `__all__:` in
+/// front of every whole-rule complaint — the internal name for "not about one
+/// field", and not a thing anybody wrote in `mcp.yaml`.
+fn complaints(errors: &ValidationErrors) -> String {
+    errors
+        .field_errors()
+        .values()
+        .flat_map(|failures| failures.iter())
+        .map(|failure| {
+            failure
+                .message
+                .as_ref()
+                .map_or_else(|| failure.code.to_string(), ToString::to_string)
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Compiles a server's hooks, or says which one is wrong and why.
@@ -588,6 +658,36 @@ fn compile_parts(
     }
 
     Ok(parts)
+}
+
+/// One server, for the UI. Names only, never a credential.
+///
+/// `declared` is the header names as `mcp.yaml` wrote them: the compiled
+/// templates no longer have them, and a listing of what a server sends is one of
+/// the two halves of "what is this about to do".
+fn describe_server<'a>(
+    server: &McpServer,
+    declared: impl Iterator<Item = &'a String>,
+) -> McpDescriptor {
+    McpDescriptor {
+        name: server.name.clone(),
+        url: server.url.to_string(),
+        auth: server.auth.clone(),
+        tools: server.tools.clone(),
+        headers: declared.cloned().collect(),
+        uses_auth: server.headers.providers().map(str::to_owned).collect(),
+        hooks: server.hooks.iter().map(describe).collect(),
+        capture: server.capture.iter().map(describe_capture).collect(),
+    }
+}
+
+/// One capture rule, for the UI. Names only, never a captured value.
+fn describe_capture(rule: &CaptureRule) -> CaptureDescriptor {
+    CaptureDescriptor {
+        // The patterns as written, for the same reason a hook's are.
+        tools: rule.tools.iter().map(|p| p.as_str().to_owned()).collect(),
+        vars: rule.vars.keys().cloned().collect(),
+    }
 }
 
 /// One hook, for the UI. Names only, never a rendered value.
