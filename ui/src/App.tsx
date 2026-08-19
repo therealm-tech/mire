@@ -167,9 +167,15 @@ export function App() {
 
   const [maxIterations, setMaxIterations] = usePersisted('maxTurns', z.number(), 6)
   // Agent by default: the loop is what this tool is for, and it is the only mode
-  // that answers tool calls. Chat is one streamed turn, which is what you switch
-  // to when the question is about the answer arriving rather than about tools.
+  // that answers tool calls. Chat is the same profile stopped after one turn,
+  // which is what you switch to when the loop is not the question.
   const [mode, setMode] = usePersisted('mode', runModeSchema, 'agent')
+  // Off by default, in either mode. Streaming is a second thing to get right —
+  // the framing, the deltas, the endpoint actually chunking at all — and a first
+  // run should fail for one reason at a time. It is also where tool calls stop
+  // reassembling, so a loop that silently streamed would be a loop that silently
+  // stopped calling tools.
+  const [streaming, setStreaming] = usePersisted('stream', z.boolean(), false)
   // `null` is auto: every server settles its own revision the way it always did.
   const [mcpProtocol, setMcpProtocol] = usePersisted<string | null>(
     'mcpProtocol',
@@ -507,6 +513,60 @@ export function App() {
   }, [messages, prompt, setPrompt])
 
   /**
+   * **Chat** mode, whole: one turn, one request, one answer.
+   *
+   * The plain endpoint rather than the streaming one with the chunks thrown
+   * away — `POST /api/call` is a request that never asks the endpoint to chunk
+   * anything, which is the point of having the box unticked. Like the other two
+   * runs it takes the history rather than reading it, so **Retry** can shorten
+   * the timeline and send it in the same breath.
+   */
+  const runCall = useCallback(
+    (sent: Message[]) => {
+      if (!profile) {
+        return
+      }
+      const signal = begin()
+      setLive(null)
+      setEmbedding(null)
+
+      const body: CallRequest = { profile: profile.name, messages: sent }
+      if (token.length > 0) {
+        body.token = token
+      }
+      if (attachments.length > 0) {
+        body.uploads = attachments.map((file) => file.id)
+      }
+
+      call(body, signal)
+        .then((result) => {
+          setExchanges((current) => [...current, callExchange(result)])
+          const answer = assistantTurn(result)
+          if (answer) {
+            setTimeline((current) => [...current, messageItem(answer)])
+          }
+          logger.info('call.done', {
+            profile: result.profile,
+            auth: result.auth,
+            status: result.response.http.status,
+          })
+        })
+        .catch((error: unknown) => {
+          if (abandoned(error)) {
+            return
+          }
+          if (error instanceof ApiError) {
+            setCallError(error)
+          } else {
+            logger.error('call.failed', { message: String(error) })
+          }
+        })
+        .finally(settle)
+    },
+    [profile, token, attachments, begin, settle],
+  )
+
+  /**
    * **Chat** mode: the same history, read chunk by chunk instead of whole.
    *
    * One turn and no loop: tool calls do not reassemble from a stream, so there
@@ -612,7 +672,11 @@ export function App() {
         return
       }
       const signal = begin()
-      setLive(null)
+      // Empty rather than null when the turns are streamed, so the bubble is
+      // there before the first token is: a turn that produces nothing is then
+      // visibly a turn that produced nothing, rather than a **Thinking…** that
+      // never resolves.
+      setLive(streaming ? { text: '', status: null } : null)
       setEmbedding(null)
 
       const body: AgentRequest = {
@@ -620,6 +684,10 @@ export function App() {
         messages: sent,
         maxIterations,
       }
+      // Sent either way rather than only when on: `POST /api/agent` reads a
+      // whole answer by default, and the template is told what the run asked
+      // for, not what this tab last remembered.
+      body.stream = streaming
       if (token.length > 0) {
         body.token = token
       }
@@ -651,6 +719,12 @@ export function App() {
               // off.
               setExchanges((current) => [...current, ...setupExchanges(event.mcp)])
               break
+            case 'delta':
+              // Deltas of the turn in flight, and only of that one: a turn that
+              // has landed is on the transcript already, so the live bubble is
+              // reset below rather than grown across the whole run.
+              setLive((current) => ({ text: (current?.text ?? '') + event.text, status: null }))
+              break
             case 'turn': {
               // Everything the turn put on a wire, in the order it left: the
               // model call, then each tool that answered it.
@@ -662,6 +736,16 @@ export function App() {
               if (event.tools.length > 0) {
                 setTimeline((current) => [...current, activityItem(event.index, wires)])
               }
+              // This turn is written; the next one starts from an empty bubble
+              // rather than appending to it. Nothing is lost — the text is in
+              // the turn's own exchange below, and the answer the loop finished
+              // on rejoins the transcript on `done`.
+              //
+              // The status goes with it. A turn that answered `400` is a turn
+              // the trace below reports; carrying that number onto the bubble
+              // the *next* turn is being written into would be labelling one
+              // turn with another's answer.
+              setLive((current) => (current === null ? null : { text: '', status: null }))
               break
             }
             case 'done': {
@@ -676,6 +760,20 @@ export function App() {
                 ...(answer ? [messageItem(answer)] : []),
                 verdictItem(event),
               ])
+              if (answer) {
+                // The answer is on the transcript now, so the half-written copy
+                // of it goes: two of the same paragraph is one too many.
+                setLive(null)
+              } else {
+                // Nothing decoded out of the last turn, so nothing was promoted
+                // and the live bubble is the only thing left saying how the run
+                // went — same as a streamed chat that came back with a refusal.
+                setLive((current) =>
+                  current === null
+                    ? null
+                    : { text: current.text, status: last?.call.response.http.status ?? null },
+                )
+              }
               logger.info('agent.done', { turns: event.turns.length, stop: event.stop.outcome })
               break
             }
@@ -703,6 +801,7 @@ export function App() {
       token,
       attachments,
       maxIterations,
+      streaming,
       mcpProtocol,
       activeMcp,
       declaredMcp,
@@ -719,8 +818,14 @@ export function App() {
    * be answering a different question than the one it repeats.
    */
   const run = useCallback(
-    (sent: Message[]) => (mode === 'chat' ? runStream(sent) : runLoop(sent)),
-    [mode, runStream, runLoop],
+    (sent: Message[]) => {
+      if (mode === 'agent') {
+        // The loop reads its own box; there is one endpoint either way.
+        return runLoop(sent)
+      }
+      return streaming ? runStream(sent) : runCall(sent)
+    },
+    [mode, streaming, runStream, runCall, runLoop],
   )
 
   const send = useCallback(() => run(ask()), [run, ask])
@@ -959,6 +1064,7 @@ export function App() {
               prompts={prompts}
               maxIterations={maxIterations}
               mode={mode}
+              streaming={streaming}
               error={callError ? callError.body : null}
               revisions={mcp.revisions}
               mcpProtocol={usesMcp ? mcpProtocol : null}
@@ -971,6 +1077,7 @@ export function App() {
               onPrompt={setPrompt}
               onMaxIterations={setMaxIterations}
               onMode={setMode}
+              onStreaming={setStreaming}
               onMcpProtocol={setMcpProtocol}
               onMcpServer={toggleMcp}
               onMcpServers={toggleAllMcp}

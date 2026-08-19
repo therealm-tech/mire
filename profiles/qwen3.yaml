@@ -26,10 +26,16 @@ auth: keycloak-workload
 # Agent turns add up, and a cold model loads on the first call.
 timeout_ms: 300000
 
-# `"stream": {{ stream | tojson }}` is what makes the Stream button do anything:
-# the flag comes from the call, so one profile serves both modes. The `| tojson`
-# is not decoration — MiniJinja renders a bare boolean as `True`, which is Python
-# and is not JSON.
+# `"stream": {{ stream | tojson }}` is what makes the composer's `stream` box do
+# anything: the flag comes from the call, so one profile serves both shapes — in
+# either mode, a single turn or the whole loop. The `| tojson` is not decoration
+# — MiniJinja renders a bare boolean as `True`, which is Python and is not JSON.
+#
+# Ticking it for a loop is worth one caveat: a streamed answer is decoded from
+# its last chunk, and this endpoint splits a tool call's arguments across several
+# — so a streamed run of the agent below stops at turn one with `noToolCalls`
+# rather than calling `get_weather`. Which is a real answer about this endpoint,
+# and the reason the box starts unticked.
 #
 # `reasoning_effort: "none"` is what turns qwen3's thinking off on Ollama's
 # OpenAI-compatible endpoint. Without it the model spends its whole budget

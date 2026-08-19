@@ -33,7 +33,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::Config;
 use crate::decode::Decoded;
-use crate::exec::{CallInput, CallOutcome, ExecError, Runner};
+use crate::exec::{CallEvent, CallInput, CallOutcome, ExecError, Runner};
 use crate::mcp::{
     HookJournal, HookRecord, McpClient, McpCredentials, McpError, McpExchange, McpJournal,
     McpRegistry, McpTool, Revision,
@@ -319,6 +319,17 @@ pub enum AgentError {
 pub enum AgentUpdate<'a> {
     /// What listing the tools cost, before the first prompt was spent.
     Setup(&'a [McpExchange]),
+    /// A chunk of the turn in flight carried text. Only when the run streams —
+    /// see [`CallInput::stream`](crate::exec::CallInput::stream).
+    ///
+    /// It says which turn it belongs to, because a loop has several and they
+    /// arrive one after another with nothing else in between to separate them.
+    Delta {
+        /// The turn being written, counting from one.
+        turn: u32,
+        /// The text of this chunk alone, not the aggregate.
+        text: &'a str,
+    },
     /// A turn completed.
     Turn(&'a Turn),
 }
@@ -371,12 +382,16 @@ pub async fn run(
             break outcome;
         }
 
-        let outcome = runner
-            .call(CallInput {
+        let outcome = call_turn(
+            runner,
+            CallInput {
                 messages: messages.clone(),
                 ..clone_input(&input.call)
-            })
-            .await?;
+            },
+            index,
+            &mut on_update,
+        )
+        .await?;
         auth_name.clone_from(&outcome.auth);
 
         let completion = completion_of(&outcome);
@@ -447,6 +462,32 @@ pub async fn run(
         stop,
         duration_ms: elapsed_ms(started),
     })
+}
+
+/// Makes one turn's call, chunk by chunk or whole.
+///
+/// The two paths hand back the same [`CallOutcome`] — that is the whole design
+/// of [`Runner::call_streaming`] — so the loop reads a streamed turn exactly as
+/// it reads any other one, tool calls decoded from the last chunk included.
+/// Streaming only adds the deltas, forwarded as they arrive and labelled with
+/// the turn they belong to.
+async fn call_turn(
+    runner: &Runner,
+    input: CallInput,
+    index: u32,
+    on_update: &mut impl FnMut(AgentUpdate<'_>),
+) -> Result<CallOutcome, ExecError> {
+    if !input.stream {
+        return runner.call(input).await;
+    }
+
+    runner
+        .call_streaming(input, |event| {
+            if let CallEvent::Delta { text } = &event {
+                on_update(AgentUpdate::Delta { turn: index, text });
+            }
+        })
+        .await
 }
 
 /// One turn, with everything it put on a wire attached.
@@ -824,9 +865,10 @@ fn clone_input(input: &CallInput) -> CallInput {
         // template: a file the first turn carried is a file the second one has
         // to carry again, or the model loses sight of it mid-run.
         uploads: input.uploads.clone(),
-        // The loop reads tool calls out of a decoded answer, and a streamed
-        // answer does not reassemble them. Agent mode calls whole.
-        stream: false,
+        // Whatever the run asked for, every turn alike: a loop that streamed its
+        // first turn and not its second would be measuring two different things
+        // and calling them one run.
+        stream: input.stream,
     }
 }
 
