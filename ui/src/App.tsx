@@ -20,12 +20,11 @@ import {
   type PromptsResponse,
   runAgent,
   startLogin,
-  streamCall,
   type UploadedFile,
   uploadFile,
 } from './api'
 import { AuthPanel } from './components/AuthPanel'
-import { ChatPanel, runModeSchema } from './components/ChatPanel'
+import { ChatPanel } from './components/ChatPanel'
 import { EmbeddingPanel } from './components/EmbeddingPanel'
 import { EmbeddingRequest } from './components/EmbeddingRequest'
 import { Failure } from './components/Failure'
@@ -165,16 +164,15 @@ export function App() {
   const [repeat, setRepeat] = usePersisted('repeat', z.number(), 1)
   const [includeVectors, setIncludeVectors] = usePersisted('vectors', z.boolean(), false)
 
+  // The loop's budget, and the only thing that says how many turns a send is:
+  // `1` is a single turn of the same mechanism, 6 is a loop with room to finish.
+  // There is nothing beside it, because there is nothing else to ask.
   const [maxIterations, setMaxIterations] = usePersisted('maxTurns', z.number(), 6)
-  // Agent by default: the loop is what this tool is for, and it is the only mode
-  // that answers tool calls. Chat is the same profile stopped after one turn,
-  // which is what you switch to when the loop is not the question.
-  const [mode, setMode] = usePersisted('mode', runModeSchema, 'agent')
-  // Off by default, in either mode. Streaming is a second thing to get right —
-  // the framing, the deltas, the endpoint actually chunking at all — and a first
-  // run should fail for one reason at a time. It is also where tool calls stop
-  // reassembling, so a loop that silently streamed would be a loop that silently
-  // stopped calling tools.
+  // Off by default. Streaming is a second thing to get right — the framing, the
+  // deltas, the endpoint actually chunking at all — and a first run should fail
+  // for one reason at a time. It is also where tool calls stop reassembling, so a
+  // loop that silently streamed would be a loop that silently stopped calling
+  // tools.
   const [streaming, setStreaming] = usePersisted('stream', z.boolean(), false)
   // `null` is auto: every server settles its own revision the way it always did.
   const [mcpProtocol, setMcpProtocol] = usePersisted<string | null>(
@@ -316,17 +314,16 @@ export function App() {
   /**
    * Whether the declared MCP servers are part of the run that is about to happen.
    *
-   * Only agent mode ever speaks to one: a chat is a single turn, and `POST
-   * /api/call/stream` sets nothing up and calls no tool. So on **Chat** the
-   * servers are not merely idle, they are not in the picture — and neither are
-   * their credentials, their revision, or the sign-ins they would need.
+   * Every send goes through the loop, so a declared server is in the picture
+   * whatever the turn budget: one turn against a real server is a fair question —
+   * does the model ask for the tool `tools/list` showed it? — and `max turns` is
+   * not the place to answer it. Leaving them out is what the **Servers** boxes
+   * are for, one at a time or all of them at once.
    *
-   * And only on a chat profile. Agent mode *is* a chat profile run in a loop, so
-   * `kind: embedding` has no loop to be in — the server refuses one outright, and
-   * the `mode` this tab remembers is about the profile you were on before, not
-   * about this one.
+   * Only on a chat profile, though: `kind: embedding` has no loop to be in, and
+   * the server refuses one outright.
    */
-  const usesMcp = mode === 'agent' && profile?.kind === 'chat' && (mcp?.servers.length ?? 0) > 0
+  const usesMcp = profile?.kind === 'chat' && (mcp?.servers.length ?? 0) > 0
 
   /** Every declared server, which is what a chat profile is offered. */
   const declaredMcp = useMemo(() => (mcp ? mcp.servers.map((server) => server.name) : []), [mcp])
@@ -448,7 +445,8 @@ export function App() {
 
   /**
    * One embedding call. There is no second turn of an embedding, so this is the
-   * only mode that does not go through the loop.
+   * one send that does not go through the loop — and the reason `POST /api/call`
+   * is still asked for from here at all.
    */
   const embed = useCallback(() => {
     if (!profile) {
@@ -513,154 +511,13 @@ export function App() {
   }, [messages, prompt, setPrompt])
 
   /**
-   * **Chat** mode, whole: one turn, one request, one answer.
+   * Every send: a chat profile, run in a loop over the history it is handed.
    *
-   * The plain endpoint rather than the streaming one with the chunks thrown
-   * away — `POST /api/call` is a request that never asks the endpoint to chunk
-   * anything, which is the point of having the box unticked. Like the other two
-   * runs it takes the history rather than reading it, so **Retry** can shorten
-   * the timeline and send it in the same breath.
-   */
-  const runCall = useCallback(
-    (sent: Message[]) => {
-      if (!profile) {
-        return
-      }
-      const signal = begin()
-      setLive(null)
-      setEmbedding(null)
-
-      const body: CallRequest = { profile: profile.name, messages: sent }
-      if (token.length > 0) {
-        body.token = token
-      }
-      if (attachments.length > 0) {
-        body.uploads = attachments.map((file) => file.id)
-      }
-
-      call(body, signal)
-        .then((result) => {
-          setExchanges((current) => [...current, callExchange(result)])
-          const answer = assistantTurn(result)
-          if (answer) {
-            setTimeline((current) => [...current, messageItem(answer)])
-          }
-          logger.info('call.done', {
-            profile: result.profile,
-            auth: result.auth,
-            status: result.response.http.status,
-          })
-        })
-        .catch((error: unknown) => {
-          if (abandoned(error)) {
-            return
-          }
-          if (error instanceof ApiError) {
-            setCallError(error)
-          } else {
-            logger.error('call.failed', { message: String(error) })
-          }
-        })
-        .finally(settle)
-    },
-    [profile, token, attachments, begin, settle],
-  )
-
-  /**
-   * **Chat** mode: the same history, read chunk by chunk instead of whole.
-   *
-   * One turn and no loop: tool calls do not reassemble from a stream, so there
-   * is nothing to answer and nothing to run again. Like `runLoop`, it takes the
-   * history rather than reading it, so **Retry** can shorten the timeline and
-   * run it in the same breath.
-   */
-  const runStream = useCallback(
-    (sent: Message[]) => {
-      if (!profile) {
-        return
-      }
-      const signal = begin()
-      setEmbedding(null)
-      // Empty rather than null: the bubble appears immediately, so a stream that
-      // never produces a token is visibly a stream that never produced a token.
-      setLive({ text: '', status: null })
-
-      const body: CallRequest = { profile: profile.name, messages: sent }
-      if (token.length > 0) {
-        body.token = token
-      }
-      if (attachments.length > 0) {
-        body.uploads = attachments.map((file) => file.id)
-      }
-
-      streamCall(
-        body,
-        (event) => {
-          switch (event.event) {
-            case 'open':
-              logger.debug('stream.open', { status: event.status })
-              break
-            case 'delta':
-              setLive((current) => ({
-                text: (current?.text ?? '') + event.text,
-                status: null,
-              }))
-              break
-            case 'done': {
-              setExchanges((current) => [...current, callExchange(event)])
-              // The `done` event carries the same decoded answer the
-              // non-streaming endpoint returns, so the conversation is built
-              // from that rather than from the deltas: one source of truth, and
-              // it survives a stream whose last chunk arrived in a shape the
-              // delta reader skipped.
-              const answer = assistantTurn(event)
-              if (answer) {
-                setTimeline((current) => [...current, messageItem(answer)])
-                setLive(null)
-              } else {
-                // Nothing to promote to a bubble, so the live one stays — and
-                // it says what the endpoint actually answered rather than that
-                // the request is over.
-                setLive((current) => ({
-                  text: current?.text ?? '',
-                  status: event.response.http.status,
-                }))
-              }
-              logger.info('stream.done', {
-                status: event.response?.http.status ?? null,
-                ttftMs: event.response?.http.ttftMs ?? null,
-                chunks: event.response?.stream?.chunks ?? null,
-              })
-              break
-            }
-            case 'failed':
-              setCallError(new ApiError(500, { code: event.code, message: event.message }))
-              break
-          }
-        },
-        signal,
-      )
-        .catch((error: unknown) => {
-          if (abandoned(error)) {
-            return
-          }
-          if (error instanceof ApiError) {
-            setCallError(error)
-          } else {
-            logger.error('stream.failed', { message: String(error) })
-          }
-        })
-        .finally(settle)
-    },
-    [profile, token, attachments, begin, settle],
-  )
-
-  /**
-   * **Agent** mode: a chat profile, run in a loop over the history it is handed.
-   *
-   * This is what **Send** and **Retry** do on `agent`, whether or not the
-   * profile declares a single tool: a profile with nothing to call stops on turn
-   * one, which is the same one turn a plain call would have made.
+   * This is what **Send** and **Retry** do, whether or not the profile declares a
+   * single tool and whatever `max turns` says. A profile with nothing to call
+   * stops on turn one; a budget of one turn stops there too, and either way it is
+   * the same profile rendered into the same body — the count is the only thing
+   * the composer changes.
    *
    * It takes the history rather than reading it, because **Retry** shortens the
    * timeline and then runs it in the same breath — and `setTimeline` has not
@@ -810,25 +667,7 @@ export function App() {
     ],
   )
 
-  /**
-   * One history, sent whichever way the composer is set to send it.
-   *
-   * The choice lives here rather than on a second button: **Send** and **Retry**
-   * are the same request twice, and a **Retry** that quietly changed mode would
-   * be answering a different question than the one it repeats.
-   */
-  const run = useCallback(
-    (sent: Message[]) => {
-      if (mode === 'agent') {
-        // The loop reads its own box; there is one endpoint either way.
-        return runLoop(sent)
-      }
-      return streaming ? runStream(sent) : runCall(sent)
-    },
-    [mode, streaming, runStream, runCall, runLoop],
-  )
-
-  const send = useCallback(() => run(ask()), [run, ask])
+  const send = useCallback(() => runLoop(ask()), [runLoop, ask])
 
   /**
    * Writes the picked files to `mire`'s upload directory, one request each.
@@ -907,9 +746,9 @@ export function App() {
       }
       const kept = timeline.slice(0, end)
       setTimeline(kept)
-      run(wireMessages(kept))
+      runLoop(wireMessages(kept))
     },
-    [timeline, run],
+    [timeline, runLoop],
   )
 
   /**
@@ -1063,7 +902,6 @@ export function App() {
               prompt={prompt}
               prompts={prompts}
               maxIterations={maxIterations}
-              mode={mode}
               streaming={streaming}
               error={callError ? callError.body : null}
               revisions={mcp.revisions}
@@ -1076,7 +914,6 @@ export function App() {
               attachError={attachError ? attachError.body : null}
               onPrompt={setPrompt}
               onMaxIterations={setMaxIterations}
-              onMode={setMode}
               onStreaming={setStreaming}
               onMcpProtocol={setMcpProtocol}
               onMcpServer={toggleMcp}

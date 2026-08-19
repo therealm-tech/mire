@@ -25,7 +25,7 @@ function run(overrides: {
   providers?: AuthDescriptor[]
   servers?: McpDescriptor[]
   token?: string
-  /** Agent mode unless a test says otherwise: a chat sets no server up. */
+  /** A chat profile with servers unless a test says otherwise. */
   usesMcp?: boolean
   mcpOff?: string[]
 }) {
@@ -146,14 +146,14 @@ describe('preflight', () => {
   it('leaves the servers out entirely on a run that will not speak to them', () => {
     const overrides = { providers: [PROVIDER, HUMAN], servers: TWO_SERVERS }
 
-    // In agent mode both are the run's business, and both want a session.
+    // With the servers in the run both are its business, and both want a session.
     expect(run(overrides).blockers).toHaveLength(2)
 
-    // In chat mode neither is. A single turn calls no tool, so a credential it
+    // On an embedding profile neither is. There is no loop, so a credential it
     // never uses cannot refuse it — and the bar stays green, correctly.
-    const chat = run({ ...overrides, usesMcp: false })
-    expect(chat.blockers).toEqual([])
-    expect(chat.servers).toEqual([])
+    const loopless = run({ ...overrides, usesMcp: false })
+    expect(loopless.blockers).toEqual([])
+    expect(loopless.servers).toEqual([])
   })
 
   it('drops a server switched off, and says so rather than quietly shrinking', () => {
@@ -163,8 +163,8 @@ describe('preflight', () => {
     // this run would set up.
     expect(run(overrides).blockers).toHaveLength(2)
 
-    // Switched off, and with it the refusal it was causing — the same way a chat
-    // drops them, because this run reaches it exactly as little.
+    // Switched off, and with it the refusal it was causing: an unticked server is
+    // one this run never discovers, lists or signs in to.
     const narrowed = run({ ...overrides, mcpOff: ['search'] })
     expect(narrowed.servers).toEqual(['files'])
     expect(narrowed.blockers).toHaveLength(1)
@@ -190,11 +190,11 @@ describe('preflight', () => {
   })
 
   it('says nothing about servers switched off on a run that reaches none anyway', () => {
-    // Chat mode already leaves every server out, so a note listing the ones
+    // A run with no loop already leaves every server out, so a note listing the ones
     // somebody unticked would be reporting a distinction this run does not have.
-    const chat = run({ servers: TWO_SERVERS, mcpOff: ['files'], usesMcp: false })
-    expect(chat.servers).toEqual([])
-    expect(chat.notes).toEqual([])
+    const loopless = run({ servers: TWO_SERVERS, mcpOff: ['files'], usesMcp: false })
+    expect(loopless.servers).toEqual([])
+    expect(loopless.notes).toEqual([])
   })
 
   it('counts a missing decode block as a note rather than a refusal', () => {

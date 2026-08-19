@@ -39,7 +39,7 @@ export interface Preflight {
   url: string
   /** The name of the identity it would call as. */
   identity: string
-  /** The MCP servers it would set up before the first turn. Empty on a chat. */
+  /** The MCP servers it would set up before the first turn. Empty when none are on. */
   servers: string[]
   /** Each one refuses this call outright — see the message for which and why. */
   blockers: Blocker[]
@@ -80,9 +80,8 @@ export function preflight({
   /**
    * Servers switched off for the next run, which this run does not set up.
    *
-   * They are out of the picture exactly as the whole set is on a chat: no
-   * discovery, no listing, no sign-in — so nothing about them can block a call
-   * they are not part of. It is still said out loud, in a note: a run reaching
+   * They are out of the picture entirely: no discovery, no listing, no sign-in —
+   * so nothing about them can block a call they are not part of. It is still said out loud, in a note: a run reaching
    * fewer servers than `mcp.yaml` declares is a fact about the run, and finding
    * out by reading the traffic afterwards is finding out too late.
    */
@@ -90,10 +89,10 @@ export function preflight({
   /**
    * Whether this run will speak to a server at all.
    *
-   * False in chat mode, which is one turn and calls no tool. Their credentials
-   * are then not blockers of anything: reporting "tool calls answer 409" about a
-   * run that makes none would be painting the bar red over a call that is going
-   * to go through.
+   * False on an embedding profile, which has no loop to call a tool from. Their
+   * credentials are then not blockers of anything: reporting "tool calls answer
+   * 409" about a run that makes none would be painting the bar red over a call
+   * that is going to go through.
    */
   usesMcp: boolean
 }): Preflight {
@@ -101,7 +100,7 @@ export function preflight({
   const notes: string[] = []
   // Every declared server is offered to every chat profile, so the registry is
   // the whole list — minus the ones this run has switched off, and minus all of
-  // them on a mode that sets none up.
+  // them where there is no loop to call a tool from.
   const names = servers.map((server) => server.name)
   const declared = usesMcp ? names.filter((name) => !mcpOff.includes(name)) : []
   const off = usesMcp ? names.filter((name) => mcpOff.includes(name)) : []

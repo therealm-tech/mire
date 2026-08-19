@@ -12,10 +12,9 @@ import { Panel } from './primitives'
  * one-line answer, and anything that would refuse the call, is in the preflight
  * bar above, which is also what opens this.
  *
- * The second question is only asked when the run would ask it: a chat calls no
- * tool, so its profile's servers are nobody's business until the mode changes —
- * and neither is one the composer has switched off, which this run reaches
- * exactly as little as a chat does.
+ * The second question is only asked when the run would ask it: an embedding
+ * profile calls no tool, so no server is its business — and neither is one the
+ * composer has switched off, which this run reaches exactly as little.
  */
 export function AuthPanel({
   auth,

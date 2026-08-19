@@ -179,7 +179,8 @@ export interface Message {
    * Handed back in the normalised shape the response decoded to. The server
    * reads either that or the nested wire shape, so this is understood — but the
    * *encoding* of `arguments` is not preserved, which is one more reason a
-   * conversation that reached a tool call belongs in agent mode.
+   * conversation that reached a tool call belongs in a run with turns left to
+   * answer it.
    */
   toolCalls?: ToolCall[]
   toolCallId?: string

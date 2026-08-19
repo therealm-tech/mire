@@ -60,8 +60,8 @@ pub struct RenderContext {
     ///
     /// Exposed to the template because the endpoint has to be *told* — nothing
     /// `mire` does client-side makes a response arrive in chunks. Write
-    /// `"stream": {{ stream | tojson }}` and one profile serves both modes;
-    /// hard-code it and the profile is whichever mode you wrote.
+    /// `"stream": {{ stream | tojson }}` and one profile serves both shapes;
+    /// hard-code it and the profile is whichever shape you wrote.
     ///
     /// The `| tojson` is not optional and not decoration: `MiniJinja` renders a
     /// bare boolean as `True`, which is Python and is not JSON. Rendering

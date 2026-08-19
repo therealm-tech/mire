@@ -1,5 +1,4 @@
 import { useEffect, useRef } from 'react'
-import { z } from 'zod'
 import type { Message, PromptsResponse, UploadedFile } from '../api'
 import {
   type ActivityItem,
@@ -18,26 +17,6 @@ import { McpProtocol } from './McpProtocol'
 import { McpServers } from './McpServers'
 import { Badge, Button, INPUT_CLASSES, Panel } from './primitives'
 import { SavedPrompts } from './SavedPrompts'
-
-/**
- * How **Send** sends what is in the box.
- *
- * `agent` is the loop: render, call, answer the tool calls, go round again until
- * the profile says stop. `chat` is one turn of the same thing, and turn one of a
- * loop is the call a chat would have made — so the mode is about how many turns
- * there are, and nothing else. Whether either of them is read chunk by chunk is
- * the composer's `stream` box, which is a separate question with its own answer.
- *
- * A schema rather than a bare union, because this is remembered across a reload
- * and a value coming back out of storage is untrusted input like any other.
- */
-export const runModeSchema = z.enum(['agent', 'chat'])
-export type RunMode = z.infer<typeof runModeSchema>
-
-const MODE_LABELS: Record<RunMode, string> = {
-  agent: 'Agent',
-  chat: 'Chat',
-}
 
 /**
  * The conversation, as a conversation.
@@ -70,7 +49,6 @@ export function ChatPanel({
   prompt,
   prompts,
   maxIterations,
-  mode,
   streaming,
   error,
   revisions,
@@ -83,7 +61,6 @@ export function ChatPanel({
   attachError,
   onPrompt,
   onMaxIterations,
-  onMode,
   onStreaming,
   onMcpProtocol,
   onMcpServer,
@@ -107,10 +84,12 @@ export function ChatPanel({
   prompt: string
   /** The library `prompts.yaml` declares, offered above the box. */
   prompts: PromptsResponse
+  /**
+   * The turn budget, which is also what says whether there is a loop at all:
+   * `1` is one turn with no second one to answer a tool call in.
+   */
   maxIterations: number
-  /** How **Send** sends: the loop, or a single turn. */
-  mode: RunMode
-  /** Whether that run is read chunk by chunk. Orthogonal to the mode. */
+  /** Whether the run is read chunk by chunk. Orthogonal to the turn count. */
   streaming: boolean
   error: { code: string; message: string; detail?: unknown } | null
   revisions: string[]
@@ -128,7 +107,6 @@ export function ChatPanel({
   attachError: { code: string; message: string; detail?: unknown } | null
   onPrompt: (value: string) => void
   onMaxIterations: (value: number) => void
-  onMode: (value: RunMode) => void
   onStreaming: (value: boolean) => void
   onMcpProtocol: (revision: string | null) => void
   onMcpServer: (name: string, on: boolean) => void
@@ -229,7 +207,6 @@ export function ChatPanel({
           turns={turns}
           busy={busy}
           maxIterations={maxIterations}
-          mode={mode}
           streaming={streaming}
           revisions={revisions}
           mcpProtocol={mcpProtocol}
@@ -241,7 +218,6 @@ export function ChatPanel({
           attachError={attachError}
           onPrompt={onPrompt}
           onMaxIterations={onMaxIterations}
-          onMode={onMode}
           onStreaming={onStreaming}
           onMcpProtocol={onMcpProtocol}
           onMcpServer={onMcpServer}
@@ -686,7 +662,6 @@ function Composer({
   turns,
   busy,
   maxIterations,
-  mode,
   streaming,
   revisions,
   mcpProtocol,
@@ -698,7 +673,6 @@ function Composer({
   attachError,
   onPrompt,
   onMaxIterations,
-  onMode,
   onStreaming,
   onMcpProtocol,
   onMcpServer,
@@ -713,7 +687,6 @@ function Composer({
   turns: number
   busy: boolean
   maxIterations: number
-  mode: RunMode
   streaming: boolean
   revisions: string[]
   mcpProtocol: string | null
@@ -725,7 +698,6 @@ function Composer({
   attachError: { code: string; message: string; detail?: unknown } | null
   onPrompt: (value: string) => void
   onMaxIterations: (value: number) => void
-  onMode: (value: RunMode) => void
   onStreaming: (value: boolean) => void
   onMcpProtocol: (revision: string | null) => void
   onMcpServer: (name: string, on: boolean) => void
@@ -744,11 +716,10 @@ function Composer({
   // nobody wins, so it stays hidden and gets clicked from here.
   const picker = useRef<HTMLInputElement>(null)
 
-  // A chat is one turn, whether or not it is read chunk by chunk. That is what
-  // makes **max turns** inert here — a cap on a loop there is no loop for —
-  // rather than the streaming, which is now a separate question about how the
-  // answer arrives and not about how many of them there are.
-  const single = mode === 'chat'
+  // One turn is a run with no second turn to loop into: the same profile and the
+  // same rendered request as a longer run, stopped after one. A cap rather than a
+  // mode of its own, because a mode implies two mechanisms and there is one.
+  const single = maxIterations === 1
 
   return (
     <div className="space-y-2 border-line border-t pt-3">
@@ -792,9 +763,9 @@ function Composer({
       <div className="flex flex-wrap items-center gap-2">
         {/*
           One button, because there was only ever one thing to do with what is in
-          the box. Which of the two runs it starts is a setting, and a setting
-          with two named answers is a dropdown rather than a box you tick: the
-          question is which mode, not whether to switch a mechanism on.
+          the box — and now nothing beside it saying which of two mechanisms it
+          starts, because there are not two. **max turns** says how far the one
+          mechanism is allowed to run, and `1` is where it stops after a turn.
         */}
         <Button
           variant="primary"
@@ -803,38 +774,19 @@ function Composer({
           onClick={onSend}
           title={
             single
-              ? 'One turn of this profile.'
+              ? 'One turn of this profile, and no second one: a tool call comes back unanswered.'
               : 'Run the profile in a loop, answering its tools. A profile with none stops on turn one.'
           }
         >
           Send
         </Button>
-        <label className="flex items-center gap-1.5 text-muted text-xs">
-          mode
-          <select
-            value={mode}
-            disabled={busy}
-            onChange={(event) => onMode(runModeSchema.parse(event.target.value))}
-            // Not `INPUT_CLASSES`: that one is `text-sm`, and a second size in
-            // the same list is settled by the stylesheet rather than by the
-            // order written here. Spelled out, like the other dropdown.
-            className="rounded border border-line-strong bg-panel px-2 py-1 text-ink text-xs disabled:opacity-50"
-          >
-            {runModeSchema.options.map((option) => (
-              <option key={option} value={option}>
-                {MODE_LABELS[option]}
-              </option>
-            ))}
-          </select>
-        </label>
 
         {/*
-          A box you tick rather than a third entry in the dropdown, because it is
-          not a third way to send: it is one question — chunks or a whole body —
-          asked of whichever run the mode picked. Off by default. A stream is the
-          only way to see time to first token, and it is also the harder thing
-          for an endpoint to get right, so having it on is a choice somebody
-          makes rather than one they inherit.
+          A box rather than another way to send, because it is not one: it is a
+          single question — chunks or a whole body — asked of the run whatever
+          **max turns** says. Off by default. A stream is the only way to see time
+          to first token, and it is also the harder thing for an endpoint to get
+          right, so having it on is a choice somebody makes rather than inherits.
         */}
         <label className="flex items-center gap-1.5 text-muted text-xs">
           <input
@@ -886,15 +838,13 @@ function Composer({
           </Button>
         ) : null}
         {/*
-          Inert in chat mode, and shown as inert rather than quietly ignored: a
-          chat is one turn, so there is no second one to cap. Streaming has no
-          say in it either way — how the answer arrives is not how many there are.
+          Never inert, at any value: a budget of one turn is a run like any other,
+          not a disabled state. Streaming has no say in it either way — how the
+          answer arrives is not how many answers there are.
         */}
         <label
-          className={`ml-auto flex items-center gap-1.5 text-muted text-xs ${
-            single ? 'opacity-50' : ''
-          }`}
-          title={single ? 'A chat is one turn. Pick Agent to run the loop.' : undefined}
+          className="ml-auto flex items-center gap-1.5 text-muted text-xs"
+          title="How many turns the loop may take. 1 sends one turn and stops."
         >
           max turns
           <input
@@ -902,8 +852,10 @@ function Composer({
             min={1}
             max={50}
             value={maxIterations}
-            disabled={single}
-            onChange={(event) => onMaxIterations(Number(event.target.value))}
+            disabled={busy}
+            onChange={(event) =>
+              onMaxIterations(Math.min(50, Math.max(1, Number(event.target.value) || 1)))
+            }
             className={`${INPUT_CLASSES} w-16`}
           />
         </label>
@@ -912,13 +864,22 @@ function Composer({
       <Attachments files={attachments} error={attachError} busy={attaching} onDetach={onDetach} />
 
       <p className="text-faint text-xs">
-        On <strong className="font-medium">Chat</strong>, <strong>Send</strong> is one turn of this
-        profile. On <strong className="font-medium">Agent</strong>, it runs the loop, answering the
-        tools the model asks for until it stops asking. <strong>stream</strong> is the other
-        question, and it is asked of either: read the answer chunk by chunk as it arrives, which is
+        <strong>Send</strong> runs this profile in a loop, answering the tools the model asks for
+        until it stops asking — or until <strong>max turns</strong>, which at{' '}
+        <strong className="font-medium">1</strong> is a single turn and no loop at all. A profile
+        that declares no tool stops on turn one anyway. <strong>stream</strong> is the other
+        question, asked whatever the count: read the answer chunk by chunk as it arrives, which is
         the only way to see time to first token and the only way to watch it being written. It
         reaches the wire only if the profile's template passes <code>stream</code> on.
       </p>
+      {single ? (
+        <p className="text-faint text-xs">
+          At <strong className="font-medium">1</strong> a tool call comes back unanswered, flagged
+          on its bubble: there is no second turn to carry the result, and most endpoints refuse the
+          next one until it has one. That is the turn to send when the question is whether the model
+          asks for the tool at all.
+        </p>
+      ) : null}
       {streaming && !single ? (
         <p className="text-faint text-xs">
           A streamed loop is worth knowing one thing about:{' '}

@@ -318,30 +318,28 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   carries the **Sign out** that drops that identity again — a server's provider
   is often not the profile's, so this row is the only place it appears.
 
-  That whole section is there in **Agent** mode and gone in **Chat**, along with
-  the servers on the bar above and any refusal they would have caused. A chat is
-  one turn: it discovers nothing, lists nothing and calls nothing, so the servers
-  are not idle during it — they are not in the run at all, and neither are the
-  sign-ins they would have needed. A server unticked in **Servers** leaves the
-  same way and for the same reason: this run does not reach it, so it needs
-  nothing from you.
+  That whole section is there for a chat profile and gone for an embedding one,
+  which has no loop for a tool call to be part of. A server unticked in
+  **Servers** leaves it the same way and for a better-aimed reason: this run does
+  not reach it, so it needs nothing from you — no discovery, no listing, no
+  sign-in, and no refusal on the bar above about a credential it never uses.
 - **Conversation**, for chat profiles. A transcript: your question on the right,
   the answer on the left, the tools the run called in between, and a composer at
   the bottom. `Enter` sends, `Shift`+`Enter` starts a line. There is one button,
-  **Send**, and two controls next to it saying how it goes out. A **mode**
-  dropdown, which is how many turns: **Agent**, which is how it starts, is the
-  [loop](#agent-mode) — it answers the tool calls the model makes until it stops
-  making them, and a profile with no tools ends on turn one anyway, the same one
-  turn a single call would have made. **Chat** is that one turn on purpose. And a
-  **stream** box, which is how the answer arrives: ticked, it is read chunk by
-  chunk, the text appearing as it is written and the only way to see time to
-  first token. The two are independent — a streamed loop and a whole-bodied chat
-  are both a tick away — and the box is **off by default**, in either mode. More
-  on what that costs a loop [below](#streaming-and-the-number-everybody-actually-wants).
-  **max turns** is shown as inert on **Chat**, because one turn has no second one
-  to cap — streaming has no say in it either way — and **Servers**
-  and **Protocol** go away entirely, because there is no server for either of
-  them to be about. **Servers** is a checkbox per server `mcp.yaml` declares:
+  **Send**, and it runs the [loop](#the-loop) — it answers the tool calls the
+  model makes until it stops making them, and a profile with no tools ends on
+  turn one anyway. Two controls next to it say how far it goes and how the answer
+  arrives. **max turns** is the budget, and it is also the whole of the
+  "one turn or several" question: at **1** the run sends a turn and stops, which
+  is the single call and the single answer, with a tool call — if the model makes
+  one — coming back unanswered and flagged. Anything above it is a loop with room
+  to finish. A **stream** box is the other question: ticked, the answer is read
+  chunk by chunk, the text appearing as it is written and the only way to see
+  time to first token. The two are independent — a streamed loop and a
+  whole-bodied single turn are both a tick away — and the box is **off by
+  default**, at every turn count. More on what that costs a loop
+  [below](#streaming-and-the-number-everybody-actually-wants).
+  **Servers** is a checkbox per server `mcp.yaml` declares:
   untick one and this run does not set it up, does not sign in to it and is not
   offered its tools — the file still declares it, and the run
   [says so](#switching-one-off-for-a-run) rather than shrinking quietly. **All**
@@ -425,8 +423,9 @@ Four things follow, each of which is a decision:
   without their results is how you get a `400` from an endpoint that was working
   fine. They still appear in the transcript, where they happened, as a line
   naming the tool, whether it really ran, and any variable it captured — the
-  full exchange, and what that variable is worth, is in **Traffic**. A tool call that *does* land in the history — from a
-  **Chat** send, which does not loop, or from a run that stopped on one — is
+  full exchange, and what that variable is worth, is in **Traffic**. A tool call
+  that *does* land in the history — from a run that stopped on one, whether
+  because **max turns** was reached or because it was **1** to begin with — is
   flagged on its bubble, because most endpoints refuse the next turn until it has
   a result.
 - **Nothing waits for the endpoint.** The question appears the moment you press
@@ -661,8 +660,8 @@ the comparison stops being possible.
 
 Every tool card says whether it really left the process: a call that did names
 the server that answered, the status it answered with and how long it took, and
-one that did not is marked **simulated, nothing executed** (see [agent
-mode](#agent-mode)). A plausible-looking result from a tool nothing wired up is
+one that did not is marked **simulated, nothing executed** (see [the
+loop](#the-loop)). A plausible-looking result from a tool nothing wired up is
 the easiest way to believe an integration works.
 
 **The status is on the tool card, not only on the round trip beside it.** A
@@ -700,14 +699,14 @@ there is nothing to pass.
 | --- | --- | --- |
 | `ollama` | 11434 | The models. Unauthenticated, on purpose |
 | `gateway` | 11435 | nginx in front of Ollama, rejecting requests with no credential |
-| `mcp` | 11436 | A minimal MCP server on `2026-07-28`, so agent mode has something real to call |
+| `mcp` | 11436 | A minimal MCP server on `2026-07-28`, so the loop has something real to call |
 | `mcp-legacy` | 11437 | The same server on `2025-06-18`, so the revision negotiation has something to negotiate with |
 | `keycloak` | 8080 | Realm `mire`: `mire-workload` (service account) and `mire-ui` (browser login, user `mire` / `mire`) |
 
 Models, as of August 2026 — these rankings move monthly, so revisit the choice:
 
 - **`qwen3:0.6b-q4_K_M`** (523 MB, 40K context). The smallest tag that still does
-  tool calling, which agent mode will need. `gemma3:270m` is lighter (~292 MB)
+  tool calling, which the loop will need. `gemma3:270m` is lighter (~292 MB)
   but cannot call tools.
 - **`nomic-embed-text:v1.5`** (274 MB, 768 dimensions, MTEB 62.4). The most
   pulled embedding model in the Ollama library, and it runs on a CPU.
@@ -1190,9 +1189,9 @@ takes the same thing:
 { "profile": "chat", "prompt": "weather in Paris?", "mcpProtocol": "2025-03-26" }
 ```
 
-The dropdown is there in **Agent** mode only, and so is the endpoint that reads
-it: a chat opens no connection to a server, so there is no revision for it to be
-spoken in.
+The dropdown is there for a chat profile only, and so is the endpoint that reads
+it: an embedding call opens no connection to a server, so there is no revision
+for it to be spoken in.
 
 `auto` — the default, and the field simply left out — is the negotiation as
 described above, with `protocol_version:` still in charge where a server declares
@@ -1244,8 +1243,8 @@ checkbox decides what this run actually did.
 Switching one off takes its blockers with it. A server whose browser identity
 nobody has signed in to would have refused the first tool call with a `409`; off,
 it is not in the run, so the preflight bar goes green and the sign-in it was
-asking for disappears from the auth panel — the same way both vanish in **Chat**
-mode. What stays is a line naming what was left out, because a run reaching fewer
+asking for disappears from the auth panel. What stays is a line naming what was
+left out, because a run reaching fewer
 servers than `mcp.yaml` declares is a fact you want in front of you rather than
 one to reconstruct from the traffic afterwards.
 
@@ -1826,7 +1825,7 @@ decode:
 
 `stream` comes from the call, not from the file, so one profile serves both
 shapes: the **stream** box next to **Send** is what asks for chunks rather than a
-whole answer, and it asks it of whichever run the **mode** picked — one turn or
+whole answer, and it asks it of the run whatever **max turns** says — one turn or
 the whole loop. It is off by default, because streaming is a second thing for an
 endpoint to get right and a first run should fail for one reason at a time. Tick
 it when time to first token is the number you came for. Keep the `| tojson`.
@@ -1887,8 +1886,8 @@ shown, and marked as unterminated — the partial answer is the evidence.
 
 ### Streaming a loop, and what it costs
 
-The **stream** box is not a mode, so agent mode reads it too: tick it and every
-turn of the loop arrives chunk by chunk. `POST /api/agent` then emits one `delta`
+The **stream** box says nothing about how many turns there are, so a loop reads
+it exactly as a single turn does: tick it and every turn arrives chunk by chunk. `POST /api/agent` then emits one `delta`
 event per chunk, each naming the turn it belongs to, before that turn's own
 `turn` event — which still carries the whole exchange, so a client can ignore
 every delta and lose nothing.
@@ -1910,7 +1909,7 @@ this tool would rather not do on your behalf. So against such an endpoint a turn
 that really did ask for a tool comes back looking like a turn that asked for
 nothing, and the loop stops on `noToolCalls` at turn one. That is the endpoint's
 behaviour made visible rather than a setting to fix, and it is why the box is off
-by default: **untick it to test tool calling**. An endpoint that puts the whole
+by default: **untick it to test tool calling**, whatever **max turns** says. An endpoint that puts the whole
 call in its final chunk streams and loops perfectly well, which is precisely the
 sort of difference between two backends this tool exists to surface.
 
@@ -2008,31 +2007,34 @@ the rest of the raw tree, which is what you actually read, is untouched.
 `includeVectors: true` turns all of that off and gives you the full payload. It
 is the only way to get it.
 
-## Agent mode
+## The loop
 
-Agent mode is not a third payload format and not a second profile. It is the same
-`kind: chat` profile, run in a loop: render, call, decode; if the stop condition
-is not met, answer the tool calls with their simulated results, feed them back,
-go round again. `POST /api/call` runs one turn of exactly the same thing.
+The loop is not a third payload format and not a second profile. It is the same
+`kind: chat` profile, run round: render, call, decode; if the stop condition is
+not met, answer the tool calls with their simulated results, feed them back, go
+round again. `POST /api/call` runs one turn of exactly the same thing.
 
-Which is why the UI's two modes are not two profiles: **Send** on **Agent** is
-the loop, whatever the profile declares, and **Send** on **Chat** is one turn of
-the very same thing. A profile that declares no tool stops on turn one, and turn
-one is the single call **Chat** would have made — so the choice is about how many
-turns there are, not about which of two mechanisms the profile is for. How the
-answer *arrives* is the **stream** box, which is a
+Which is why the UI has no mode to pick. **Send** is the loop, whatever the
+profile declares, and **max turns** says how far it may go — at **1**, one turn
+of the very same thing, which is one call and one answer. A profile that declares
+no tool stops on turn one anyway. So the only question the composer asks about
+turns is *how many*, never *which mechanism*: there has only ever been one. How
+the answer *arrives* is the **stream** box, which is a
 [separate question](#streaming-and-the-number-everybody-actually-wants) with its
-own answer, asked of either mode.
+own answer, asked whatever the count.
 
-The one thing that does not carry over is the servers. Only the loop sets an MCP
-server up, so **Chat** speaks to none of them — `POST /api/call` and `POST
-/api/call/stream` never discover, list or call a tool, whatever `mcp.yaml`
-declares, and the UI drops their identities and their revision from the page
-while that is the mode. The tool list the model is offered is then the profile's
-own `tools:` and nothing else — which is also what a loop reaching
-[no server](#switching-one-off-for-a-run) is offered, and the reason switching
-them all off answers a question a chat cannot: what the *loop* does when the tool
-it wants is not there.
+The servers are not part of that count. A declared server is set up for a chat
+profile's run whether it has one turn or twenty — one turn against a real server
+is a fair question, since "does the model ask for the tool `tools/list` showed
+it?" is answerable without ever answering the call. What takes a server out of a
+run is [unticking it](#switching-one-off-for-a-run), which leaves the model
+offered the profile's own `tools:` and nothing else, and answers the question
+that comes after: what does the loop do when the tool it wants is not there?
+
+The single-shot routes stay where they are useful, on the API rather than behind
+a button. `POST /api/call` and `POST /api/call/stream` never discover, list or
+call a tool, whatever `mcp.yaml` declares — which is exactly what you want from
+a `curl` that is asking one question about one request.
 
 It runs on the [conversation](#having-a-conversation) in the browser, and when it
 stops it appends the answer it finished on. The turns in between — the tool calls
