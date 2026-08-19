@@ -31,10 +31,11 @@ without the front end works too — you get a placeholder page and a fully
 functional API.
 
 It listens on `127.0.0.1:8787` and prints its URL on startup. Every option is
-also an environment variable:
+also an environment variable, and a key in a configuration file:
 
 | Flag | Variable | Default | What it does |
 | --- | --- | --- | --- |
+| `--config` | `CONFIG_FILE` | `~/.config/mire/mire.yaml` | YAML file carrying every option below — see [below](#the-configuration-file) |
 | `--profiles` | `PROFILES_DIR` | `./profiles` | Directories of profile YAML files — see [below](#more-than-one-profiles-directory) |
 | `--uploads` | `UPLOADS_DIR` | `./uploads` | Where **Attach** writes — see [below](#attaching-a-file) |
 | `--host` | `HOST` | `127.0.0.1` | Listen address; widening it is deliberate |
@@ -43,6 +44,68 @@ also an environment variable:
 | `--public-url` | `PUBLIC_URL` | *(none)* | Origin the browser sees, for the OIDC callback |
 | `--ca-bundle` | `CA_BUNDLE` | *(none)* | PEM bundle of extra trusted CAs |
 | `--log-filter` | `LOG_FILTER` | `info` | `tracing` filter, e.g. `mire=debug` |
+
+### The configuration file
+
+Every flag in that table is also a key in a YAML file, read from
+`~/.config/mire/mire.yaml` — or from wherever `--config` points:
+
+```yaml
+---
+profiles:
+  - /etc/mire/profiles
+  - ~/.config/mire/profiles
+uploads: ~/.local/share/mire/uploads
+port: 8788
+ca_bundle: /etc/ssl/certs/internal.pem
+log_filter: mire=debug
+```
+
+The keys are the long flag names with underscores — `base_path`, `public_url`,
+`ca_bundle`, `log_filter` — and every one of them is optional: a file that sets
+one thing is a perfectly good file. `profiles:` takes a list, or a bare string
+when there is only one.
+
+**A flag beats the environment, the environment beats the file, and the file
+beats the defaults.** The file is for the settings that stopped being a decision
+— where your profiles live, the CA bundle somebody put on the machine, the port
+you already bookmarked. A shell alias covers those too, right up until you open a
+different shell. The flag is still there for the afternoon you want something
+else:
+
+```sh
+mire --port 9000            # the file's port, overruled, for this run
+mire --config ./mire.yaml   # a different file entirely
+```
+
+`$XDG_CONFIG_HOME` is honoured when it is set. A leading `~` in a path is
+expanded, because a YAML document has no shell behind it to do that for you — and
+a file living in your home directory is precisely where you would write one.
+`~someone-else` is left alone, since resolving another user's home takes more
+than string handling.
+
+Nobody has to write this file. The default location not being there is the
+ordinary case, and `mire` comes up on its defaults without a word about it. A
+file you *name* with `--config` does have to be there: a typo in that path must
+not read as "you have no configuration file".
+
+A file that is there and broken, on the other hand, is fatal — the opposite of
+what happens to a broken profile. Those are the input to the tool, and coming up
+to show you the problem beats refusing to start. This file is the tool's own
+wiring: a `port:` that did not parse means listening somewhere you did not ask
+for, and `log_fitler:` means a setting you believe is in effect and is not. So it
+says which key, and stops:
+
+```
+ERROR mire: mire stopped error=cannot parse the configuration file
+  /home/you/.config/mire/mire.yaml: unknown field `log_fitler`, expected one of
+  `profiles`, `uploads`, `host`, `port`, `base_path`, `public_url`, `ca_bundle`,
+  `log_filter`
+```
+
+It is read once, at startup. The profiles directories are watched because what is
+in them changes while you work; the file that says *which* directories those are,
+and which address to bind, cannot change under a running process.
 
 ### More than one profiles directory
 
@@ -134,6 +197,22 @@ with nothing to offer.
 a network nobody else can reach, so a published port would answer nothing. The
 isolation is the container's to provide — publish to `127.0.0.1:8787` and the
 exposure is the same as running the binary directly.
+
+The image sets `HOST`, `PORT`, `PROFILES_DIR` and `LOG_FILTER` in its
+environment, and the environment outranks the file — so a `mire.yaml` you mount
+is read, but those four keys in it are not what takes effect. Change them with
+`-e` and leave the file for everything else:
+
+```sh
+docker run --rm --read-only -p 127.0.0.1:8787:8787 \
+  -v "$PWD/profiles:/etc/mire/profiles:ro" \
+  -v "$PWD/mire.yaml:/etc/mire/mire.yaml:ro" \
+  -e CONFIG_FILE=/etc/mire/mire.yaml mire:0.1.0
+```
+
+The image sets no `HOME` at all — distroless does not, and a static binary has no
+business guessing one — so there is no default location to find a file in. Name
+it, as above, with `CONFIG_FILE`.
 
 For an internal CA, mount the bundle and point `--ca-bundle` at it:
 
