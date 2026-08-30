@@ -1,4 +1,4 @@
-<img src="mire.png" alt="" width="120" align="right">
+<img src="mire.svg" alt="" width="120" align="center">
 
 # mire
 
