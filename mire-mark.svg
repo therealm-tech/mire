@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="550 515 900 900" role="img" aria-label="mire">
+  <title>mire</title>
+  <g stroke="currentColor" fill="none">
+    <rect x="601" y="566" width="798" height="798" stroke-width="21"/>
+    <circle cx="1000" cy="965" r="327.5" stroke-width="21"/>
+    <circle cx="1000" cy="965" r="256" stroke-width="15"/>
+    <path stroke-width="13" d="M1000 555.5V723M1000 1207v167.5M590.5 965H758M1242 965h167.5"/>
+  </g>
+  <g fill="currentColor">
+    <rect x="940" y="905" width="120" height="120"/>
+    <path d="M822 965l79-16v32zM1178 965l-79-16v32zM1000 787l-16 79h32zM1000 1143l-16-79h32z"/>
+  </g>
+</svg>
