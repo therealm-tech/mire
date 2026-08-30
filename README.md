@@ -1,4 +1,7 @@
-<img src="mire.svg" alt="" width="120" align="center">
+<p align="center">
+  <img src="https://raw.githubusercontent.com/therealm-tech/mire/main/mire.svg"
+       alt="mire logo" width="120">
+</p>
 
 # mire
 
