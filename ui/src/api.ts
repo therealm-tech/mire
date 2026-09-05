@@ -28,7 +28,17 @@ export const loadIssueSchema = z.object({
 export const modelKindSchema = z.enum(['chat', 'embedding'])
 
 export const modelSummarySchema = z.object({
+  /**
+   * How the model is addressed: `name`, or `name@stage`.
+   *
+   * What every request carries and what selection is keyed on. `name` is what
+   * the file called it, which the stages of one file share — so it is what to
+   * show, with the stage beside it.
+   */
+  id: z.string(),
   name: z.string(),
+  /** The stage this reading of the file belongs to. Absent when it declares none. */
+  stage: z.string().optional(),
   kind: modelKindSchema,
   /**
    * Whether this model takes a typed message.
@@ -88,7 +98,11 @@ export const sessionViewSchema = z.object({
 })
 
 export const authDescriptorSchema = z.object({
+  /** How the provider is addressed: `name`, or `name@stage`. */
+  id: z.string(),
   name: z.string(),
+  /** The stage this reading of the file belongs to. */
+  stage: z.string().optional(),
   kind: z.enum(['anonymous', 'token', 'oidc', 'oidc_browser']),
   needsValue: z.boolean(),
   needsLogin: z.boolean(),
@@ -122,7 +136,11 @@ export const authResponseSchema = z.object({
  * server with neither talks to its endpoint anonymously.
  */
 export const mcpDescriptorSchema = z.object({
+  /** How the server is addressed: `name`, or `name@stage`. */
+  id: z.string(),
   name: z.string(),
+  /** The stage this reading of the file belongs to. */
+  stage: z.string().optional(),
   url: z.string(),
   auth: z.string().optional(),
   tools: z.array(z.string()),

@@ -97,17 +97,30 @@ impl PromptRegistry {
         let mut here: BTreeMap<String, PathBuf> = BTreeMap::new();
 
         for path in paths {
-            let prompt = match layout::read::<Prompt>(&path) {
-                Ok(Some(prompt)) => prompt,
-                Ok(None) => {
-                    debug!(path = %path.display(), "file declares no prompt");
-                    continue;
-                }
+            let staged = match layout::read::<Prompt>(&path) {
+                Ok(staged) => staged,
                 Err(issue) => {
                     self.issues.push(issue);
                     continue;
                 }
             };
+            let Some(entry) = staged.into_iter().next() else {
+                debug!(path = %path.display(), "file declares no prompt");
+                continue;
+            };
+            // Stages are for the things that talk to an endpoint — a model, a
+            // credential, a server. A saved prompt is text somebody wrote, and
+            // the same text in three stages is one prompt, so the block is
+            // refused here rather than quietly producing three entries fighting
+            // over one name.
+            if entry.stage.is_some() {
+                self.issues.push(LoadIssue::new(
+                    &path,
+                    "a saved prompt declares no `stages:`".to_owned(),
+                ));
+                continue;
+            }
+            let prompt = entry.value;
 
             if let Err(errors) = prompt.validate() {
                 // Named where there is a name to name it by. An entry that has

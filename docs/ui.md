@@ -61,7 +61,8 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   whole-bodied single turn are both a tick away — and the box is **off by
   default**, at every turn count. More on what that costs a loop in
   [streaming](streaming.md).
-  **Servers** is a checkbox per server in `mcp/`:
+  **Servers** is a checkbox per server in `mcp/` — one per stage, for a server
+  that declares them:
   untick one and this run does not set it up, does not sign in to it and is not
   offered its tools — the file still declares it, and the run
   [says so](mcp.md#switching-one-off-for-a-run) rather than shrinking quietly. **All**
@@ -86,7 +87,12 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   rows summarises. See [below](#reading-the-traffic).
 - **Models**, a column where there is room for one and a fold-away where there
   is not — on a phone the list was a screenful to scroll past before reaching the
-  thing it configures.
+  thing it configures. A model declaring
+  [stages](configuration.md#stages) has one row per stage, its name carrying the
+  `@dev` or `@prod` it answers to. One row per stage rather than a name with a
+  picker beside it, because two stages are two endpoints — their own URL, their
+  own credential, their own answer — and which one you are asking is the choice
+  the list is for. They sort together, under the name they share.
 - **Embedding.** Count, width, encoding, the five checks, and per vector its
   norm, a sample of the first values and a distribution histogram. Never a wall
   of floats. A multi-vector answer stays grouped under the input it belongs to,

@@ -335,3 +335,28 @@ curl -sS localhost:8787/api/call -H 'content-type: application/json' \
 
 Put `{{ messages[-1].content }}` back and drop the `has_prompt: false` if you
 would rather type it.
+
+## The same model in dev and in prod
+
+One file, one `stages:` block, and the entry is read once per stage — `qwen3@dev`
+and `qwen3@prod`, each a whole model with its own URL, its own served model name
+and its own timeout:
+
+```yaml
+url: ${ stage.base }/v1/chat/completions
+
+default_stage: dev
+stages:
+  dev:
+    base: http://127.0.0.1:11435
+    served_model: qwen3:0.6b-q4_K_M
+  prod:
+    base: https://models.internal
+    served_model: qwen3-32b
+```
+
+`${ … }` is resolved when the file loads and `{{ … }}` when the call goes out, so
+both live in the same `request.template:` without meeting. The whole of it —
+what a stage may vary, what a bare name means, and why one broken stage takes
+the file down — is in
+[configuration.md](configuration.md#stages).

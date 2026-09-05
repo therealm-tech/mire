@@ -6,7 +6,7 @@ Depth on each part of [`mire`](../README.md). The root
 
 | Document | What it covers |
 | --- | --- |
-| [configuration.md](configuration.md) | The options file, configuration directories and how they layer, containers, notebook path proxies |
+| [configuration.md](configuration.md) | The options file, configuration directories and how they layer, stages (`dev`/`preprod`/`prod` in one file), containers, notebook path proxies |
 | [models.md](models.md) | Turning a `curl` into a model file: templates, decode cascades, Rhai scripts, `multipart/form-data` endpoints |
 | [auth.md](auth.md) | Credential providers: static tokens, OIDC workload identities, browser logins, `allowed_hosts` |
 | [mcp.md](mcp.md) | Real tool calls: declaring servers, protocol revisions, per-run selection, header templates, hooks, captured variables |

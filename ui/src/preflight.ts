@@ -113,7 +113,7 @@ export function preflight({
   // Every declared server is offered to every chat model, so the registry is
   // the whole list — minus the ones this run has switched off, and minus all of
   // them where there is no loop to call a tool from.
-  const names = servers.map((server) => server.name)
+  const names = servers.map((server) => server.id)
   const declared = usesMcp ? names.filter((name) => !mcpOff.includes(name)) : []
   const off = usesMcp ? names.filter((name) => mcpOff.includes(name)) : []
 
@@ -134,36 +134,36 @@ export function preflight({
   } else {
     if (!reaches(provider, model)) {
       blockers.push({
-        message: `${provider.name} may only be sent to ${provider.allowedHosts.join(', ')}, and this model points at ${hostOf(model.url) ?? model.url}.`,
+        message: `${provider.id} may only be sent to ${provider.allowedHosts.join(', ')}, and this model points at ${hostOf(model.url) ?? model.url}.`,
       })
     }
     if (provider.needsValue && token.trim().length === 0) {
       blockers.push({
-        message: `${provider.name} has no value: paste the credential below, since the server was given no env: or file: to read it from.`,
+        message: `${provider.id} has no value: paste the credential below, since the server was given no env: or file: to read it from.`,
         opensAuth: true,
       })
     }
     if (provider.needsLogin && !provider.session) {
       blockers.push({
-        message: `Nobody is signed in to ${provider.name}.`,
-        signIn: provider.name,
+        message: `Nobody is signed in to ${provider.id}.`,
+        signIn: provider.id,
       })
     }
   }
 
-  for (const server of servers.filter(({ name }) => declared.includes(name))) {
-    const name = server.name
+  for (const server of servers.filter(({ id }) => declared.includes(id))) {
+    const name = server.id
     // The named provider and the ones its header templates read: any of them
     // being a browser flow with no session is a `409` on the first tool call.
     const used = [server.auth, ...server.usesAuth].filter(
       (entry) => entry !== undefined && entry.length > 0,
     )
     for (const entry of new Set(used)) {
-      const identity = providers.find((candidate) => candidate.name === entry)
+      const identity = providers.find((candidate) => candidate.id === entry)
       if (identity?.needsLogin && !identity.session) {
         blockers.push({
-          message: `Tool calls to ${name} answer 409 until somebody signs in to ${identity.name}.`,
-          signIn: identity.name,
+          message: `Tool calls to ${name} answer 409 until somebody signs in to ${identity.id}.`,
+          signIn: identity.id,
         })
       }
     }
@@ -183,7 +183,7 @@ export function preflight({
 
   return {
     url: model.url,
-    identity: provider?.name ?? model.auth ?? 'unknown',
+    identity: provider?.id ?? model.auth ?? 'unknown',
     servers: declared,
     blockers,
     notes,

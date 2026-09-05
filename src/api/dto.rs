@@ -25,8 +25,15 @@ use crate::redact::Secret;
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSummary {
-    /// Model name, the identifier used everywhere else.
+    /// How the model is addressed: `name`, or `name@stage`. This is what
+    /// `POST /api/call` takes.
+    pub id: String,
+    /// What the file called it. Two stages of one file share it, which is what
+    /// lets the UI offer them as one model with a stage to pick.
     pub name: String,
+    /// Stage this reading of the file belongs to, absent when it declares none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
     /// What the endpoint does.
     pub kind: ModelKind,
     /// `false` when the model takes no typed message, so the composer hides
@@ -50,7 +57,9 @@ pub struct ModelSummary {
 impl From<&Model> for ModelSummary {
     fn from(model: &Model) -> Self {
         Self {
+            id: model.id(),
             name: model.name.clone(),
+            stage: model.stage.clone(),
             kind: model.kind,
             has_prompt: model.has_prompt,
             url: model.url.clone(),
@@ -188,8 +197,8 @@ impl From<crate::uploads::StoredFile> for UploadResponse {
 /// Naming an MCP server in the path.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct McpPath {
-    /// Server name, as declared in `mcp/`.
-    pub name: String,
+    /// Server id: `name`, or `name@stage`, as declared in `mcp/`.
+    pub id: String,
 }
 
 /// Text to embed: one string, or several.
@@ -241,15 +250,15 @@ impl JsonSchema for TextInput {
 /// Naming a model in the path.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ModelPath {
-    /// Model name.
-    pub name: String,
+    /// Model id: `name`, or `name@stage`. A bare name is the default stage.
+    pub id: String,
 }
 
 /// Path parameters for the auth routes.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AuthPath {
-    /// Auth provider name, as declared in `auth/`.
-    pub name: String,
+    /// Auth provider id: `name`, or `name@stage`, as declared in `auth/`.
+    pub id: String,
 }
 
 /// Start a browser login.
@@ -329,12 +338,17 @@ pub struct CallbackQuery {
 })))]
 #[serde(rename_all = "camelCase")]
 pub struct CallRequest {
-    /// Model to run.
+    /// Model to run, as `name` or `name@stage`. A bare name is the model's
+    /// default stage.
     #[validate(length(min = 1))]
     pub model: String,
 
     /// Auth provider, overriding the model's own. Omit to use the model's,
     /// which is the point of the three-mode replay.
+    ///
+    /// Takes a stage of its own — `keycloak-workload@preprod` — and it has
+    /// nothing to do with the model's: a `prod` model authenticated by a
+    /// `preprod` credential is a question somebody legitimately asks.
     #[serde(default)]
     pub auth: Option<String>,
 

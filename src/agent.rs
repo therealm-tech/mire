@@ -416,7 +416,7 @@ pub async fn run(
         on_update(AgentUpdate::Turn(&turn));
 
         if let Some(tool) = repeated {
-            warn!(model = %model.name, %tool, turn = index, "the model asked for the same thing twice");
+            warn!(model = %model.id(), %tool, turn = index, "the model asked for the same thing twice");
             turns.push(turn);
             break StopOutcome::RepeatedCall {
                 tool,
@@ -425,12 +425,12 @@ pub async fn run(
         }
 
         feed_back(&mut messages, &completion, &turn.tools);
-        debug!(model = %model.name, turn = index, tools = turn.tools.len(), "continuing");
+        debug!(model = %model.id(), turn = index, tools = turn.tools.len(), "continuing");
         turns.push(turn);
     };
 
     info!(
-        model = %model.name,
+        model = %model.id(),
         turns = turns.len(),
         outcome = ?std::mem::discriminant(&stop),
         duration_ms = elapsed_ms(started),
@@ -438,7 +438,7 @@ pub async fn run(
     );
 
     Ok(Trace {
-        model: model.name.clone(),
+        model: model.id(),
         auth: auth_name,
         setup,
         turns,
@@ -658,9 +658,7 @@ async fn prepare(runner: &Runner, input: &mut AgentInput) -> Result<Prepared, Ag
         .clone();
 
     if model.kind != ModelKind::Chat {
-        return Err(AgentError::NotChat {
-            model: model.name.clone(),
-        });
+        return Err(AgentError::NotChat { model: model.id() });
     }
 
     // Recorded from the first probe: a run that cannot get past `initialize` has
@@ -686,7 +684,7 @@ async fn prepare(runner: &Runner, input: &mut AgentInput) -> Result<Prepared, Ag
         // `mcp/` declares is the first thing to check when it stops calling
         // one.
         info!(
-            model = %model.name,
+            model = %model.id(),
             declared,
             reaching = servers.len(),
             "MCP servers narrowed for this run"
@@ -710,7 +708,7 @@ async fn prepare(runner: &Runner, input: &mut AgentInput) -> Result<Prepared, Ag
             .carrying(Arc::clone(&attachments));
         let credentials = McpCredentials::resolve(&config.registry, client.server()).await?;
         let listed = client.list_tools(&credentials).await?;
-        info!(model = %model.name, %server, tools = listed.len(), "MCP tools offered");
+        info!(model = %model.id(), %server, tools = listed.len(), "MCP tools offered");
         live.extend(listed);
         clients.insert(server.clone(), client);
     }

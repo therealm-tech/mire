@@ -26,8 +26,9 @@ use super::browser::{OidcBrowserAuth, OidcBrowserConfig};
 use super::oidc::{ClientCredential, OidcAuth, OidcConfig};
 use super::session::{SessionStore, SessionView};
 use super::token::{TokenAuth, TokenValue};
-use super::{Anonymous, Auth, AuthProvider};
+use super::{Anonymous, Auth};
 use crate::config::layout;
+use crate::config::stage::{self, Staged};
 use crate::issue::LoadIssue;
 
 /// Name of the always-available anonymous provider.
@@ -54,8 +55,14 @@ pub enum AuthKind {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthDescriptor {
-    /// Registry name, used in `POST /api/call`.
+    /// How the provider is addressed: `name`, or `name@stage`. This is what
+    /// `POST /api/call` takes, and what a model's `auth:` names.
+    pub id: String,
+    /// What the file called it. Two stages of one file share it.
     pub name: String,
+    /// Stage this reading of the file belongs to, absent when it declares none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
     /// What it sends.
     pub kind: AuthKind,
     /// `true` when the UI must prompt for the value: the registry declares neither
@@ -89,9 +96,11 @@ impl AuthDescriptor {
     /// `needs_login` follows from the kind rather than being set alongside it:
     /// a browser flow is the only credential a human has to go and fetch, so
     /// there is nothing here for the two to disagree about.
-    fn new(name: &str, kind: AuthKind, allowed_hosts: &[String]) -> Self {
+    fn new(name: &str, stage: Option<&str>, kind: AuthKind, allowed_hosts: &[String]) -> Self {
         Self {
+            id: stage::id(name, stage),
             name: name.to_owned(),
+            stage: stage.map(ToOwned::to_owned),
             kind,
             needs_value: false,
             needs_login: matches!(kind, AuthKind::OidcBrowser),
@@ -111,7 +120,12 @@ impl AuthDescriptor {
 /// Every declared auth provider, keyed by name.
 #[derive(Debug)]
 pub struct AuthRegistry {
+    /// Keyed by `name@stage`, so the `preprod` reading of a file caches its own
+    /// token and holds its own browser session. Two stages of one provider are
+    /// two identities, and sharing either would be the bug.
     providers: BTreeMap<String, Auth>,
+    /// Name to the id a bare reference means.
+    defaults: BTreeMap<String, String>,
     descriptors: Vec<AuthDescriptor>,
     /// Which file each provider came from, so that a second declaration can be
     /// told apart from a second *file* declaring it. One is a typo, the other is
@@ -173,14 +187,19 @@ impl AuthRegistry {
         let mut here: BTreeMap<String, PathBuf> = BTreeMap::new();
 
         for path in paths {
-            match layout::read::<ProviderConfig>(&path) {
-                Ok(None) => debug!(path = %path.display(), "file declares no auth provider"),
-                Ok(Some(config)) => {
-                    if let Err(issue) = self.insert(&path, &mut here, config, http, sessions) {
-                        self.issues.push(issue);
-                    }
+            let staged = match layout::read::<ProviderConfig>(&path) {
+                Ok(staged) => staged,
+                Err(issue) => {
+                    self.issues.push(issue);
+                    continue;
                 }
-                Err(issue) => self.issues.push(issue),
+            };
+            if staged.is_empty() {
+                debug!(path = %path.display(), "file declares no auth provider");
+                continue;
+            }
+            if let Err(issue) = self.insert(&path, &mut here, staged, http, sessions) {
+                self.issues.push(issue);
             }
         }
     }
@@ -190,6 +209,7 @@ impl AuthRegistry {
     pub fn with_builtins() -> Self {
         let mut registry = Self {
             providers: BTreeMap::new(),
+            defaults: BTreeMap::new(),
             descriptors: Vec::new(),
             sources: BTreeMap::new(),
             issues: Vec::new(),
@@ -198,16 +218,23 @@ impl AuthRegistry {
             ANONYMOUS.to_owned(),
             Auth::Anonymous(Anonymous::new(ANONYMOUS, Vec::new())),
         );
-        registry
-            .descriptors
-            .push(AuthDescriptor::new(ANONYMOUS, AuthKind::Anonymous, &[]));
+        registry.descriptors.push(AuthDescriptor::new(
+            ANONYMOUS,
+            None,
+            AuthKind::Anonymous,
+            &[],
+        ));
         registry
     }
 
-    /// Looks a provider up by name.
+    /// Looks a provider up by `name@stage`, or by name for its default stage.
     #[must_use]
-    pub fn get(&self, name: &str) -> Option<&Auth> {
-        self.providers.get(name)
+    pub fn get(&self, reference: &str) -> Option<&Auth> {
+        self.providers.get(reference).or_else(|| {
+            self.defaults
+                .get(reference)
+                .and_then(|id| self.providers.get(id))
+        })
     }
 
     /// Every provider, for the UI's auth selector.
@@ -222,15 +249,21 @@ impl AuthRegistry {
         &self.issues
     }
 
+    /// Registers every stage of one file, or none of them.
+    ///
+    /// All or nothing on purpose: a `prod` whose header name does not parse takes
+    /// the file down rather than leaving a picker with one stage in it and the
+    /// reason in the log. Same rule as [`crate::config::stage`] applies to the
+    /// expansion itself, one layer up.
     fn insert(
         &mut self,
         path: &Path,
         here: &mut BTreeMap<String, PathBuf>,
-        config: ProviderConfig,
+        staged: Vec<Staged<ProviderConfig>>,
         http: &Client,
         sessions: &Arc<SessionStore>,
     ) -> Result<(), LoadIssue> {
-        let (name, provider, descriptor) = build(path, config, http, sessions)?;
+        let name = staged[0].value.name().to_owned();
 
         // Twice in this directory: a mistake, and the first file keeps the name.
         if let Some(previous) = here.insert(name.clone(), path.to_path_buf()) {
@@ -243,11 +276,22 @@ impl AuthRegistry {
             ));
         }
 
+        let built = staged
+            .into_iter()
+            .map(|entry| {
+                build(path, entry.value, entry.stage.as_deref(), http, sessions)
+                    .map(|(provider, descriptor)| (entry.default, provider, descriptor))
+            })
+            .collect::<Result<Vec<_>, LoadIssue>>()?;
+
         // Once here and once in a directory read earlier: layering doing its job.
         // Not an issue, but not silent either — an OIDC provider quietly swapped
         // for a token one is a long afternoon. A file declaring `anonymous`
         // reaches none of this: the built-in is not a declaration, so scoping it
         // with `allowed_hosts` is an ordinary entry rather than a collision.
+        //
+        // The name is displaced whole: the stages of the file that held it go
+        // with it, rather than surviving beside the ones replacing them.
         if let Some(previous) = self.sources.get(&name) {
             warn!(
                 %name,
@@ -256,32 +300,46 @@ impl AuthRegistry {
                 "auth provider overridden by a later directory"
             );
         }
-
-        debug!(name = %provider.name(), "auth provider registered");
+        for stale in self.descriptors.iter().filter(|entry| entry.name == name) {
+            self.providers.remove(&stale.id);
+        }
         self.descriptors.retain(|existing| existing.name != name);
-        self.descriptors.push(descriptor);
-        self.descriptors.sort_by(|a, b| a.name.cmp(&b.name));
-        self.sources.insert(name.clone(), path.to_path_buf());
-        self.providers.insert(name, provider);
+
+        for (default, provider, descriptor) in built {
+            debug!(id = %descriptor.id, "auth provider registered");
+            if default {
+                self.defaults.insert(name.clone(), descriptor.id.clone());
+            }
+            self.providers.insert(descriptor.id.clone(), provider);
+            self.descriptors.push(descriptor);
+        }
+        self.descriptors.sort_by(|a, b| a.id.cmp(&b.id));
+        self.sources.insert(name, path.to_path_buf());
         Ok(())
     }
 }
 
-/// One declared entry, turned into a live provider and what the UI is told.
+/// One declared entry, in one stage, turned into a live provider and what the UI
+/// is told.
+///
+/// The provider is built with its **id** as its name, which is what makes a
+/// staged provider a separate identity all the way down: its own token cache, its
+/// own browser session, its own name in a trace.
 fn build(
     path: &Path,
     config: ProviderConfig,
+    stage: Option<&str>,
     http: &Client,
     sessions: &Arc<SessionStore>,
-) -> Result<(String, Auth, AuthDescriptor), LoadIssue> {
+) -> Result<(Auth, AuthDescriptor), LoadIssue> {
     match config {
         ProviderConfig::Anonymous {
             name,
             allowed_hosts,
         } => {
-            let descriptor = AuthDescriptor::new(&name, AuthKind::Anonymous, &allowed_hosts);
-            let provider = Auth::Anonymous(Anonymous::new(name.clone(), allowed_hosts));
-            Ok((name, provider, descriptor))
+            let descriptor = AuthDescriptor::new(&name, stage, AuthKind::Anonymous, &allowed_hosts);
+            let provider = Auth::Anonymous(Anonymous::new(descriptor.id.clone(), allowed_hosts));
+            Ok((provider, descriptor))
         }
         ProviderConfig::Token {
             name,
@@ -291,18 +349,18 @@ fn build(
             allowed_hosts,
         } => {
             let header = header_name(path, &name, &header)?;
-            let mut descriptor = AuthDescriptor::new(&name, AuthKind::Token, &allowed_hosts);
+            let mut descriptor = AuthDescriptor::new(&name, stage, AuthKind::Token, &allowed_hosts);
             if value.env.is_none() && value.file.is_none() {
                 descriptor = descriptor.prompting();
             }
             let provider = Auth::Token(TokenAuth::new(
-                name.clone(),
+                descriptor.id.clone(),
                 header,
                 scheme,
                 value,
                 allowed_hosts,
             ));
-            Ok((name, provider, descriptor))
+            Ok((provider, descriptor))
         }
         ProviderConfig::Oidc {
             name,
@@ -321,10 +379,10 @@ fn build(
             let credential = client_credential(path, &name, client_secret, client_assertion)?;
             // A machine identity: never something the UI could sensibly ask a
             // human to paste, and never something to sign in to.
-            let descriptor = AuthDescriptor::new(&name, AuthKind::Oidc, &allowed_hosts);
+            let descriptor = AuthDescriptor::new(&name, stage, AuthKind::Oidc, &allowed_hosts);
             let provider = Auth::Oidc(Box::new(OidcAuth::new(
                 OidcConfig {
-                    name: name.clone(),
+                    name: descriptor.id.clone(),
                     issuer,
                     token_endpoint,
                     client_id,
@@ -337,7 +395,7 @@ fn build(
                 },
                 http.clone(),
             )));
-            Ok((name, provider, descriptor))
+            Ok((provider, descriptor))
         }
         ProviderConfig::OidcBrowser {
             name,
@@ -355,10 +413,11 @@ fn build(
             let header = header_name(path, &name, &header)?;
             // The credential is fetched, not typed: prompting for one would be
             // asking the human to do the flow's job.
-            let descriptor = AuthDescriptor::new(&name, AuthKind::OidcBrowser, &allowed_hosts);
+            let descriptor =
+                AuthDescriptor::new(&name, stage, AuthKind::OidcBrowser, &allowed_hosts);
             let provider = Auth::OidcBrowser(Box::new(OidcBrowserAuth::new(
                 OidcBrowserConfig {
-                    name: name.clone(),
+                    name: descriptor.id.clone(),
                     issuer,
                     authorization_endpoint,
                     token_endpoint,
@@ -373,7 +432,7 @@ fn build(
                 http.clone(),
                 Arc::clone(sessions),
             )));
-            Ok((name, provider, descriptor))
+            Ok((provider, descriptor))
         }
     }
 }
@@ -491,6 +550,18 @@ enum ProviderConfig {
     },
 }
 
+impl ProviderConfig {
+    /// What the file called it, whichever kind it declared.
+    fn name(&self) -> &str {
+        match self {
+            Self::Anonymous { name, .. }
+            | Self::Token { name, .. }
+            | Self::Oidc { name, .. }
+            | Self::OidcBrowser { name, .. } => name,
+        }
+    }
+}
+
 fn default_header() -> String {
     DEFAULT_HEADER.to_owned()
 }
@@ -510,6 +581,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::auth::AuthProvider;
 
     /// Every test gets its own session store: nothing here is signed in.
     fn load(dir: &Path) -> AuthRegistry {
@@ -529,6 +601,56 @@ mod tests {
 
     fn write_provider(tag: &str, name: &str, body: &str) -> PathBuf {
         write_providers(tag, &[(&format!("{name}.yaml"), body)])
+    }
+
+    const STAGED: &str = r"
+name: gateway
+kind: token
+value:
+  env: ${ stage.secret_env }
+allowed_hosts: ${ stage.hosts }
+default_stage: dev
+stages:
+  dev:
+    secret_env: MODEL_TOKEN_DEV
+    hosts:
+      - 127.0.0.1
+  preprod:
+    secret_env: MODEL_TOKEN_PREPROD
+    hosts:
+      - models.preprod.internal
+";
+
+    /// Two stages of one credential are two identities: their own name, and so
+    /// their own token cache and their own browser session.
+    #[test]
+    fn a_staged_provider_is_one_entry_per_stage() {
+        let dir = write_provider("staged", "gateway", STAGED);
+
+        let registry = load(&dir);
+
+        assert!(registry.issues().is_empty(), "{:?}", registry.issues());
+        assert!(registry.get("gateway@dev").is_some());
+        assert!(registry.get("gateway@preprod").is_some());
+        assert_eq!(registry.get("gateway").unwrap().name(), "gateway@dev");
+    }
+
+    /// The allow-list is a whole variable rather than a string with a host in it,
+    /// which is what a lone `${ … }` keeping its type is for.
+    #[test]
+    fn a_stage_can_carry_a_list_as_one_variable() {
+        let dir = write_provider("staged-hosts", "gateway", STAGED);
+
+        let registry = load(&dir);
+
+        let preprod = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.id == "gateway@preprod")
+            .expect("preprod");
+        assert_eq!(preprod.allowed_hosts, ["models.preprod.internal"]);
+        assert_eq!(preprod.name, "gateway");
+        assert_eq!(preprod.stage.as_deref(), Some("preprod"));
     }
 
     #[test]

@@ -98,8 +98,10 @@ file — in that order of precedence:
 
 Nobody has to write the file, and no environment variable is required. See
 [docs/configuration.md](docs/configuration.md) for the file, the configuration
-directories and how several of them layer, and for running behind a container or
-a notebook path proxy.
+directories and how several of them layer, for declaring one endpoint's `dev`,
+`preprod` and `prod` in a single file with
+[stages](docs/configuration.md#stages), and for running behind a container or a
+notebook path proxy.
 
 ### Usage
 
@@ -131,7 +133,7 @@ docker run --rm --read-only -p 127.0.0.1:8787:8787 \
 
 | Document | What it covers |
 | --- | --- |
-| [docs/configuration.md](docs/configuration.md) | The options file, configuration directories and how they layer, containers, notebook path proxies |
+| [docs/configuration.md](docs/configuration.md) | The options file, configuration directories and how they layer, stages (`dev`/`preprod`/`prod` in one file), containers, notebook path proxies |
 | [docs/models.md](docs/models.md) | Turning a `curl` into a model file: templates, decode cascades, Rhai scripts, `multipart/form-data` endpoints |
 | [docs/auth.md](docs/auth.md) | Credential providers: static tokens, OIDC workload identities, browser logins, `allowed_hosts` |
 | [docs/mcp.md](docs/mcp.md) | Real tool calls: declaring servers, protocol revisions, per-run selection, header templates, hooks, captured variables |

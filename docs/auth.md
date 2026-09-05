@@ -44,9 +44,10 @@ performs the `client_credentials` exchange itself, caches the access token and
 renews it 60 seconds before expiry:
 
 ```yaml
-# auth/oidc-workload.yaml
+# auth/models-workload.yaml — one to write; the directory ships
+# `keycloak-workload.yaml`, which is this shape against the compose stack
 ---
-name: oidc-workload
+name: models-workload
 kind: oidc
 issuer: https://idp.internal/realms/models
 client_id: mire
@@ -144,3 +145,45 @@ run until its own config is perfect.
 
 The token values themselves are read on **every** call, not cached: a rotated
 service account token file is picked up on the next request.
+
+## The same credential against three environments
+
+An issuer, a client id and a secret that differ per environment are one file with
+a `stages:` block, not three files that quietly stop matching:
+
+```yaml
+---
+name: keycloak-workload
+kind: oidc
+issuer: ${ stage.issuer }
+client_id: mire
+client_secret:
+  env: ${ stage.secret_env }
+audience: ${ stage.audience }
+allowed_hosts: ${ stage.hosts }
+
+default_stage: dev
+stages:
+  dev:
+    issuer: http://127.0.0.1:8080/realms/mire
+    secret_env: MIRE_CLIENT_SECRET_DEV
+    audience: models-dev
+    hosts:
+      - 127.0.0.1
+  preprod:
+    issuer: https://idp.preprod.internal/realms/models
+    secret_env: MIRE_CLIENT_SECRET_PREPROD
+    audience: https://models.preprod.internal
+    hosts:
+      - models.preprod.internal
+```
+
+`keycloak-workload@preprod` is then a credential like any other, and it is
+independent of the model's own stage — a `prod` model authenticated by a
+`preprod` identity is a question worth asking, and asking it is one field on the
+call. **Two stages are two identities**: their own token cache, their own browser
+session, so signing in to one is not signing in to the other.
+
+No credential is in that file, as ever: `${ stage.secret_env }` names the
+variable to read, and the value never leaves the process.
+See [configuration.md](configuration.md#stages) for the rest.

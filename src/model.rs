@@ -874,12 +874,27 @@ pub struct Model {
     /// Expected response shape.
     #[serde(default)]
     pub expect: ExpectSpec,
+    /// Stage this reading of the file belongs to, `None` when it declares none.
+    /// Set by the loader, never present in YAML — it is a key of `stages:`, not
+    /// a field beside it.
+    #[serde(skip_deserializing, default)]
+    pub stage: Option<String>,
     /// File this model was read from. Set by the loader, never present in YAML.
     #[serde(skip_deserializing, default)]
     pub source: PathBuf,
 }
 
 impl Model {
+    /// How this model is addressed: `name`, or `name@stage`.
+    ///
+    /// The identifier everything outside the file uses — `POST /api/call`, the
+    /// UI, the log lines of a run. [`Self::name`] is what the file called it,
+    /// which two stages of the same file share.
+    #[must_use]
+    pub fn id(&self) -> String {
+        crate::config::stage::id(&self.name, self.stage.as_deref())
+    }
+
     /// The configured timeout.
     #[must_use]
     pub fn timeout(&self) -> Duration {

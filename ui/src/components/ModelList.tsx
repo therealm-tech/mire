@@ -9,26 +9,37 @@ export function ModelList({
 }: {
   models: ModelSummary[]
   issues: LoadIssue[]
+  /** The id of the selected model — `name`, or `name@stage`. */
   selected: string | null
-  onSelect: (name: string) => void
+  onSelect: (id: string) => void
 }) {
   return (
     <div className="space-y-3">
       <ul className="space-y-1">
         {models.map((model) => (
-          <li key={model.name}>
+          <li key={model.id}>
             <button
               type="button"
-              aria-current={model.name === selected ? 'true' : undefined}
-              onClick={() => onSelect(model.name)}
+              aria-current={model.id === selected ? 'true' : undefined}
+              onClick={() => onSelect(model.id)}
               className={`w-full rounded border px-2 py-1.5 text-left transition-colors ${
-                model.name === selected
+                model.id === selected
                   ? 'border-line-strong bg-well'
                   : 'border-transparent hover:bg-well'
               }`}
             >
               <span className="flex items-center gap-2">
                 <span className="truncate font-medium text-sm">{model.name}</span>
+                {/*
+                  One row per stage rather than a name with a picker beside it:
+                  two stages of one file are two endpoints, with their own URL,
+                  their own credential and their own answer, and the list is
+                  where you pick which one you are asking. They sort together
+                  under the name they share.
+                */}
+                {model.stage === undefined ? null : (
+                  <span className="font-mono text-muted text-xs">@{model.stage}</span>
+                )}
                 <Badge tone={model.kind === 'embedding' ? 'warn' : 'neutral'}>{model.kind}</Badge>
                 {model.hasDecode ? null : <Badge tone="warn">no decode</Badge>}
               </span>

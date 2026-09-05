@@ -5,13 +5,13 @@
 | Route | What it does |
 | --- | --- |
 | `GET /api/models` | Every model, plus the files that failed to load and why |
-| `GET /api/models/{name}` | One model, as declared |
+| `GET /api/models/{id}` | One model, as declared |
 | `GET /api/prompts` | Prompts declared in `prompts/`, plus the entries that did not load |
 | `GET /api/auth` | Auth providers, with session status |
 | `GET /api/mcp` | MCP servers declared in `mcp/` — what each one authenticates with, the hooks around its calls, and what it captures — plus the entries that did not load |
-| `GET /api/mcp/{name}/tools` | Ask a server what it offers, right now, and on which revision |
-| `POST /api/auth/{name}/login` | Start a browser login; returns where to send it |
-| `POST /api/auth/{name}/logout` | Forget the session `mire` holds |
+| `GET /api/mcp/{id}/tools` | Ask a server what it offers, right now, and on which revision |
+| `POST /api/auth/{id}/login` | Start a browser login; returns where to send it |
+| `POST /api/auth/{id}/logout` | Forget the session `mire` holds |
 | `POST /api/call` | Render, authenticate, send, decode |
 | `POST /api/call/stream` | The same, read chunk by chunk, with time to first token |
 | `POST /api/agent` | The same, in a loop, served as server-sent events — one turn at a time, and with `"stream": true` one chunk at a time as well |
@@ -25,6 +25,21 @@ one is a page for a human, the other is ops plumbing. Neither is API surface.
 A `4xx` or `5xx` **from the endpoint under test** is a successful call: read
 `response.http.status`. The API only returns an error when `mire` itself could
 not do its job.
+
+An `{id}` is an entry's `name`, or `name@stage` for a file declaring
+[stages](configuration.md#stages) — the same string `"model"`, `"auth"` and
+`"mcpServers"` take on a call. A bare name is the entry's default stage, so a
+request written before stages existed still means what it meant. Listings carry
+all three: `id` to send back, `name` to show, and `stage` when there is one.
+
+```sh
+curl -sS localhost:8787/api/call -H 'content-type: application/json' -d '{
+  "model": "qwen3@prod",
+  "auth": "keycloak-workload@preprod",
+  "mcpServers": ["dev@local"],
+  "prompt": "ping"
+}'
+```
 
 
 ## See exactly what was sent

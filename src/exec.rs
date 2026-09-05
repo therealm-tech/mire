@@ -267,7 +267,7 @@ impl Runner {
         let mut retried = false;
 
         if raw.status == 401 && provider.invalidate().await == Retry::Once {
-            warn!(model = %model.name, auth = %auth_name, "401, refreshing the credential and replaying once");
+            warn!(model = %model.id(), auth = %auth_name, "401, refreshing the credential and replaying once");
             let mut headers = base_headers;
             redactor.merge(
                 &provider
@@ -283,13 +283,13 @@ impl Runner {
         }
 
         info!(
-            model = %model.name,
+            model = %model.id(),
             auth = %auth_name,
             status = raw.status,
             latency_ms = raw.latency.as_millis(),
             "call completed"
         );
-        log_refusal(&model.name, raw.status, &redactor.text(&raw.body));
+        log_refusal(&model.id(), raw.status, &redactor.text(&raw.body));
 
         let (mut response, first_vectors) = response_view(
             model,
@@ -309,7 +309,7 @@ impl Runner {
         }
 
         Ok(CallOutcome {
-            model: model.name.clone(),
+            model: model.id(),
             auth: auth_name,
             request: view,
             curl,
@@ -383,7 +383,7 @@ impl Runner {
         // replay still works here: a `401` is known immediately, and the body we
         // drop is an error page nobody wanted.
         if open.status == 401 && provider.invalidate().await == Retry::Once {
-            warn!(model = %model.name, auth = %auth_name, "401, refreshing the credential and replaying once");
+            warn!(model = %model.id(), auth = %auth_name, "401, refreshing the credential and replaying once");
             let mut headers = base_headers;
             redactor.merge(
                 &provider
@@ -422,13 +422,13 @@ impl Runner {
         // evidence. The failure is reported through `terminated`, not by throwing
         // away what arrived.
         if let Err(error) = &read {
-            debug!(model = %model.name, error = %error, "the stream ended badly");
+            debug!(model = %model.id(), error = %error, "the stream ended badly");
         }
 
         let streamed = accumulator.finish();
 
         info!(
-            model = %model.name,
+            model = %model.id(),
             auth = %auth_name,
             status,
             latency_ms = started.elapsed().as_millis(),
@@ -438,12 +438,12 @@ impl Runner {
         );
         // Already redacted by the accumulator, and for a refusal it is the whole
         // body: an endpoint that says no says it in one shot, not in frames.
-        log_refusal(&model.name, status, &streamed.body_text);
+        log_refusal(&model.id(), status, &streamed.body_text);
 
         let response = streamed_response(status, response_headers, started, streamed);
 
         Ok(CallOutcome {
-            model: model.name.clone(),
+            model: model.id(),
             auth: auth_name,
             request: view,
             curl,
@@ -495,7 +495,7 @@ impl Runner {
             worst = worst.max(deviation);
         }
 
-        debug!(model = %model.name, runs = input.repeat, deviation = worst, "determinism checked");
+        debug!(model = %model.id(), runs = input.repeat, deviation = worst, "determinism checked");
         Ok(CheckOutcome::from(worst <= input.tolerance, || {
             format!(
                 "the same input produced vectors differing by up to {worst:e}, above the {:e} tolerance",
@@ -755,9 +755,7 @@ fn millis(from: std::time::Instant, to: std::time::Instant) -> u64 {
 /// [`ExecError::UploadRequired`], naming the model that asked for the file.
 pub fn check_uploads(model: &Model, uploads: &[UploadRef]) -> Result<(), ExecError> {
     if model.requires_upload && uploads.is_empty() {
-        return Err(ExecError::UploadRequired {
-            model: model.name.clone(),
-        });
+        return Err(ExecError::UploadRequired { model: model.id() });
     }
     Ok(())
 }
@@ -792,12 +790,12 @@ fn base_headers(model: &Model, body: &RenderedBody) -> Result<HeaderMap, ExecErr
     for (name, value) in &model.headers {
         let name = HeaderName::try_from(name.to_ascii_lowercase()).map_err(|_| {
             ExecError::InvalidHeader {
-                model: model.name.clone(),
+                model: model.id(),
                 header: name.clone(),
             }
         })?;
         let value = HeaderValue::from_str(value).map_err(|_| ExecError::InvalidHeader {
-            model: model.name.clone(),
+            model: model.id(),
             header: name.as_str().to_owned(),
         })?;
         headers.insert(name, value);
@@ -805,7 +803,7 @@ fn base_headers(model: &Model, body: &RenderedBody) -> Result<HeaderMap, ExecErr
 
     if body.as_json().is_none() && headers.remove(CONTENT_TYPE).is_some() {
         warn!(
-            model = %model.name,
+            model = %model.id(),
             "`headers.content-type` dropped: a multipart's is the encoder's to write"
         );
     }

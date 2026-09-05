@@ -74,6 +74,9 @@ produce changes while the process runs.
 directories, and [`config::layout`](src/config/layout.rs) says what a directory
 holds and how each kind is read out of it. It watches every listed directory and
 swaps the registries together. It owns no file format of its own: the loaders do.
+[`config::stage`](src/config/stage.rs) is the one exception, and it is a
+pre-pass rather than a format: it reads a file once per environment the file
+declares, substituting `${ stage.… }` before the loader sees a document.
 
 **[`model`](src/model.rs)** and [`model::loader`](src/model/loader.rs) turn
 `models/` into a registry of endpoints. The file on disk is the source of truth
@@ -249,6 +252,25 @@ treatment, because it is the tool's own wiring — a `port:` that did not parse
 means listening somewhere nobody asked for, and a misspelled key means a setting
 you believe is in effect and is not.
 
+**A stage is an expansion, not a lookup.** The same endpoint at three addresses
+is one file declaring `stages:`, expanded once per stage at load — so `prod` is a
+whole entry with its URL parsed, its JSONPaths compiled and its header names
+checked, and a typo in it is a startup issue rather than something the afternoon
+somebody first picks prod. Resolving a stage at call time would have been less
+code and would have moved every one of those checks to the first call.
+
+The substitution is spelled `${ … }` because the file already holds `{{ … }}`
+for the request template, and the two are resolved at different moments against
+different contexts: `${ stage.served_model }` when the file loads, seeing only
+that stage's variables, and `{{ messages | tojson }}` when a call goes out. A
+file that declares no `stages:` is not substituted at all, which is what keeps a
+`${` somebody typed a `${` they typed.
+
+An entry is then addressed as `name@stage`, and a bare name is its default stage.
+Stages are per entry and independent across kinds — a `prod` model, a `preprod`
+credential and a `dev` server is an ordinary run — because the whole point is to
+vary one axis while holding the others still.
+
 **Declarative first, script as an escape hatch.** A `decode:` field is a cascade
 of JSONPaths tried in order, which covers endpoints that disagree with each other
 and endpoints that disagree with their own previous version. A Rhai script is
@@ -338,7 +360,15 @@ run by something that already has one.
   no finish reason looks like a slow agent rather than a mismatch.
 - **The last configuration directory to declare a name owns it**, per kind, and
   the shadowing is logged. Two files in the *same* directory claiming one name is
-  a load issue, and the first one keeps the name.
+  a load issue, and the first one keeps the name. A name is displaced whole: the
+  stages of the file that held it go with it rather than surviving beside the
+  ones replacing it.
+- **A file's stages load together or not at all.** One that does not expand takes
+  the entry with it, so a stage missing from the picker is never explained only
+  by a line in the log.
+- **A stage is an identity of its own.** Two stages of one credential hold two
+  token caches and two browser sessions, and two stages of one MCP server
+  negotiate and keep two sessions — they share a file, and nothing else.
 
 ## Limitations
 

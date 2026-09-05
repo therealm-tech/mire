@@ -117,7 +117,7 @@ async function waitForSession(provider: string, popup: Window | null): Promise<A
     await new Promise((resolve) => setTimeout(resolve, LOGIN_POLL_MS))
 
     const latest = await fetchAuth()
-    const entry = latest.providers.find((candidate) => candidate.name === provider)
+    const entry = latest.providers.find((candidate) => candidate.id === provider)
     if (entry?.session) {
       return latest
     }
@@ -131,7 +131,7 @@ async function waitForSession(provider: string, popup: Window | null): Promise<A
     // races with the session appearing. Look once more before giving up.
     if (popup?.closed) {
       const final = await fetchAuth()
-      const settled = final.providers.find((candidate) => candidate.name === provider)
+      const settled = final.providers.find((candidate) => candidate.id === provider)
       if (settled?.session) {
         return final
       }
@@ -281,7 +281,7 @@ export function App() {
         // selection that no longer exists would be an empty page with no
         // explanation for it.
         setSelectedModel((current) => {
-          const kept = loadedModels.models.some((entry) => entry.name === current)
+          const kept = loadedModels.models.some((entry) => entry.id === current)
           return kept ? current : (loadedModels.models[0]?.name ?? null)
         })
         logger.info('config.loaded', {
@@ -298,7 +298,7 @@ export function App() {
       })
   }, [setSelectedModel])
 
-  const model = models?.models.find((candidate) => candidate.name === selectedModel)
+  const model = models?.models.find((candidate) => candidate.id === selectedModel)
 
   /**
    * The identity this model calls with. `auth:` when it names one, otherwise
@@ -309,7 +309,7 @@ export function App() {
    * the server would only work it out again, and a UI that sends it is a UI that
    * can disagree with the file.
    */
-  const provider = auth?.providers.find((entry) => entry.name === (model?.auth ?? ANONYMOUS))
+  const provider = auth?.providers.find((entry) => entry.id === (model?.auth ?? ANONYMOUS))
 
   /**
    * Whether this model takes a message somebody types.
@@ -336,7 +336,7 @@ export function App() {
   const usesMcp = model?.kind === 'chat' && (mcp?.servers.length ?? 0) > 0
 
   /** Every declared server, which is what a chat model is offered. */
-  const declaredMcp = useMemo(() => (mcp ? mcp.servers.map((server) => server.name) : []), [mcp])
+  const declaredMcp = useMemo(() => (mcp ? mcp.servers.map((server) => server.id) : []), [mcp])
 
   /**
    * The servers this run will actually set up.
@@ -475,7 +475,7 @@ export function App() {
     setEmbedding(null)
 
     const body: CallRequest = {
-      model: model.name,
+      model: model.id,
       input: input.split('\n').filter((line) => line.trim().length > 0),
       repeat,
       includeVectors,
@@ -559,7 +559,7 @@ export function App() {
       setEmbedding(null)
 
       const body: AgentRequest = {
-        model: model.name,
+        model: model.id,
         messages: sent,
         maxIterations,
       }

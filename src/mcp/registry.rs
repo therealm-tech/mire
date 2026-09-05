@@ -28,6 +28,7 @@ use super::hook::{
     OnError, PartSpec,
 };
 use crate::config::layout;
+use crate::config::stage;
 use crate::issue::LoadIssue;
 
 /// Default per-request timeout. Generous: a real tool does real work.
@@ -41,8 +42,14 @@ const DEFAULT_HOOK_TIMEOUT_MS: u64 = 10_000;
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct McpDescriptor {
-    /// Registry name, referenced from a model's `mcp:` list.
+    /// How the server is addressed: `name`, or `name@stage`. What a
+    /// `mcpServers:` list carries, and what `GET /api/mcp/<id>/tools` takes.
+    pub id: String,
+    /// What the file called it. Two stages of one file share it.
     pub name: String,
+    /// Stage this reading of the file belongs to, absent when it declares none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
     /// The endpoint, so the UI can show what it is about to talk to.
     pub url: String,
     /// Auth provider it authenticates with, if any.
@@ -140,10 +147,16 @@ pub struct ActionDescriptor {
     pub uses_auth: Vec<String>,
 }
 
-/// Every declared MCP server, keyed by name.
+/// Every declared MCP server, keyed by `name@stage`.
+///
+/// Two stages of one file are two servers: their own negotiated revision, their
+/// own session header, their own address. Sharing either would mean a `prod`
+/// session travelling to a `dev` endpoint.
 #[derive(Debug, Default)]
 pub struct McpRegistry {
     clients: BTreeMap<String, McpClient>,
+    /// Name to the id a bare reference means.
+    defaults: BTreeMap<String, String>,
     descriptors: Vec<McpDescriptor>,
     /// Which file each server came from — see [`crate::auth::AuthRegistry`] for
     /// why the file matters and not just the name.
@@ -163,7 +176,7 @@ impl McpRegistry {
         for dir in dirs {
             registry.read_dir(dir.as_ref(), http);
         }
-        registry.descriptors.sort_by(|a, b| a.name.cmp(&b.name));
+        registry.descriptors.sort_by(|a, b| a.id.cmp(&b.id));
         registry
     }
 
@@ -189,108 +202,89 @@ impl McpRegistry {
         let mut here: BTreeMap<String, PathBuf> = BTreeMap::new();
 
         for path in paths {
-            let config = match layout::read::<ServerConfig>(&path) {
-                Ok(Some(config)) => config,
-                Ok(None) => {
-                    debug!(path = %path.display(), "file declares no MCP server");
-                    continue;
-                }
+            let staged = match layout::read::<ServerConfig>(&path) {
+                Ok(staged) => staged,
                 Err(issue) => {
                     self.issues.push(issue);
                     continue;
                 }
             };
             let path = path.as_path();
+            let Some(name) = staged.first().map(|entry| entry.value.name.clone()) else {
+                debug!(path = %path.display(), "file declares no MCP server");
+                continue;
+            };
 
-            if let Some(previous) = here.insert(config.name.clone(), path.to_path_buf()) {
+            if let Some(previous) = here.insert(name.clone(), path.to_path_buf()) {
                 self.issues.push(LoadIssue::new(
                     path,
                     format!(
-                        "duplicate MCP server `{}`, already declared in {}",
-                        config.name,
+                        "duplicate MCP server `{name}`, already declared in {}",
                         previous.display()
                     ),
                 ));
                 continue;
             }
-            if let Some(previous) = self.sources.get(&config.name) {
+
+            // All the stages, or none: a `prod` whose hook does not compile takes
+            // the file with it rather than leaving a picker with a hole in it.
+            let built = match staged
+                .into_iter()
+                .map(|entry| {
+                    build(path, entry.value, entry.stage.as_deref())
+                        .map(|(server, descriptor)| (entry.default, server, descriptor))
+                })
+                .collect::<Result<Vec<_>, LoadIssue>>()
+            {
+                Ok(built) => built,
+                Err(issue) => {
+                    self.issues.push(issue);
+                    continue;
+                }
+            };
+
+            if let Some(previous) = self.sources.get(&name) {
                 warn!(
-                    name = %config.name,
+                    %name,
                     path = %path.display(),
                     shadowed = %previous.display(),
                     "MCP server overridden by a later directory"
                 );
             }
-
-            let headers = match HeaderTemplates::compile(&config.headers) {
-                Ok(headers) => headers,
-                Err(message) => {
-                    self.issues.push(LoadIssue::new(
-                        path,
-                        format!("MCP server `{}`: {message}", config.name),
-                    ));
-                    continue;
-                }
-            };
-
-            let protocol_version = match config.protocol_version.as_deref().map(str::parse) {
-                None => None,
-                Some(Ok(revision)) => Some(revision),
-                Some(Err(message)) => {
-                    self.issues.push(LoadIssue::new(
-                        path,
-                        format!("MCP server `{}`: {message}", config.name),
-                    ));
-                    continue;
-                }
-            };
-
-            let hooks = match compile_hooks(&config.name, &config.hooks) {
-                Ok(hooks) => hooks,
-                Err(message) => {
-                    self.issues.push(LoadIssue::new(path, message));
-                    continue;
-                }
-            };
-
-            if let Err(message) = check_capture(&config.name, &config.capture) {
-                self.issues.push(LoadIssue::new(path, message));
-                continue;
+            // Displaced whole, stages and all — see the auth registry for why an
+            // override replaces an entry rather than merging into it.
+            for stale in self.descriptors.iter().filter(|entry| entry.name == name) {
+                self.clients.remove(&stale.id);
             }
+            self.descriptors.retain(|existing| existing.name != name);
 
-            let server = McpServer {
-                name: config.name.clone(),
-                url: config.url,
-                auth: config.auth,
-                tools: config.tools,
-                headers,
-                timeout: Duration::from_millis(config.timeout_ms),
-                protocol_version,
-                hooks,
-                capture: config.capture,
-            };
-
-            debug!(
-                name = %server.name,
-                url = %server.url,
-                hooks = server.hooks.len(),
-                capture = server.capture.len(),
-                "MCP server registered"
-            );
-            self.descriptors
-                .retain(|existing| existing.name != server.name);
-            self.descriptors
-                .push(describe_server(&server, config.headers.keys()));
-            self.sources.insert(server.name.clone(), path.to_path_buf());
-            self.clients
-                .insert(server.name.clone(), McpClient::new(server, http.clone()));
+            for (default, server, descriptor) in built {
+                debug!(
+                    id = %descriptor.id,
+                    url = %server.url,
+                    hooks = server.hooks.len(),
+                    capture = server.capture.len(),
+                    "MCP server registered"
+                );
+                if default {
+                    self.defaults.insert(name.clone(), descriptor.id.clone());
+                }
+                self.clients
+                    .insert(descriptor.id.clone(), McpClient::new(server, http.clone()));
+                self.descriptors.push(descriptor);
+            }
+            self.sources.insert(name, path.to_path_buf());
         }
     }
 
-    /// Looks a server up by name.
+    /// Looks a server up by `name@stage`, or by name for its default stage.
     #[must_use]
-    pub fn get(&self, name: &str) -> Option<&McpClient> {
-        self.clients.get(name)
+    pub fn get(&self, reference: &str) -> Option<&McpClient> {
+        self.clients.get(reference).or_else(|| {
+            self.defaults
+                .get(reference)
+                .and_then(|id| self.clients.get(id))
+        })
     }
 
     /// Every server, for the UI.
@@ -308,7 +302,7 @@ impl McpRegistry {
     pub fn names(&self) -> Vec<String> {
         self.descriptors
             .iter()
-            .map(|descriptor| descriptor.name.clone())
+            .map(|descriptor| descriptor.id.clone())
             .collect()
     }
 
@@ -323,6 +317,46 @@ impl McpRegistry {
     pub fn is_empty(&self) -> bool {
         self.clients.is_empty()
     }
+}
+
+/// One declared server, in one stage, compiled into what the run uses and what
+/// the UI is told.
+///
+/// The server is built with its **id** as its name, which is what gives a staged
+/// server its own negotiated revision, its own session, and its own name in a
+/// trace.
+fn build(
+    path: &Path,
+    config: ServerConfig,
+    stage: Option<&str>,
+) -> Result<(McpServer, McpDescriptor), LoadIssue> {
+    let id = stage::id(&config.name, stage);
+    let issue = |message: String| LoadIssue::new(path, format!("MCP server `{id}`: {message}"));
+
+    let headers = HeaderTemplates::compile(&config.headers).map_err(issue)?;
+    let protocol_version = config
+        .protocol_version
+        .as_deref()
+        .map(str::parse)
+        .transpose()
+        .map_err(issue)?;
+    let hooks =
+        compile_hooks(&id, &config.hooks).map_err(|message| LoadIssue::new(path, message))?;
+    check_capture(&id, &config.capture).map_err(|message| LoadIssue::new(path, message))?;
+
+    let server = McpServer {
+        name: id.clone(),
+        url: config.url,
+        auth: config.auth,
+        tools: config.tools,
+        headers,
+        timeout: Duration::from_millis(config.timeout_ms),
+        protocol_version,
+        hooks,
+        capture: config.capture,
+    };
+    let descriptor = describe_server(&server, &config.name, stage, config.headers.keys());
+    Ok((server, descriptor))
 }
 
 #[derive(Debug, Deserialize)]
@@ -667,10 +701,14 @@ fn compile_parts(
 /// the two halves of "what is this about to do".
 fn describe_server<'a>(
     server: &McpServer,
+    name: &str,
+    stage: Option<&str>,
     declared: impl Iterator<Item = &'a String>,
 ) -> McpDescriptor {
     McpDescriptor {
-        name: server.name.clone(),
+        id: server.name.clone(),
+        name: name.to_owned(),
+        stage: stage.map(ToOwned::to_owned),
         url: server.url.to_string(),
         auth: server.auth.clone(),
         tools: server.tools.clone(),
@@ -755,6 +793,45 @@ mod tests {
 
     fn write(tag: &str, body: &str) -> std::path::PathBuf {
         write_servers(tag, &[("server.yaml", body)])
+    }
+
+    const STAGED: &str = r"
+name: files
+url: ${ stage.base }/mcp
+headers:
+  x-tenant: ${ stage.tenant }
+default_stage: local
+stages:
+  local:
+    base: http://127.0.0.1:11436
+    tenant: sandbox
+  prod:
+    base: https://mcp.internal
+    tenant: acme
+";
+
+    /// Two stages are two servers: their own address, and their own negotiated
+    /// revision and session behind it.
+    #[test]
+    fn a_staged_server_is_one_entry_per_stage() {
+        let dir = write("staged", STAGED);
+
+        let registry = McpRegistry::load(&dir, &Client::new());
+
+        assert!(registry.issues().is_empty(), "{:?}", registry.issues());
+        assert_eq!(registry.names(), ["files@local", "files@prod"]);
+        assert!(registry.get("files@prod").is_some());
+        // A bare name is the default stage, which is what a `mcpServers:` list
+        // written before stages existed still means.
+        assert!(registry.get("files").is_some());
+        let prod = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.id == "files@prod")
+            .expect("prod");
+        assert_eq!(prod.url, "https://mcp.internal/mcp");
+        assert_eq!(prod.name, "files");
+        assert_eq!(prod.stage.as_deref(), Some("prod"));
     }
 
     #[test]

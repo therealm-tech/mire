@@ -17,6 +17,7 @@
 //! Readers take a cheap [`Arc`] snapshot; a reload swaps a whole new one in.
 
 pub mod layout;
+pub mod stage;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};

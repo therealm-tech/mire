@@ -87,7 +87,7 @@
 //! gate that only asks about the big files:
 //!
 //! ```yaml
-//!     if: '{{ result.is_error == false }}'
+//!     if: '{{ result.isError == false }}'
 //!     if: '{{ arguments.size > 1048576 }}'
 //!     if: '{{ vars.session is defined and env.STAGE == "prod" }}'
 //! ```
@@ -2309,7 +2309,14 @@ mod tests {
         assert_eq!(holds("{{ phase == 'after' }}", &empty), Ok(true));
         assert_eq!(holds("{{ arguments.size > 1024 }}", &empty), Ok(true));
         // Which is what makes "audit the calls that actually worked" writable.
-        assert_eq!(holds("{{ not result.is_error }}", &empty), Ok(true));
+        assert_eq!(holds("{{ not result.isError }}", &empty), Ok(true));
+
+        // Pinned both ways round, because getting this name wrong is silent:
+        // undefined is false in a condition, so the Rust spelling makes a hook
+        // sit out every call it was written to fire on, and the only sign is a
+        // skip in the trace quoting a condition that looks right.
+        assert_eq!(holds("{{ result.isError is defined }}", &empty), Ok(true));
+        assert_eq!(holds("{{ result.is_error is defined }}", &empty), Ok(false));
     }
 
     #[test]

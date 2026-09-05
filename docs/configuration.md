@@ -97,12 +97,118 @@ file name is for whoever is reading the directory — which is why the prompts a
 numbered, since the listing's order is the order the UI offers them in.
 
 A subdirectory that is not there declares nothing. So does a file that declares
-nothing — an empty one, or one that is entirely commented out, which is how
-`config/mcp/` ships eight worked examples next to the one server it really has.
-Uncomment one and it is live.
+nothing — an empty one, or one that is entirely commented out, which is how an
+example can live in the directory it is an example of without being one more
+thing the next run has to set up. Uncomment it and it is live.
 
 The directory itself does have to exist: a `--config-dir` that is not there is a
 typo worth stopping for, and the startup error says which one.
+
+## Stages
+
+`dev`, `preprod`, `prod`: the same endpoint at three addresses, with three client
+ids and two timeouts. Written as three files they stop being copies of each other
+the day somebody fixes a decode path in one of them. A stage is the alternative —
+the file declares what varies, and reads it back:
+
+```yaml
+---
+name: qwen3
+kind: chat
+url: ${ stage.base }/v1/chat/completions
+timeout_ms: ${ stage.timeout | default(30000) }
+
+default_stage: dev
+stages:
+  dev:
+    base: http://127.0.0.1:11435
+    served_model: qwen3:0.6b-q4_K_M
+  prod:
+    base: https://models.internal
+    served_model: qwen3-32b
+    timeout: 60000
+
+request:
+  template: |
+    {
+      "model": "${ stage.served_model }",
+      "messages": {{ messages | tojson }}
+    }
+```
+
+Models, auth providers and MCP servers take `stages:`. Saved prompts do not — a
+prompt is text somebody wrote, and the same text in three stages is one prompt.
+
+### Two syntaxes, two moments
+
+Both live in the file above, and they are not the same thing:
+
+- **`${ … }` is resolved when the file loads**, and sees exactly one thing:
+  `stage`, that stage's variables.
+- **`{{ … }}` is resolved when a call goes out**, and sees what it always saw —
+  `messages`, `params`, `uploads`, `env` (the *process* environment), `auth`,
+  `vars`.
+
+Hence two delimiters rather than one: a load-time pass that rendered
+`{{ messages | tojson }}` would render it against a context with no messages in
+it. A file that declares no `stages:` is not substituted at all, so a `${` in a
+saved prompt is the text you wrote; in a file that does declare them, `$${` is a
+literal `${`.
+
+A variable no stage declares is a load issue naming it, rather than an empty
+string on the wire — `| default(…)` is how a file says one is genuinely optional.
+A lone `${ … }` keeps the variable's own type, so `allowed_hosts: ${ stage.hosts }`
+is a list and `timeout_ms: ${ stage.timeout }` is a number; with text around it
+the result is text, which is all a URL with a host substituted into it could be.
+
+### `name@stage`
+
+An entry that declares stages is addressed as `name@stage` — in the composer, in
+`POST /api/call`, in an `mcpServers:` list, in another file's `auth:`. A bare
+name is that entry's default stage, which is what makes every file and every
+request written before stages existed mean what it meant. `@` is therefore not
+allowed in a `name:`.
+
+`default_stage:` is required as soon as there is a choice to make. A file
+declaring one stage is its own default.
+
+**Stages are independent.** A `prod` model authenticated by a `preprod`
+credential against a `dev` MCP server is an ordinary run, and the answer to
+whether that combination works is exactly the sort of thing this tool exists to
+give you:
+
+```sh
+curl -sS localhost:8787/api/call -H 'content-type: application/json' -d '{
+  "model": "qwen3@prod",
+  "auth": "keycloak-workload@preprod",
+  "mcpServers": ["dev@local"],
+  "prompt": "ping"
+}'
+```
+
+Nothing checks that two files declare the same stage names, because nothing
+should: `prod` on a model and `prod` on a credential are related only by being
+spelled that way.
+
+### What loads, and when it does not
+
+The file is read once per stage, and each reading is a whole entry: the URL is
+parsed, the JSONPaths compile, the header names are checked. A typo in the `prod`
+address is a startup issue naming the file and the stage:
+
+```
+WARN mire::model::loader: model rejected
+  issue=/home/you/.config/mire/config/models/qwen3.yaml: stage `prod`:
+  relative URL without a base
+```
+
+It is all or nothing, per file: a stage that does not expand takes the entry with
+it. A picker quietly missing one stage, with the reason only in the log, is the
+afternoon this is meant to save.
+
+Two stages of one credential are two identities — their own token cache, their
+own browser session — and two stages of one MCP server negotiate their revision
+and hold their session separately. They share a file, and nothing else.
 
 ## More than one configuration directory
 
@@ -121,7 +227,9 @@ pointed at staging for the afternoon. Copying the whole directory to change one
 line means never getting their next change.
 
 Directories are layered in the order given, and **the last one wins**: a name
-declared in more than one belongs to the last directory that declares it. That
+declared in more than one belongs to the last directory that declares it, stages
+and all — an override replaces the entry rather than merging its stages into the
+ones it displaced. That
 is true of every kind of name in there — models, auth providers, MCP servers and
 saved prompts alike, each merged on its own. Names nobody else claimed are simply
 added, so the usual case is a base you leave alone and a short directory of your
