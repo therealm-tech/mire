@@ -18,7 +18,9 @@ testable against something that pushes back rather than against a mock:
   defines, so the client's re-negotiation path is reachable on purpose: restart
   this server under a running `mire` and watch it recover.
 
-`docker-compose.yaml` runs one of each, on 11436 and 11437.
+`docker-compose.yaml` runs one of these, on 11436, at the default revision. Set
+`MCP_REVISION` on that service — quoted, since YAML reads a bare `2025-06-18` as
+a date — to point `mire` at an older one instead.
 
 Three tools, chosen to exercise the paths that matter:
 
@@ -27,6 +29,17 @@ Three tools, chosen to exercise the paths that matter:
                   branch of the client is exercised.
 * `explode`     — always answers `isError: true`, which is a *result* the model
                   is supposed to react to, not a transport failure.
+
+Two plain HTTP routes sit beside the MCP endpoint, and they are not MCP at all —
+they are the third party a hook talks to, so that `config/mcp/weather-hooks.yaml`
+is a pipeline you can watch run rather than a shape to copy:
+
+* `POST /policy` — a policy gate. Answers `403` for a city on the deny list and
+  `200` for everything else, which is what makes a `before` hook's
+  `on_error: fail` visible: the `tools/call` never goes out.
+* `POST /audit` — an audit sink. Records what it was sent and answers `200`.
+  `GET /audit` hands the list back, so what a hook actually posted is one `curl`
+  away instead of a line in a log.
 
 Nothing here is a real MCP server. It is a test pattern, like everything else in
 this directory.
@@ -59,6 +72,17 @@ SENDS_VERSION_HEADER = PROTOCOL_VERSION != "2025-03-26"
 # never expired: losing them all on restart is the interesting failure, and it is
 # free to reproduce.
 SESSIONS = set()
+
+# What `POST /audit` has been sent, oldest first, and what `GET /audit` hands
+# back. In memory and capped: this is a window on the last few runs, not a store.
+AUDIT = []
+AUDIT_KEEP = 50
+
+# The one city `POST /policy` refuses. A gate that never refuses anything proves
+# nothing, and a gate that refuses everything cannot be lived with — so exactly
+# one name is the wrong one, and asking about it is how you see a `before` hook
+# stop a tool call.
+DENIED_CITY = "Mordor"
 
 # `Mcp-Param-*` values that cannot travel as plain ASCII arrive wrapped.
 SENTINEL = re.compile(r"^=\?base64\?(.*)\?=$")
@@ -189,6 +213,11 @@ class Handler(BaseHTTPRequestHandler):
         self.close_connection = True
 
     def do_GET(self):  # noqa: N802 - name fixed by the base class
+        # Not MCP: what the audit sink has been sent, so a hook's effect is
+        # readable from outside the run that caused it.
+        if self.path.rstrip("/") == "/audit":
+            return self._json(200, {"entries": AUDIT})
+
         # `2026-07-28` removed the standalone GET stream outright; the older
         # revisions make it optional and let a server decline with exactly this.
         self.send_response(405)
@@ -196,7 +225,11 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):  # noqa: N802 - name fixed by the base class
-        if self.path.rstrip("/") != "/mcp":
+        route = self.path.rstrip("/")
+        if route in ("/policy", "/audit"):
+            return self._hook_route(route)
+
+        if route != "/mcp":
             return self._error(404, -32601, f"no MCP endpoint at {self.path}")
 
         length = int(self.headers.get("content-length") or 0)
@@ -325,6 +358,28 @@ class Handler(BaseHTTPRequestHandler):
 
         return self._error(404, -32601, f"method not found: {method}", request_id)
 
+    def _hook_route(self, route):
+        """The two routes a hook talks to. Plain HTTP, no JSON-RPC anywhere."""
+        length = int(self.headers.get("content-length") or 0)
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except json.JSONDecodeError as error:
+            return self._json(400, {"error": f"parse error: {error}"})
+
+        if route == "/policy":
+            city = (body.get("arguments") or {}).get("city")
+            if city == DENIED_CITY:
+                print(f"mcp policy refused city={city!r}", flush=True)
+                return self._json(
+                    403, {"allowed": False, "reason": f"{city} is not on the map"}
+                )
+            return self._json(200, {"allowed": True})
+
+        AUDIT.append(body)
+        del AUDIT[:-AUDIT_KEEP]
+        print(f"mcp audit recorded {json.dumps(body)}", flush=True)
+        return self._json(200, {"recorded": len(AUDIT)})
+
     def _tools(self, request_id):
         return self._json(
             200,
@@ -400,7 +455,8 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     shape = "handshake + session" if HANDSHAKES else "sessionless, mirrored headers"
     print(
-        f"mire dev MCP server on :{PORT}/mcp, protocol {PROTOCOL_VERSION} ({shape})",
+        f"mire dev MCP server on :{PORT}/mcp, protocol {PROTOCOL_VERSION} ({shape});"
+        f" hook routes at :{PORT}/policy and :{PORT}/audit",
         flush=True,
     )
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()  # noqa: S104

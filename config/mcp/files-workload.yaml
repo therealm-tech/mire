@@ -1,8 +1,0 @@
-# A workload identity: a real client_credentials exchange, where `mire` discovers
-# the token endpoint, fetches an access token, caches it and renews it before it
-# expires. This answers "what does the pod get?".
-
-# ---
-# name: files-workload
-# url: https://mcp.internal/mcp
-# auth: keycloak-workload
