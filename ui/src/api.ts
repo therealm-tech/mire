@@ -25,13 +25,13 @@ export const loadIssueSchema = z.object({
   column: z.number().nullable(),
 })
 
-export const profileKindSchema = z.enum(['chat', 'embedding'])
+export const modelKindSchema = z.enum(['chat', 'embedding'])
 
-export const profileSummarySchema = z.object({
+export const modelSummarySchema = z.object({
   name: z.string(),
-  kind: profileKindSchema,
+  kind: modelKindSchema,
   /**
-   * Whether this profile takes a typed message.
+   * Whether this model takes a typed message.
    *
    * `false` on an endpoint whose input is not text — a transcriber reading an
    * attachment, a classifier reading a form: the composer then has no box, and
@@ -42,14 +42,14 @@ export const profileSummarySchema = z.object({
   /**
    * The model call's default credential.
    *
-   * Not the MCP servers': theirs are declared in `mcp.yaml`, next to the server,
+   * Not the MCP servers': theirs are declared in `mcp/`, next to the server,
    * and resolved when a tool is actually called.
    */
   auth: z.string().nullable(),
   source: z.string(),
   hasDecode: z.boolean(),
   /**
-   * Whether a call to this profile has to carry a file.
+   * Whether a call to this model has to carry a file.
    *
    * The server refuses one that does not, whichever endpoint it arrives at, so
    * this is here to say it before **Send** rather than to be the rule.
@@ -57,16 +57,16 @@ export const profileSummarySchema = z.object({
   requiresUpload: z.boolean(),
 })
 
-export const profilesResponseSchema = z.object({
-  profiles: z.array(profileSummarySchema),
+export const modelsResponseSchema = z.object({
+  models: z.array(modelSummarySchema),
   issues: z.array(loadIssueSchema),
 })
 
 /**
- * One saved prompt, as `prompts.yaml` declares it.
+ * One saved prompt, as `prompts/` declares it.
  *
  * A name and its text, and nothing else: what a message becomes on the wire is
- * still the profile's template's decision, so a prompt has nothing to say about
+ * still the model's template's decision, so a prompt has nothing to say about
  * where it goes.
  */
 export const promptSchema = z.object({
@@ -116,7 +116,7 @@ export const authResponseSchema = z.object({
 /**
  * One MCP server, as declared.
  *
- * Its credential is settled here, in `mcp.yaml`, and resolved when a tool is
+ * Its credential is settled here, in `mcp/`, and resolved when a tool is
  * actually called — so it is described rather than chosen: `auth` names a
  * provider outright, `usesAuth` names the ones its header templates read, and a
  * server with neither talks to its endpoint anonymously.
@@ -272,7 +272,7 @@ export const decodeTraceSchema = z.object({
 })
 
 /**
- * What the endpoint said went wrong, when the profile's `decode.error` cascade
+ * What the endpoint said went wrong, when the model's `decode.error` cascade
  * found it saying so.
  *
  * Beside the decoded answer rather than inside it, and independent of the
@@ -330,7 +330,7 @@ const responseViewSchema = z.object({
  * a panel repeating them would cost everything and tell the reader nothing.
  */
 export const partViewSchema = z.object({
-  /** The form field it went out under, as the profile named it. */
+  /** The form field it went out under, as the model named it. */
   field: z.string(),
   contentType: z.string().optional(),
   /** A text field's value, masked. Absent for a file. */
@@ -342,7 +342,7 @@ export const partViewSchema = z.object({
 })
 
 export const callOutcomeSchema = z.object({
-  profile: z.string(),
+  model: z.string(),
   auth: z.string(),
   request: z.object({
     method: z.string(),
@@ -442,7 +442,7 @@ export const mcpExchangeSchema = z.object({
  * the panel everything and tell the reader nothing.
  */
 export const attachmentSchema = z.object({
-  /** The form field it went out under, as `mcp.yaml` named it. */
+  /** The form field it went out under, as the file named it. */
   field: z.string(),
   id: z.string(),
   name: z.string(),
@@ -501,19 +501,19 @@ export const turnSchema = z.object({
   tools: z.array(toolInvocationSchema),
   /**
    * What the tools above cost in JSON-RPC. Omitted entirely when there was none,
-   * which is every turn of a profile with no MCP server.
+   * which is every turn of a model with no MCP server.
    */
   mcp: z.array(mcpExchangeSchema).default([]),
   /**
    * Every hook that fired around the tools above. Omitted entirely when a server
-   * declares none, which is every profile that never asked for one.
+   * declares none, which is every model that never asked for one.
    */
   hooks: z.array(hookRecordSchema).default([]),
   decision: decisionSchema,
 })
 
 export const traceSchema = z.object({
-  profile: z.string(),
+  model: z.string(),
   auth: z.string(),
   /** What listing the tools cost, before the first prompt was spent. */
   setup: z.array(mcpExchangeSchema).default([]),
@@ -555,9 +555,9 @@ export const errorBodySchema = z.object({
 })
 
 export type LoadIssue = z.infer<typeof loadIssueSchema>
-export type ProfileKind = z.infer<typeof profileKindSchema>
-export type ProfileSummary = z.infer<typeof profileSummarySchema>
-export type ProfilesResponse = z.infer<typeof profilesResponseSchema>
+export type ModelKind = z.infer<typeof modelKindSchema>
+export type ModelSummary = z.infer<typeof modelSummarySchema>
+export type ModelsResponse = z.infer<typeof modelsResponseSchema>
 export type Prompt = z.infer<typeof promptSchema>
 export type PromptsResponse = z.infer<typeof promptsResponseSchema>
 export type AuthDescriptor = z.infer<typeof authDescriptorSchema>
@@ -589,9 +589,9 @@ export type ErrorBody = z.infer<typeof errorBodySchema>
 
 /** What a call needs. Mirrors `CallRequest` on the server. */
 export interface CallRequest {
-  profile: string
+  model: string
   /**
-   * Overrides the profile's `auth:`. The UI never sends it — the profile is
+   * Overrides the model's `auth:`. The UI never sends it — the model is
    * where the identity is declared, and a second copy on the wire is a second
    * thing to keep in step.
    */
@@ -615,7 +615,7 @@ export interface CallRequest {
    * Ids of stored files, from `uploadFile`.
    *
    * They reach the template as `uploads`, whole. Like `stream`, they only reach
-   * the wire if the profile's template says so — sending one changes nothing
+   * the wire if the model's template says so — sending one changes nothing
    * about a template that never mentions them.
    */
   uploads?: string[]
@@ -672,8 +672,8 @@ async function request<T>(path: string, schema: z.ZodType<T>, init?: RequestInit
   return parsed.data
 }
 
-export function fetchProfiles(): Promise<ProfilesResponse> {
-  return request('api/profiles', profilesResponseSchema)
+export function fetchModels(): Promise<ModelsResponse> {
+  return request('api/models', modelsResponseSchema)
 }
 
 export function fetchPrompts(): Promise<PromptsResponse> {
@@ -765,9 +765,9 @@ export interface AgentRequest extends CallRequest {
   /**
    * Which of the declared MCP servers this run may reach.
    *
-   * Left out when every one of them is on, which is what `mcp.yaml` says.
+   * Left out when every one of them is on, which is what `mcp/` says.
    * Sending a shorter list narrows the run to those — `[]` included, which is a
-   * loop offering the model no live tool at all. A name `mcp.yaml` does not
+   * loop offering the model no live tool at all. A name `mcp/` does not
    * declare is a `404`: the opt-in is the declaration, and a tab cannot write
    * one.
    */
@@ -776,7 +776,7 @@ export interface AgentRequest extends CallRequest {
    * Revision to speak to every MCP server this run touches.
    *
    * Left out for `auto`, which is each server settling its own the way it always
-   * did: `protocol_version:` from `mcp.yaml` when it has one, the negotiation
+   * did: `protocol_version:` from `mcp/` when it has one, the negotiation
    * otherwise. Naming one overrides both, for this run alone.
    */
   mcpProtocol?: string

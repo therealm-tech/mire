@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import type { AuthDescriptor, McpDescriptor, ProfileSummary } from './api'
+import type { AuthDescriptor, McpDescriptor, ModelSummary } from './api'
 import { preflight, reaches } from './preflight'
 
-const PROFILE: ProfileSummary = {
+const MODEL: ModelSummary = {
   name: 'chat',
   kind: 'chat',
   url: 'https://models.internal/v1/chat/completions',
@@ -22,12 +22,12 @@ const PROVIDER: AuthDescriptor = {
 }
 
 function run(overrides: {
-  profile?: Partial<ProfileSummary>
+  model?: Partial<ModelSummary>
   provider?: Partial<AuthDescriptor> | undefined
   providers?: AuthDescriptor[]
   servers?: McpDescriptor[]
   token?: string
-  /** A chat profile with servers unless a test says otherwise. */
+  /** A chat model with servers unless a test says otherwise. */
   usesMcp?: boolean
   uploads?: number
   mcpOff?: string[]
@@ -38,7 +38,7 @@ function run(overrides: {
       : { ...PROVIDER, ...overrides.provider }
 
   return preflight({
-    profile: { ...PROFILE, ...overrides.profile },
+    model: { ...MODEL, ...overrides.model },
     provider,
     providers: overrides.providers ?? (provider ? [provider] : []),
     servers: overrides.servers ?? [],
@@ -66,48 +66,48 @@ const TWO_SERVERS: McpDescriptor[] = [
 
 describe('reaches', () => {
   it('lets a credential with no allowed_hosts go anywhere', () => {
-    expect(reaches(PROVIDER, PROFILE)).toBe(true)
+    expect(reaches(PROVIDER, MODEL)).toBe(true)
   })
 
   it('refuses a host the credential was not pinned to', () => {
-    expect(reaches({ ...PROVIDER, allowedHosts: ['127.0.0.1'] }, PROFILE)).toBe(false)
+    expect(reaches({ ...PROVIDER, allowedHosts: ['127.0.0.1'] }, MODEL)).toBe(false)
   })
 })
 
 describe('preflight', () => {
-  it('clears a profile whose identity is resolved and unconstrained', () => {
+  it('clears a model whose identity is resolved and unconstrained', () => {
     const state = run({})
     expect(state.blockers).toEqual([])
     expect(state.identity).toBe('token')
     expect(state.url).toBe('https://models.internal/v1/chat/completions')
   })
 
-  it('blocks on an identity no auth.yaml entry declares', () => {
-    const state = run({ provider: undefined, profile: { auth: 'ghost' } })
+  it('blocks on an identity no provider declares', () => {
+    const state = run({ provider: undefined, model: { auth: 'ghost' } })
     expect(state.blockers).toHaveLength(1)
     expect(state.blockers[0]?.message).toContain('ghost')
     // Nothing to press: the fix is in a file, not in this tab.
     expect(state.blockers[0]?.signIn).toBeUndefined()
   })
 
-  it('blocks a requires_upload profile until a file is attached', () => {
-    const empty = run({ profile: { name: 'whisper', requiresUpload: true } })
+  it('blocks a requires_upload model until a file is attached', () => {
+    const empty = run({ model: { name: 'whisper', requiresUpload: true } })
     expect(empty.blockers).toHaveLength(1)
     expect(empty.blockers[0]?.message).toContain('whisper')
     // The fix is a button on the composer, not one on the bar.
     expect(empty.blockers[0]?.needsUpload).toBe(true)
     expect(empty.blockers[0]?.signIn).toBeUndefined()
 
-    // Any file clears it: the profile asked for one, not for a particular one.
-    expect(run({ profile: { requiresUpload: true }, uploads: 1 }).blockers).toEqual([])
+    // Any file clears it: the model asked for one, not for a particular one.
+    expect(run({ model: { requiresUpload: true }, uploads: 1 }).blockers).toEqual([])
   })
 
-  it('says nothing about attachments a profile never asked for', () => {
+  it('says nothing about attachments a model never asked for', () => {
     expect(run({ uploads: 0 }).blockers).toEqual([])
     expect(run({ uploads: 3 }).blockers).toEqual([])
   })
 
-  it('blocks a credential pinned away from where the profile points', () => {
+  it('blocks a credential pinned away from where the model points', () => {
     const state = run({ provider: { allowedHosts: ['127.0.0.1'] } })
     expect(state.blockers[0]?.message).toContain('models.internal')
   })
@@ -152,9 +152,9 @@ describe('preflight', () => {
     expect(signedIn.blockers).toEqual([])
   })
 
-  it('offers every declared server to a profile that says nothing about them', () => {
-    // There is no per-profile opt-in left to read: `mcp.yaml` declares a server
-    // and every chat profile is offered it.
+  it('offers every declared server to a model that says nothing about them', () => {
+    // There is no per-model opt-in left to read: `mcp/` declares a server
+    // and every chat model is offered it.
     const state = run({
       servers: [
         { name: 'files', url: 'https://a', tools: [], headers: [], usesAuth: [] },
@@ -170,7 +170,7 @@ describe('preflight', () => {
     // With the servers in the run both are its business, and both want a session.
     expect(run(overrides).blockers).toHaveLength(2)
 
-    // On an embedding profile neither is. There is no loop, so a credential it
+    // On an embedding model neither is. There is no loop, so a credential it
     // never uses cannot refuse it — and the bar stays green, correctly.
     const loopless = run({ ...overrides, usesMcp: false })
     expect(loopless.blockers).toEqual([])
@@ -203,7 +203,7 @@ describe('preflight', () => {
 
   it('ignores a switched-off name that nothing declares any more', () => {
     // `mcpOff` outlives a reload, and so outlives the entry it was about. A name
-    // deleted from `mcp.yaml` is simply not in the picture — not a server this
+    // deleted from `mcp/` is simply not in the picture — not a server this
     // run reports having left out.
     const state = run({ servers: TWO_SERVERS, mcpOff: ['deleted'] })
     expect(state.servers).toEqual(['files', 'search'])
@@ -219,7 +219,7 @@ describe('preflight', () => {
   })
 
   it('counts a missing decode block as a note rather than a refusal', () => {
-    const state = run({ profile: { hasDecode: false } })
+    const state = run({ model: { hasDecode: false } })
     expect(state.blockers).toEqual([])
     expect(state.notes).toHaveLength(1)
   })

@@ -53,7 +53,7 @@ use super::{McpClient, McpCredentials, McpError, Revision};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum Settled {
-    /// `protocol_version:` in `mcp.yaml`. Nothing was asked.
+    /// `protocol_version:` in `mcp/`. Nothing was asked.
     Pinned,
     /// The server listed its versions through `server/discover`.
     Discovered,

@@ -5,12 +5,12 @@ import { Badge } from './primitives'
  *
  * Not the endpoint failing — that is a result, and it goes in the traffic with a
  * status next to it. This is the one case where there is no result at all: a
- * profile that would not resolve, a credential that could not be fetched, a
+ * model that would not resolve, a credential that could not be fetched, a
  * connection that was never made.
  *
  * One component because it is one kind of event. Chat rendered it inline and
  * embedding rendered it as a panel with a different sentence on it, so the same
- * failure looked like two different things depending on which profile you had
+ * failure looked like two different things depending on which model you had
  * selected.
  */
 export function Failure({ error }: { error: { code: string; message: string; detail?: unknown } }) {

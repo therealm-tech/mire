@@ -3,16 +3,16 @@ import { Button } from './primitives'
 /**
  * Which of the declared MCP servers this run is allowed to reach.
  *
- * `mcp.yaml` decides which servers exist at all — that is the opt-in, and the
+ * `mcp/` decides which servers exist at all — that is the opt-in, and the
  * whole of it, because a tool call here really runs somewhere. Every one it
- * declares is then offered to every `kind: chat` profile. This only ever takes
+ * declares is then offered to every `kind: chat` model. This only ever takes
  * one *out* of the run in front of you, which is the question the file is bad at
  * answering: "does the model still get there without the search tool?", "is this
  * server the thing that has been failing for ten minutes?". Both used to mean
  * editing a file and putting it back.
  *
  * **All** and **None** are the same question asked of the whole list. With every
- * declared server offered to every profile there can be a good few of them, and
+ * declared server offered to every model there can be a good few of them, and
  * "what does the loop do with none of these?" is worth one click rather than six
  * — as is putting them all back afterwards.
  *
@@ -85,7 +85,7 @@ export function McpServers({
 
         <span className="text-[11px] text-faint">
           {on.length === names.length
-            ? 'All of them, as mcp.yaml declares. Untick one to leave it out of this run.'
+            ? 'All of them, as mcp/ declares. Untick one to leave it out of this run.'
             : on.length === 0
               ? 'None: nothing is set up, and the model is offered no live tool.'
               : `Off for this run: ${names.filter((name) => off.includes(name)).join(', ')}.`}

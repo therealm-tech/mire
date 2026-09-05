@@ -4,12 +4,12 @@
 #
 #   docker build -t mire:0.1.0 .
 #   docker run --rm --read-only -p 127.0.0.1:8787:8787 \
-#     -v "$PWD/profiles:/etc/mire/profiles:ro" mire:0.1.0
+#     -v "$PWD/config:/etc/mire/config:ro" mire:0.1.0
 #
-# The profiles are **mounted, not baked in**. They are the input to the tool, not
-# part of it: an image carrying `profiles/` would ship endpoints pointing at
+# The configuration is **mounted, not baked in**. It is the input to the tool,
+# not part of it: an image carrying `config/` would ship endpoints pointing at
 # somebody else's laptop, and a new endpoint to test would mean a new image.
-# `/etc/mire/profiles` exists in the image so that a run without a mount starts
+# `/etc/mire/config` exists in the image so that a run without a mount starts
 # cleanly with nothing to offer, rather than failing on a missing directory.
 #
 # `--read-only` above is not a leftover: the process writes nothing until a file
@@ -68,11 +68,11 @@ COPY --from=planner /usr/local/src/mire/recipe.json recipe.json
 RUN cargo chef cook --release --locked --recipe-path recipe.json
 COPY . .
 COPY --from=ui /usr/local/src/mire/ui/dist ui/dist
-# The empty profiles directory is built here for the same reason everything else
-# is: the runtime image has no shell to create it with, and no writable root to
-# create it in later.
+# The empty configuration directory is built here for the same reason everything
+# else is: the runtime image has no shell to create it with, and no writable root
+# to create it in later.
 RUN cargo build --release --locked \
-    && mkdir -p /out/etc/mire/profiles
+    && mkdir -p /out/etc/mire/config
 
 # --- the runtime -------------------------------------------------------------
 #
@@ -96,7 +96,7 @@ COPY --from=builder --chown=65532:65532 /out/etc/mire /etc/mire
 # the binary directly.
 ENV HOST=0.0.0.0 \
     PORT=8787 \
-    PROFILES_DIR=/etc/mire/profiles \
+    CONFIG_DIR=/etc/mire/config \
     LOG_FILTER=info
 
 USER 65532:65532

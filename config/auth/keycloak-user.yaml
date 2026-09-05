@@ -1,0 +1,19 @@
+# The other half of the question `keycloak-workload.yaml` asks. A browser opens,
+# you sign in as mire / mire, and the access token is yours rather than a service
+# account's.
+#
+# No secret: this is a public client, and PKCE is what makes that safe.
+#
+# The callback is worked out from the URL your browser is on, so this works
+# unchanged behind a notebook proxy. Keycloak has `http://127.0.0.1:8787/*`
+# registered; if you run `mire` on another port or host, add it to the `mire-ui`
+# client in dev/keycloak/realm-mire.json — a redirect URI the identity provider
+# does not know about is refused, by design.
+---
+name: keycloak-user
+kind: oidc_browser
+issuer: http://127.0.0.1:8080/realms/mire
+client_id: mire-ui
+scope:
+  - openid
+  - profile

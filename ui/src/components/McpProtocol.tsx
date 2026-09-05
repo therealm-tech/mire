@@ -4,12 +4,12 @@
  * `mire` settles a revision per server, once, by asking — and that is the right
  * default, which is why **Auto** is one. But the revision is also a thing worth
  * testing on purpose: "does this endpoint still work on `2025-03-26`?" used to
- * mean editing `mcp.yaml`, restarting, running, and putting it back. Here it is a
+ * mean editing `mcp/`, restarting, running, and putting it back. Here it is a
  * dropdown, and the choice covers exactly one run.
  *
- * It applies to every server the profile names, because a run is the unit being
+ * It applies to every server the model names, because a run is the unit being
  * observed: mixing revisions across servers within one trace would produce a
- * result nobody could attribute. `mcp.yaml` is still where a per-server pin
+ * result nobody could attribute. `mcp/` is still where a per-server pin
  * belongs, and **Auto** is what leaves it in charge.
  */
 export function McpProtocol({
@@ -19,7 +19,7 @@ export function McpProtocol({
   onSelect,
 }: {
   revisions: string[]
-  /** `null` is auto — negotiate, or honour whatever `mcp.yaml` pinned. */
+  /** `null` is auto — negotiate, or honour whatever `mcp/` pinned. */
   selected: string | null
   disabled: boolean
   onSelect: (revision: string | null) => void
@@ -45,7 +45,7 @@ export function McpProtocol({
       </select>
       <span className="text-[11px] text-faint">
         {selected === null
-          ? 'Negotiated per server, unless mcp.yaml pins one.'
+          ? 'Negotiated per server, unless mcp/ pins one.'
           : 'Stated outright: no probe, and a server that refuses it says so.'}
       </span>
     </div>

@@ -1,0 +1,20 @@
+# A real client_credentials exchange against the Keycloak in the compose stack.
+# `mire` discovers the token endpoint, fetches an access token, caches it, and
+# renews it 60s before it expires.
+#
+#   export OIDC_CLIENT_SECRET=mire-dev-secret
+#
+# The secret is a development constant declared in dev/keycloak/realm-mire.json;
+# it still does not go in this file.
+#
+# This answers "what does the pod get?"; `keycloak-user.yaml` answers "what do I
+# get?".
+---
+name: keycloak-workload
+kind: oidc
+issuer: http://127.0.0.1:8080/realms/mire
+client_id: mire-workload
+client_secret:
+  env: OIDC_CLIENT_SECRET
+scope:
+  - openid

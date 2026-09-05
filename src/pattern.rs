@@ -1,7 +1,7 @@
 //! A regex matched against a whole name.
 //!
-//! Two places name tools by pattern — a hook's `tools:` in `mcp.yaml` and a
-//! capture rule's `tools:` in a profile — and both mean the same thing by it, so
+//! Two places name tools by pattern — a hook's `tools:` in `mcp/` and a
+//! capture rule's `tools:` in a model — and both mean the same thing by it, so
 //! both compile the same type rather than each anchoring a regex its own way.
 //!
 //! # Why anchored
@@ -74,7 +74,7 @@ impl NamePattern {
     }
 }
 
-/// Compiled on the way in, exactly like [`crate::profile::JsonPathExpr`]: a
+/// Compiled on the way in, exactly like [`crate::model::JsonPathExpr`]: a
 /// typo is a startup issue naming the file and the field, not a rule that
 /// silently matches nothing at call time.
 impl<'de> Deserialize<'de> for NamePattern {

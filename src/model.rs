@@ -1,4 +1,4 @@
-//! Profiles: one YAML file per model endpoint.
+//! Models: one YAML file per model endpoint.
 //!
 //! The file on disk is the source of truth. `mire` only ever reads it — editing
 //! happens in your editor, and [`crate::config::ConfigStore`] picks the change up.
@@ -17,14 +17,14 @@ use validator::{Validate, ValidationError};
 
 use crate::script::ScriptSource;
 
-/// Default request timeout when a profile does not set `timeout_ms`.
+/// Default request timeout when a model does not set `timeout_ms`.
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
 /// What the endpoint is expected to do, which decides the request template
 /// variables, the normalised output shape, and the assertions that apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum ProfileKind {
+pub enum ModelKind {
     /// Question in, answer out. Decodes to [`crate::decode::Completion`].
     Chat,
     /// Text in, vectors out. Decodes to [`crate::decode::Embedding`].
@@ -140,7 +140,7 @@ pub enum RequestSource<'a> {
 #[serde(deny_unknown_fields)]
 #[validate(schema(function = exactly_one_request_source))]
 pub struct RequestSpec {
-    /// `MiniJinja` template rendered against `messages`, `input`, `tools`, `model`
+    /// `MiniJinja` template rendered against `messages`, `input`, `tools`, `model_id`
     /// and `params`. Must render to valid JSON.
     #[serde(default)]
     pub template: Option<String>,
@@ -194,7 +194,7 @@ impl MultipartSpec {
 /// One field of a multipart body.
 #[derive(Debug, Clone)]
 pub struct PartSpec {
-    /// The form field, as the profile named it.
+    /// The form field, as the model named it.
     pub field: String,
     /// What it carries.
     pub part: PartKind,
@@ -226,7 +226,7 @@ pub enum PartKind {
         sources: Vec<String>,
         /// `content-type` of the part, overriding the one guessed from the
         /// extension. The guess is an extension lookup and nothing more; a
-        /// profile that knows better says so.
+        /// model that knows better says so.
         media_type: Option<String>,
         /// `filename` of the part, overriding the stored name.
         ///
@@ -611,7 +611,7 @@ pub struct DecodeSpec {
     /// Rhai script replacing the cascades entirely, for a response no set of
     /// paths can describe. It receives `raw`, `status` and `headers`, and returns
     /// a map: `content` / `tool_calls` / `finish_reason` / `usage` for a chat
-    /// profile, `vectors` / `usage` for an embedding one.
+    /// model, `vectors` / `usage` for an embedding one.
     #[serde(default)]
     pub script: Option<ScriptSource>,
     /// Assistant text. `kind: chat`.
@@ -622,10 +622,10 @@ pub struct DecodeSpec {
     /// Streaming needs its own cascade because the chunk shape is not the whole
     /// response's: `OpenAI` moves the text from `message.content` to
     /// `delta.content`, and Ollama's native API keeps `message.content` but sends
-    /// one object per line. Without this, a profile streams and decodes nothing.
+    /// one object per line. Without this, a model streams and decodes nothing.
     ///
     /// A `decode.script` replaces the cascades for a whole body; it is not run
-    /// per chunk, so a scripted profile streams without text deltas.
+    /// per chunk, so a scripted model streams without text deltas.
     #[serde(default)]
     pub delta: Vec<JsonPathExpr>,
     /// Tool calls emitted by the model. `kind: chat`.
@@ -652,7 +652,7 @@ pub struct DecodeSpec {
 }
 
 impl DecodeSpec {
-    /// Returns `true` when nothing is configured at all — the state of a profile
+    /// Returns `true` when nothing is configured at all — the state of a model
     /// you have not taught to decode yet, which is valid.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -806,13 +806,13 @@ pub struct ExpectSpec {
 /// One model endpoint, as declared in one YAML file.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Validate)]
 #[serde(deny_unknown_fields)]
-pub struct Profile {
+pub struct Model {
     /// Identifier used in the API and the UI. Must be unique across the directory.
-    #[validate(length(min = 1, message = "a profile needs a name"))]
+    #[validate(length(min = 1, message = "a model needs a name"))]
     pub name: String,
     /// What the endpoint does.
-    pub kind: ProfileKind,
-    /// Whether a call to this profile carries something somebody typed.
+    pub kind: ModelKind,
+    /// Whether a call to this model carries something somebody typed.
     ///
     /// True by default, because a chat endpoint's input is a question. `false`
     /// is for the endpoints whose input is not text at all — a transcriber
@@ -821,7 +821,7 @@ pub struct Profile {
     /// staying greyed out waiting for words nobody has to write.
     ///
     /// It says nothing about the wire. What goes out is still whatever the
-    /// template asks for, and a template reading `messages` on a profile
+    /// template asks for, and a template reading `messages` on a model
     /// declaring `has_prompt: false` renders against an empty list — which is
     /// the same rule `uploads` and `stream` follow.
     #[serde(default = "default_true")]
@@ -842,16 +842,16 @@ pub struct Profile {
     pub timeout_ms: u64,
     /// Refuse a call that attaches no file.
     ///
-    /// For the profiles whose input *is* the file — a transcriber, a diariser, an
+    /// For the models whose input *is* the file — a transcriber, a diariser, an
     /// OCR service — where a call with nothing attached has no question in it at
     /// all. The refusal happens here, before anything leaves the process, and it
-    /// names this profile: an endpoint asked to read a form with no file in it
+    /// names this model: an endpoint asked to read a form with no file in it
     /// answers `422` about a field of its own, and reading that back costs an
     /// afternoon.
     ///
     /// It says the call must carry *a* file, not which one. What the template or
-    /// the form does with `uploads` is still the profile's business, and a
-    /// `request:` that never mentions them is a profile asking for a file it then
+    /// the form does with `uploads` is still the model's business, and a
+    /// `request:` that never mentions them is a model asking for a file it then
     /// throws away — which this does not check, because the recipe is the thing
     /// that decides and it is right there in the same file.
     #[serde(default)]
@@ -874,12 +874,12 @@ pub struct Profile {
     /// Expected response shape.
     #[serde(default)]
     pub expect: ExpectSpec,
-    /// File this profile was read from. Set by the loader, never present in YAML.
+    /// File this model was read from. Set by the loader, never present in YAML.
     #[serde(skip_deserializing, default)]
     pub source: PathBuf,
 }
 
-impl Profile {
+impl Model {
     /// The configured timeout.
     #[must_use]
     pub fn timeout(&self) -> Duration {
@@ -932,26 +932,26 @@ tools:
 "#;
 
     #[test]
-    fn parses_a_chat_profile() {
-        let profile: Profile = serde_yaml_ng::from_str(CHAT_YAML).unwrap();
-        assert_eq!(profile.kind, ProfileKind::Chat);
-        assert_eq!(profile.method, HttpMethod::Post);
-        assert_eq!(profile.timeout(), Duration::from_secs(30));
-        assert_eq!(profile.decode.content.len(), 2);
+    fn parses_a_chat_model() {
+        let model: Model = serde_yaml_ng::from_str(CHAT_YAML).unwrap();
+        assert_eq!(model.kind, ModelKind::Chat);
+        assert_eq!(model.method, HttpMethod::Post);
+        assert_eq!(model.timeout(), Duration::from_secs(30));
+        assert_eq!(model.decode.content.len(), 2);
         assert_eq!(
-            profile.decode.content[0].source(),
+            model.decode.content[0].source(),
             "$.choices[0].message.content"
         );
-        assert_eq!(profile.decode.error[1].source(), "$.detail");
-        assert_eq!(profile.tools[0].name, "get_weather");
+        assert_eq!(model.decode.error[1].source(), "$.detail");
+        assert_eq!(model.tools[0].name, "get_weather");
         // Declared without `repeated_call`, so the loop does not watch for one.
-        assert!(!profile.agent.as_ref().unwrap().stop_when.repeated_call);
+        assert!(!model.agent.as_ref().unwrap().stop_when.repeated_call);
         // Nor with `requires_upload`, so a call with nothing attached is a call.
-        assert!(!profile.requires_upload);
-        profile.validate().unwrap();
+        assert!(!model.requires_upload);
+        model.validate().unwrap();
     }
 
-    /// The one profile-level rule about the *call* rather than about the wire:
+    /// The one model-level rule about the *call* rather than about the wire:
     /// off unless the file says otherwise, and a plain boolean when it does.
     #[test]
     fn requiring_a_file_is_opt_in() {
@@ -960,9 +960,9 @@ tools:
             "timeout_ms: 30000\nrequires_upload: true",
         );
 
-        let profile: Profile = serde_yaml_ng::from_str(&yaml).unwrap();
-        assert!(profile.requires_upload);
-        profile.validate().unwrap();
+        let model: Model = serde_yaml_ng::from_str(&yaml).unwrap();
+        assert!(model.requires_upload);
+        model.validate().unwrap();
     }
 
     #[test]
@@ -972,16 +972,16 @@ tools:
             "    finish_reason_in: [stop, end_turn]\n    repeated_call: true",
         );
 
-        let profile: Profile = serde_yaml_ng::from_str(&yaml).unwrap();
-        assert!(profile.agent.unwrap().stop_when.repeated_call);
+        let model: Model = serde_yaml_ng::from_str(&yaml).unwrap();
+        assert!(model.agent.unwrap().stop_when.repeated_call);
     }
 
     #[test]
-    fn a_profile_takes_a_prompt_unless_it_says_otherwise() {
-        let profile: Profile = serde_yaml_ng::from_str(CHAT_YAML).unwrap();
+    fn a_model_takes_a_prompt_unless_it_says_otherwise() {
+        let model: Model = serde_yaml_ng::from_str(CHAT_YAML).unwrap();
         assert!(
-            profile.has_prompt,
-            "a profile saying nothing about it is a profile with a question to ask"
+            model.has_prompt,
+            "a model saying nothing about it is a model with a question to ask"
         );
 
         // What a transcriber declares: the input is the file, so there is nothing
@@ -996,13 +996,13 @@ request:
     file:
       upload: '{{ uploads[0] }}'
 ";
-        let profile: Profile = serde_yaml_ng::from_str(yaml).unwrap();
-        assert!(!profile.has_prompt);
-        profile.validate().unwrap();
+        let model: Model = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(!model.has_prompt);
+        model.validate().unwrap();
     }
 
     #[test]
-    fn a_profile_without_decode_is_valid() {
+    fn a_model_without_decode_is_valid() {
         let yaml = r#"
 name: unknown-shape
 kind: chat
@@ -1010,9 +1010,9 @@ url: https://models.internal/whatever
 request:
   template: '{"prompt": {{ messages | tojson }}}'
 "#;
-        let profile: Profile = serde_yaml_ng::from_str(yaml).unwrap();
-        assert!(profile.decode.is_empty());
-        assert!(profile.auth.is_none());
+        let model: Model = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(model.decode.is_empty());
+        assert!(model.auth.is_none());
     }
 
     #[test]
@@ -1025,7 +1025,7 @@ timout_ms: 1000
 request:
   template: '{}'
 ";
-        let error = serde_yaml_ng::from_str::<Profile>(yaml).unwrap_err();
+        let error = serde_yaml_ng::from_str::<Model>(yaml).unwrap_err();
         assert!(error.to_string().contains("timout_ms"), "{error}");
     }
 
@@ -1040,30 +1040,30 @@ request:
 decode:
   content: ["not a json path"]
 "#;
-        let error = serde_yaml_ng::from_str::<Profile>(yaml).unwrap_err();
+        let error = serde_yaml_ng::from_str::<Model>(yaml).unwrap_err();
         // The point is that the failure names the offending field, so the loader can
         // point at a file and a key rather than at "somewhere in your YAML".
         assert!(error.to_string().contains("decode.content"), "{error}");
     }
 
-    /// A profile whose `request.multipart:` is the given YAML fragment, parsed
+    /// A model whose `request.multipart:` is the given YAML fragment, parsed
     /// and validated the way the loader does it.
-    fn with_multipart(fields: &str) -> Result<Profile, String> {
+    fn with_multipart(fields: &str) -> Result<Model, String> {
         let yaml = format!(
             "name: transcribe\nkind: chat\nurl: https://models.internal/v1/audio/transcriptions\nrequest:\n  multipart:\n{fields}"
         );
-        let profile: Profile = serde_yaml_ng::from_str(&yaml).map_err(|error| error.to_string())?;
-        profile.validate().map_err(|error| error.to_string())?;
-        Ok(profile)
+        let model: Model = serde_yaml_ng::from_str(&yaml).map_err(|error| error.to_string())?;
+        model.validate().map_err(|error| error.to_string())?;
+        Ok(model)
     }
 
     #[test]
     fn a_scalar_field_is_a_text_part_and_upload_makes_it_a_file() {
-        let profile =
+        let model =
             with_multipart("    model: whisper-1\n    file:\n      upload: '{{ uploads[0] }}'\n")
                 .expect("it loads");
 
-        let RequestSource::Multipart(spec) = profile.request.source().unwrap() else {
+        let RequestSource::Multipart(spec) = model.request.source().unwrap() else {
             panic!("a multipart source");
         };
         let parts = spec.parts();
@@ -1087,8 +1087,8 @@ decode:
     /// the parse.
     #[test]
     fn the_field_order_survives_loading() {
-        let profile = with_multipart("    z: 1\n    a: 2\n    m: 3\n").expect("it loads");
-        let RequestSource::Multipart(spec) = profile.request.source().unwrap() else {
+        let model = with_multipart("    z: 1\n    a: 2\n    m: 3\n").expect("it loads");
+        let RequestSource::Multipart(spec) = model.request.source().unwrap() else {
             panic!("a multipart source");
         };
 
@@ -1100,10 +1100,9 @@ decode:
     /// either way. Refusing the number would be refusing the natural spelling.
     #[test]
     fn a_knob_can_be_written_as_a_number_or_a_boolean() {
-        let profile =
-            with_multipart("    temperature: 0.2\n    speakers: 2\n    translate: false\n")
-                .expect("it loads");
-        let RequestSource::Multipart(spec) = profile.request.source().unwrap() else {
+        let model = with_multipart("    temperature: 0.2\n    speakers: 2\n    translate: false\n")
+            .expect("it loads");
+        let RequestSource::Multipart(spec) = model.request.source().unwrap() else {
             panic!("a multipart source");
         };
 
@@ -1156,8 +1155,8 @@ decode:
     #[test]
     fn a_multipart_beside_a_template_is_refused_at_load() {
         let yaml = "name: t\nkind: chat\nurl: https://models.internal/v1\nrequest:\n  template: '{}'\n  multipart:\n    model: whisper-1\n";
-        let profile: Profile = serde_yaml_ng::from_str(yaml).unwrap();
-        let error = profile.validate().unwrap_err().to_string();
+        let model: Model = serde_yaml_ng::from_str(yaml).unwrap();
+        let error = model.validate().unwrap_err().to_string();
         assert!(error.contains("a request is one body"), "{error}");
     }
 
@@ -1165,8 +1164,8 @@ decode:
     fn an_empty_multipart_is_refused_at_load() {
         let yaml =
             "name: t\nkind: chat\nurl: https://models.internal/v1\nrequest:\n  multipart: {}\n";
-        let profile: Profile = serde_yaml_ng::from_str(yaml).unwrap();
-        let error = profile.validate().unwrap_err().to_string();
+        let model: Model = serde_yaml_ng::from_str(yaml).unwrap();
+        let error = model.validate().unwrap_err().to_string();
         assert!(error.contains("declares no field"), "{error}");
     }
 }

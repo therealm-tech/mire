@@ -47,7 +47,7 @@ Object.defineProperty(window, 'localStorage', {
  * A laptop, which is what a tool you run next to your work is looked at on.
  *
  * jsdom ships no `matchMedia`, and the layout asks it whether there is room for
- * the profile column. The narrow case overrides this in its own test.
+ * the model column. The narrow case overrides this in its own test.
  */
 Object.defineProperty(window, 'matchMedia', {
   configurable: true,

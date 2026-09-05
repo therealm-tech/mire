@@ -1,0 +1,15 @@
+# Any non-empty credential gets past the gateway in the compose stack, which
+# only checks presence. Real endpoints will not be so forgiving — that is the
+# point of also having `keycloak-workload.yaml` next door.
+#
+#   export MODEL_TOKEN=anything
+#
+# No credential is ever written in one of these files: this one says where to
+# find it, and nothing more. Which is what makes the directory safe to commit.
+---
+name: static-token
+kind: token
+value:
+  env: MODEL_TOKEN
+allowed_hosts:
+  - 127.0.0.1

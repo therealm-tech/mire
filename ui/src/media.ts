@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 /**
  * Whether a media query holds, and whether it still does.
  *
- * Used for one thing: the profile list is a column on a laptop and a fold-away
+ * Used for one thing: the model list is a column on a laptop and a fold-away
  * on a phone, and which of those it should be is not a thing CSS can decide for
  * a React tree that renders two different sets of controls.
  *

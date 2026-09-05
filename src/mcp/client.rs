@@ -59,7 +59,7 @@ const SESSION_HEADER: &str = "mcp-session-id";
 /// A declared MCP server.
 #[derive(Debug, Clone)]
 pub struct McpServer {
-    /// Registry name, referenced from a profile's `mcp:` list.
+    /// Registry name, referenced from a model's `mcp:` list.
     pub name: String,
     /// The MCP endpoint. One URL, `POST` only.
     pub url: Url,
@@ -84,7 +84,7 @@ pub struct McpServer {
     pub hooks: Vec<Hook>,
     /// What to keep out of this server's tool results, in declaration order.
     ///
-    /// Here rather than on a profile because a rule is a statement about a tool,
+    /// Here rather than on a model because a rule is a statement about a tool,
     /// and the tool is this server's — see [`super::capture`]. What the run then
     /// does with the value is [`crate::vars`]'s.
     pub capture: Vec<CaptureRule>,

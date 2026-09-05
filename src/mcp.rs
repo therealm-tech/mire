@@ -1,7 +1,7 @@
 //! Model Context Protocol, client side.
 //!
 //! Agent mode can answer a model's tool calls two ways. Simulated tools
-//! ([`crate::profile::ToolSpec`]) prove the model *emits* well-formed calls and
+//! ([`crate::model::ToolSpec`]) prove the model *emits* well-formed calls and
 //! knows what to do with a result — deterministic, no dependency, nothing
 //! executed. This module is the other half: real tools, on a real server, with
 //! real effects.
@@ -311,7 +311,7 @@ pub struct ToolResult {
     pub is_error: bool,
     /// Round trip, in milliseconds.
     pub latency_ms: u64,
-    /// What this call put in the run's variables, if the profile asked for any.
+    /// What this call put in the run's variables, if the model asked for any.
     ///
     /// Carried on the result rather than left in the bag alone so the trace can
     /// say which call set what: a variable is a fact about one tool call, and a
@@ -325,7 +325,7 @@ pub struct ToolResult {
 /// A tool that ran and failed is not here — that is [`ToolResult::is_error`].
 #[derive(Debug, thiserror::Error)]
 pub enum McpError {
-    /// The profile names a server that `mcp.yaml` does not declare.
+    /// The model names a server that `mcp/` does not declare.
     #[error("unknown MCP server `{0}`")]
     UnknownServer(String),
 

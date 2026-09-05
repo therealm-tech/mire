@@ -22,7 +22,7 @@
 //! * `eval` is disabled: a script that builds and runs more script is beyond
 //!   anything this tool needs.
 //!
-//! Scripts are compiled when the profile loads, so a syntax error names the file
+//! Scripts are compiled when the model loads, so a syntax error names the file
 //! at startup rather than at call time.
 
 use std::cell::Cell;
@@ -88,9 +88,9 @@ fn engine() -> &'static Engine {
     &ENGINE
 }
 
-/// A script, compiled when its profile loaded.
+/// A script, compiled when its model loaded.
 ///
-/// Mirrors [`crate::profile::JsonPathExpr`]: the source survives for display, the
+/// Mirrors [`crate::model::JsonPathExpr`]: the source survives for display, the
 /// compiled form is what runs, and a mistake is a startup error naming the file.
 #[derive(Debug, Clone)]
 pub struct ScriptSource {
@@ -160,7 +160,7 @@ impl JsonSchema for ScriptSource {
         let mut schema = String::json_schema(generator);
         schema.insert(
             "description".into(),
-            "A Rhai script, compiled when the profile loads.".into(),
+            "A Rhai script, compiled when the model loads.".into(),
         );
         schema
     }

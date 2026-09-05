@@ -1,0 +1,6 @@
+# Does tool calling work? `qwen3` declares `get_weather`, both simulated and —
+# through `../mcp/dev.yaml` — for real, so this is the question that tells the
+# two apart in the transcript.
+---
+name: call a tool
+text: What is the weather in Lyon right now?

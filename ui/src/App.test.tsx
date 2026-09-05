@@ -11,8 +11,8 @@ import {
   type VerdictItem,
 } from './conversation'
 
-const PROFILES = {
-  profiles: [
+const MODELS = {
+  models: [
     {
       name: 'chat',
       kind: 'chat',
@@ -94,7 +94,7 @@ const AUTH = {
     },
     { name: 'pasted', kind: 'token', needsValue: true, needsLogin: false, allowedHosts: [] },
     // Pinned to the local gateway, so it is a choice for `guarded` and not one
-    // for the profiles pointing at models.internal.
+    // for the models pointing at models.internal.
     {
       name: 'gateway',
       kind: 'token',
@@ -108,7 +108,7 @@ const AUTH = {
 }
 
 /**
- * Two servers, authenticating in the two ways `mcp.yaml` allows: `dev` names a
+ * Two servers, authenticating in the two ways `mcp/` allows: `dev` names a
  * provider outright, `keyed` reaches for one from inside a header template. Both
  * are settled here rather than chosen per call, which is the whole point of
  * showing them apart from the selector.
@@ -138,7 +138,7 @@ const MCP = {
 }
 
 /**
- * What `prompts.yaml` declares. One that loads and one entry that did not, so
+ * What `prompts/` declares. One that loads and one entry that did not, so
  * the picker and the complaint next to it are both exercised by the default
  * fixture rather than by a special-case mock.
  */
@@ -149,7 +149,7 @@ const PROMPTS = {
   ],
   issues: [
     {
-      file: '/tmp/prompts.yaml',
+      file: '/tmp/prompts/hollow.yaml',
       message: 'prompt `hollow`: text: a prompt with no text puts nothing in the box',
       line: null,
       column: null,
@@ -159,7 +159,7 @@ const PROMPTS = {
 
 function completion(status: number) {
   return {
-    profile: 'chat',
+    model: 'chat',
     auth: 'anonymous',
     request: {
       method: 'POST',
@@ -208,7 +208,7 @@ function turnOf(call: ReturnType<typeof completion>) {
 }
 
 /**
- * A turn that answered and asked for nothing, which is what a chat profile with
+ * A turn that answered and asked for nothing, which is what a chat model with
  * no tools produces: the loop stops on turn one.
  */
 function answerTurn(status: number, content: string | null = 'pong') {
@@ -227,7 +227,7 @@ function answerTurn(status: number, content: string | null = 'pong') {
  */
 function agentStream(turns: ReturnType<typeof turnOf>[]): string {
   const trace = {
-    profile: 'chat',
+    model: 'chat',
     auth: 'anonymous',
     turns,
     stop: { outcome: 'stopped', reason: { predicate: 'noToolCalls' } },
@@ -390,8 +390,8 @@ function recordingApi(answers: string[]) {
 
   const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
-    if (url.endsWith('api/profiles')) {
-      return Promise.resolve(Response.json(PROFILES))
+    if (url.endsWith('api/models')) {
+      return Promise.resolve(Response.json(MODELS))
     }
     if (url.endsWith('api/auth')) {
       return Promise.resolve(Response.json(AUTH))
@@ -419,7 +419,7 @@ function recordingApi(answers: string[]) {
  *
  * It is shut unless something needs acting on, so a test that reads the panel
  * has to open it — the same click the page asks for. Already-open is not a
- * failure: a profile blocked on a field opens it on arrival.
+ * failure: a model blocked on a field opens it on arrival.
  */
 async function openAuth(user: ReturnType<typeof userEvent.setup>) {
   const toggle = await screen.findByRole('button', { name: /^(Auth|Hide auth)$/ })
@@ -431,7 +431,7 @@ async function openAuth(user: ReturnType<typeof userEvent.setup>) {
 beforeEach(() => {
   vi.stubGlobal(
     'fetch',
-    mockApi({ 'api/profiles': PROFILES, 'api/auth': AUTH, 'api/mcp': MCP, 'api/prompts': PROMPTS }),
+    mockApi({ 'api/models': MODELS, 'api/auth': AUTH, 'api/mcp': MCP, 'api/prompts': PROMPTS }),
   )
 })
 
@@ -456,11 +456,11 @@ describe('statusTone', () => {
 })
 
 describe('App', () => {
-  it('lists the profiles and the identity the selected one calls with', async () => {
+  it('lists the models and the identity the selected one calls with', async () => {
     const user = userEvent.setup()
     render(<App />)
 
-    // Anchored: a profile of kind `chat` carries the word in its badge too.
+    // Anchored: a model of kind `chat` carries the word in its badge too.
     expect(await screen.findByRole('button', { name: /^chat/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /embed/ })).toBeInTheDocument()
 
@@ -470,9 +470,9 @@ describe('App', () => {
     // shown, and said out loud rather than left to be inferred from a blank.
     // `toHaveTextContent`, because the sentence is split around a `<span>`.
     expect(within(screen.getByTestId('model-auth')).getByText('anonymous')).toBeInTheDocument()
-    expect(screen.getByTestId('model-auth')).toHaveTextContent('no auth: in this profile')
+    expect(screen.getByTestId('model-auth')).toHaveTextContent('no auth: in this model')
 
-    // Following the profile, because that is where the identity is declared.
+    // Following the model, because that is where the identity is declared.
     await user.click(screen.getByRole('button', { name: /as-me/ }))
     expect(within(screen.getByTestId('model-auth')).getByText('me')).toBeInTheDocument()
   })
@@ -494,7 +494,7 @@ describe('App', () => {
     vi.stubGlobal(
       'fetch',
       mockApi({
-        'api/profiles': PROFILES,
+        'api/models': MODELS,
         'api/auth': AUTH,
         'api/mcp': MCP,
         'api/prompts': PROMPTS,
@@ -520,7 +520,7 @@ describe('App', () => {
 
     await user.click(await screen.findByRole('button', { name: /guarded/ }))
 
-    // The identity is the profile's. Nothing in the panel switches it — the only
+    // The identity is the model's. Nothing in the panel switches it — the only
     // buttons here are the ones that fetch a session or drop it.
     const buttons = within(panel('Auth'))
       .queryAllByRole('button')
@@ -538,12 +538,12 @@ describe('App', () => {
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(1))
 
-    // The profile says who it calls as, and the server reads the same file. A
+    // The model says who it calls as, and the server reads the same file. A
     // copy travelling alongside is a second thing that can disagree with it.
     expect(sent[0]).not.toHaveProperty('auth')
   })
 
-  it('says when a profile names a credential that cannot reach it', async () => {
+  it('says when a model names a credential that cannot reach it', async () => {
     const user = userEvent.setup()
     render(<App />)
 
@@ -561,8 +561,8 @@ describe('App', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    // Every declared server is offered to every chat profile, so this panel is
-    // about the installation rather than about the profile in front of you.
+    // Every declared server is offered to every chat model, so this panel is
+    // about the installation rather than about the model in front of you.
     await user.click(await screen.findByRole('button', { name: /^chat/ }))
     await openAuth(user)
     expect(screen.getByRole('heading', { name: 'MCP servers' })).toBeInTheDocument()
@@ -639,13 +639,13 @@ describe('App', () => {
     expect(screen.getByText(/Negotiated per server/)).toBeInTheDocument()
   })
 
-  it('offers neither a server nor a revision when mcp.yaml declares none', async () => {
+  it('offers neither a server nor a revision when mcp/ declares none', async () => {
     // Nothing to speak to, nothing to choose. It is the registry that decides
-    // this now: with a server declared, every chat profile is offered it.
+    // this now: with a server declared, every chat model is offered it.
     vi.stubGlobal(
       'fetch',
       mockApi({
-        'api/profiles': PROFILES,
+        'api/models': MODELS,
         'api/auth': AUTH,
         'api/mcp': { servers: [], revisions: MCP.revisions, issues: [] },
         'api/prompts': PROMPTS,
@@ -692,7 +692,7 @@ describe('App', () => {
 
     await user.click(await screen.findByRole('button', { name: /guarded/ }))
 
-    // Every declared server, all on: `mcp.yaml`'s word, unedited.
+    // Every declared server, all on: `mcp/`'s word, unedited.
     expect(
       within(screen.getByRole('group', { name: 'Servers' }))
         .getAllByRole('checkbox')
@@ -728,7 +728,7 @@ describe('App', () => {
     await user.click(screen.getByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(1))
 
-    // All on: `mcp.yaml` already says which, and a copy alongside it is a
+    // All on: `mcp/` already says which, and a copy alongside it is a
     // second thing that can disagree with the file.
     expect(sent[0]).not.toHaveProperty('mcpServers')
 
@@ -792,13 +792,13 @@ describe('App', () => {
     expect(sent[1]).not.toHaveProperty('mcpServers')
   })
 
-  it('leaves the servers out of an embedding profile, which has no loop to be in', async () => {
+  it('leaves the servers out of an embedding model, which has no loop to be in', async () => {
     const user = userEvent.setup()
     render(<App />)
 
-    // Every declared server is offered to every *chat* profile. `kind:
+    // Every declared server is offered to every *chat* model. `kind:
     // embedding` has no agent loop for one to be part of, whatever the turn
-    // budget this tab remembers from the profile that was on before.
+    // budget this tab remembers from the model that was on before.
     await user.click(await screen.findByRole('button', { name: /^chat/ }))
     await openAuth(user)
     expect(screen.getByRole('heading', { name: 'MCP servers' })).toBeInTheDocument()
@@ -808,7 +808,7 @@ describe('App', () => {
     expect(screen.getByLabelText('What the next call will do')).not.toHaveTextContent('MCP server')
   })
 
-  it('switches to the embedding input when an embedding profile is selected', async () => {
+  it('switches to the embedding input when an embedding model is selected', async () => {
     const user = userEvent.setup()
     render(<App />)
 
@@ -934,7 +934,7 @@ describe('describeLive', () => {
 })
 
 describe('the loop', () => {
-  it('offers one turn budget for a chat profile and none for an embedding one', async () => {
+  it('offers one turn budget for a chat model and none for an embedding one', async () => {
     const user = userEvent.setup()
     render(<App />)
 
@@ -972,8 +972,8 @@ describe('the loop', () => {
         if (typeof init?.body === 'string') {
           bodies.push(JSON.parse(init.body))
         }
-        if (url.endsWith('api/profiles')) {
-          return Promise.resolve(Response.json(PROFILES))
+        if (url.endsWith('api/models')) {
+          return Promise.resolve(Response.json(MODELS))
         }
         if (url.endsWith('api/auth')) {
           return Promise.resolve(Response.json(AUTH))
@@ -1032,7 +1032,7 @@ describe('the loop', () => {
     const user = userEvent.setup()
     const turn = answerTurn(200)
     const trace = {
-      profile: 'chat',
+      model: 'chat',
       auth: 'anonymous',
       turns: [turn],
       stop: { outcome: 'stopped', reason: { predicate: 'noToolCalls' } },
@@ -1059,7 +1059,7 @@ describe('the loop', () => {
     vi.stubGlobal(
       'fetch',
       mockApi({
-        'api/profiles': PROFILES,
+        'api/models': MODELS,
         'api/auth': AUTH,
         'api/mcp': MCP,
         'api/prompts': PROMPTS,
@@ -1085,7 +1085,7 @@ describe('the loop', () => {
     // loop's side of what a streamed chat already does.
     const turn = answerTurn(400, null)
     const trace = {
-      profile: 'chat',
+      model: 'chat',
       auth: 'anonymous',
       turns: [turn],
       stop: { outcome: 'stopped', reason: { predicate: 'noToolCalls' } },
@@ -1104,7 +1104,7 @@ describe('the loop', () => {
     vi.stubGlobal(
       'fetch',
       mockApi({
-        'api/profiles': PROFILES,
+        'api/models': MODELS,
         'api/auth': AUTH,
         'api/mcp': MCP,
         'api/prompts': PROMPTS,
@@ -1129,7 +1129,7 @@ describe('the loop', () => {
     vi.stubGlobal(
       'fetch',
       mockApi({
-        'api/profiles': PROFILES,
+        'api/models': MODELS,
         'api/auth': AUTH,
         'api/mcp': MCP,
         'api/prompts': PROMPTS,
@@ -1148,7 +1148,7 @@ describe('the loop', () => {
     expect(screen.getByLabelText(/max turns/)).toHaveValue(1)
   })
 
-  it('sends a chat profile through the loop and an embedding one straight out', async () => {
+  it('sends a chat model through the loop and an embedding one straight out', async () => {
     const user = userEvent.setup()
     const urls: string[] = []
     vi.stubGlobal(
@@ -1156,8 +1156,8 @@ describe('the loop', () => {
       vi.fn((input: RequestInfo | URL) => {
         const url = String(input)
         urls.push(url)
-        if (url.endsWith('api/profiles')) {
-          return Promise.resolve(Response.json(PROFILES))
+        if (url.endsWith('api/models')) {
+          return Promise.resolve(Response.json(MODELS))
         }
         if (url.endsWith('api/auth')) {
           return Promise.resolve(Response.json(AUTH))
@@ -1177,7 +1177,7 @@ describe('the loop', () => {
 
     render(<App />)
 
-    // There is one send button, and for a chat profile it is the loop.
+    // There is one send button, and for a chat model it is the loop.
     await user.click(await screen.findByRole('button', { name: 'Send' }))
     await waitFor(() => expect(urls.some((url) => url.endsWith('api/agent'))).toBe(true))
 
@@ -1211,7 +1211,7 @@ describe('the loop', () => {
     vi.stubGlobal(
       'fetch',
       mockApi({
-        'api/profiles': PROFILES,
+        'api/models': MODELS,
         'api/auth': AUTH,
         'api/mcp': MCP,
         'api/prompts': PROMPTS,
@@ -1261,7 +1261,7 @@ describe('the loop', () => {
     vi.stubGlobal(
       'fetch',
       mockApi({
-        'api/profiles': PROFILES,
+        'api/models': MODELS,
         'api/auth': AUTH,
         'api/mcp': MCP,
         'api/prompts': PROMPTS,
@@ -1317,7 +1317,7 @@ describe('the loop', () => {
     vi.stubGlobal(
       'fetch',
       mockApi({
-        'api/profiles': PROFILES,
+        'api/models': MODELS,
         'api/auth': AUTH,
         'api/mcp': MCP,
         'api/prompts': PROMPTS,
@@ -1489,7 +1489,7 @@ describe('the loop', () => {
     vi.stubGlobal(
       'fetch',
       mockApi({
-        'api/profiles': PROFILES,
+        'api/models': MODELS,
         'api/auth': AUTH,
         'api/mcp': MCP,
         'api/prompts': PROMPTS,
@@ -1548,7 +1548,7 @@ describe('the loop', () => {
     vi.stubGlobal(
       'fetch',
       mockApi({
-        'api/profiles': PROFILES,
+        'api/models': MODELS,
         'api/auth': AUTH,
         'api/mcp': MCP,
         'api/prompts': PROMPTS,
@@ -1574,7 +1574,7 @@ describe('the loop', () => {
     const model = within(await openCard(user, /Turn 1 · model/))
     expect(model.getByText('no capacity upstream')).toBeInTheDocument()
     expect(model.getByText('service_unavailable')).toBeInTheDocument()
-    // And the profile is not the one at fault, so it is not accused of it.
+    // And the model is not the one at fault, so it is not accused of it.
     expect(model.queryByText(/No configured path resolved the content/)).not.toBeInTheDocument()
   })
 })
@@ -1651,7 +1651,7 @@ function setupEvent() {
 
 function traceFixture() {
   return {
-    profile: 'chat',
+    model: 'chat',
     auth: 'anonymous',
     turns: [turnFixture()],
     stop: { outcome: 'stopped', reason: { predicate: 'noToolCalls' } },
@@ -1675,7 +1675,7 @@ function toolRunApi(turns: ReturnType<typeof turnFixture>[] = [turnFixture()]) {
   ].join('\n')
 
   return mockApi({
-    'api/profiles': PROFILES,
+    'api/models': MODELS,
     'api/auth': AUTH,
     'api/mcp': MCP,
     'api/prompts': PROMPTS,
@@ -1872,7 +1872,7 @@ describe('traffic', () => {
     })
     const hook = within(await openCard(user, /Turn 1 · audit \(after\)/))
     // An empty Request section reads as something the panel failed to show; the
-    // answer is in `mcp.yaml`, and this is where somebody is standing.
+    // answer is in `mcp/`, and this is where somebody is standing.
     expect(hook.getByText(/declares neither/)).toBeInTheDocument()
   })
 
@@ -2090,7 +2090,7 @@ describe('traffic', () => {
     vi.stubGlobal(
       'fetch',
       mockApi({
-        'api/profiles': PROFILES,
+        'api/models': MODELS,
         'api/auth': AUTH,
         'api/mcp': MCP,
         'api/prompts': PROMPTS,
@@ -2146,7 +2146,7 @@ describe('traffic', () => {
     vi.stubGlobal(
       'fetch',
       mockApi({
-        'api/profiles': PROFILES,
+        'api/models': MODELS,
         'api/auth': AUTH,
         'api/mcp': MCP,
         'api/prompts': PROMPTS,
@@ -2190,7 +2190,7 @@ describe('browser login', () => {
     ),
   }
 
-  it('offers a sign-in button only where the profile calls as a human', async () => {
+  it('offers a sign-in button only where the model calls as a human', async () => {
     const user = userEvent.setup()
     render(<App />)
 
@@ -2217,7 +2217,7 @@ describe('browser login', () => {
         const url = String(input)
         seen.push({ url, body: init?.body ? JSON.parse(String(init.body)) : null })
 
-        let payload: unknown = PROFILES
+        let payload: unknown = MODELS
         if (url.endsWith('/login')) {
           payload = {
             authorizationUrl: 'https://idp.example/authorize?state=abc',
@@ -2263,7 +2263,7 @@ describe('browser login', () => {
     // And the popup was pointed at the identity provider rather than navigated to.
     expect(popup.location.href).toBe('https://idp.example/authorize?state=abc')
 
-    // Scoped: `dev` authenticates with `me` too, and every chat profile is
+    // Scoped: `dev` authenticates with `me` too, and every chat model is
     // offered `dev` — so the session shows on that row as well.
     await waitFor(
       () =>
@@ -2291,7 +2291,7 @@ describe('browser login', () => {
       'fetch',
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input)
-        let payload: unknown = PROFILES
+        let payload: unknown = MODELS
         if (url.endsWith('/login')) {
           prompts.push(init?.body ? JSON.parse(String(init.body)).prompt : undefined)
           payload = {
@@ -2345,7 +2345,7 @@ describe('browser login', () => {
       'fetch',
       vi.fn((input: RequestInfo | URL) => {
         const url = String(input)
-        let payload: unknown = PROFILES
+        let payload: unknown = MODELS
         if (url.endsWith('/login')) {
           logins.push(url)
           payload = {
@@ -2390,7 +2390,7 @@ describe('browser login', () => {
     expect(dev.queryByRole('button', { name: /Sign in to me/ })).not.toBeInTheDocument()
     expect(dev.getByText('gleroy')).toBeInTheDocument()
 
-    // And the model still calls as what the profile says. A server needing a
+    // And the model still calls as what the model says. A server needing a
     // session is not an opinion about the model's identity.
     expect(within(screen.getByTestId('model-auth')).getByText('pasted')).toBeInTheDocument()
   })
@@ -2401,7 +2401,7 @@ describe('browser login', () => {
       'fetch',
       vi.fn((input: RequestInfo | URL) => {
         const url = String(input)
-        let payload: unknown = PROFILES
+        let payload: unknown = MODELS
         if (url.endsWith('/logout')) {
           signedIn = false
           payload = { signedOut: true }
@@ -2427,7 +2427,7 @@ describe('browser login', () => {
     await user.click(await screen.findByRole('button', { name: /as-me/ }))
     await openAuth(user)
     // The model's row, not `dev`'s: both authenticate with `me`, and this test
-    // is about the one the profile names.
+    // is about the one the model names.
     const model = () => within(screen.getByTestId('model-auth'))
     expect(model().getByText('gleroy')).toBeInTheDocument()
     expect(model().getByText('expires in 4 min')).toBeInTheDocument()
@@ -2446,7 +2446,7 @@ describe('browser login', () => {
       'fetch',
       vi.fn((input: RequestInfo | URL) => {
         const url = String(input)
-        let payload: unknown = PROFILES
+        let payload: unknown = MODELS
         if (url.endsWith('/logout')) {
           logouts.push(url)
           signedIn = false
@@ -2604,15 +2604,15 @@ describe('conversation', () => {
     expect(sent).toHaveLength(1)
   })
 
-  it('drops the box on a profile that takes no message, and sends without one', async () => {
+  it('drops the box on a model that takes no message, and sends without one', async () => {
     const { fetchMock, sent } = recordingApi(['hello there'])
     vi.stubGlobal('fetch', fetchMock)
 
     const user = userEvent.setup()
     render(<App />)
 
-    // Something typed against a profile that does have a box, so what follows is
-    // about the profile rather than about an empty tab.
+    // Something typed against a model that does have a box, so what follows is
+    // about the model rather than about an empty tab.
     await type(user, 'the speakers are French')
 
     await user.click(screen.getByRole('button', { name: /transcribe/ }))
@@ -2626,7 +2626,7 @@ describe('conversation', () => {
     await user.click(send)
     await waitFor(() => expect(sent).toHaveLength(1))
 
-    // And the sentence typed against the other profile stays where it was: a box
+    // And the sentence typed against the other model stays where it was: a box
     // nobody can see is not a box that quietly rides along.
     expect(sent[0]?.messages).toEqual([])
   })
@@ -2729,7 +2729,7 @@ describe('conversation', () => {
       'fetch',
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input)
-        if (url.endsWith('api/profiles')) return Promise.resolve(Response.json(PROFILES))
+        if (url.endsWith('api/models')) return Promise.resolve(Response.json(MODELS))
         if (url.endsWith('api/auth')) return Promise.resolve(Response.json(AUTH))
         if (url.endsWith('api/prompts')) return Promise.resolve(Response.json(PROMPTS))
         if (url.endsWith('api/mcp')) return Promise.resolve(Response.json(MCP))
@@ -2836,7 +2836,7 @@ describe('conversation', () => {
     expect(answered).not.toContain('selection:')
   })
 
-  it('never offers a conversation for an embedding profile', async () => {
+  it('never offers a conversation for an embedding model', async () => {
     const { fetchMock } = recordingApi(['pong'])
     vi.stubGlobal('fetch', fetchMock)
 
@@ -2852,11 +2852,11 @@ describe('conversation', () => {
 describe('preflight', () => {
   it('says where the call is going and who it goes as, before it is made', async () => {
     // No server declared, so nothing but the model call is in the bar: `dev`
-    // wants a session, and every chat profile is offered `dev`.
+    // wants a session, and every chat model is offered `dev`.
     vi.stubGlobal(
       'fetch',
       mockApi({
-        'api/profiles': PROFILES,
+        'api/models': MODELS,
         'api/auth': AUTH,
         'api/mcp': { servers: [], revisions: MCP.revisions, issues: [] },
         'api/prompts': PROMPTS,
@@ -2892,7 +2892,7 @@ describe('preflight', () => {
       'fetch',
       vi.fn((input: RequestInfo | URL) => {
         const url = String(input)
-        let payload: unknown = PROFILES
+        let payload: unknown = MODELS
         if (url.endsWith('/login')) {
           logins.push(url)
           payload = {
@@ -2958,7 +2958,7 @@ describe('stopping a run', () => {
         if (url.endsWith('api/agent')) {
           return Promise.resolve(stalled(init?.signal))
         }
-        let payload: unknown = PROFILES
+        let payload: unknown = MODELS
         if (url.endsWith('api/prompts')) {
           return Promise.resolve(Response.json(PROMPTS))
         }
@@ -3212,12 +3212,10 @@ describe('saved prompts', () => {
     expect(screen.getByLabelText('Message')).toHaveValue('ping')
   })
 
-  it('names the entry prompts.yaml would not load, where it bites', async () => {
+  it('names the entry prompts/ would not load, where it bites', async () => {
     render(<App />)
 
-    expect(await screen.findByText(/1 entry of prompts.yaml did not load/)).toHaveTextContent(
-      'hollow',
-    )
+    expect(await screen.findByText(/1 entry of prompts\/ did not load/)).toHaveTextContent('hollow')
   })
 
   it('offers the same library to an embedding box', async () => {
@@ -3234,7 +3232,7 @@ describe('saved prompts', () => {
     vi.stubGlobal(
       'fetch',
       mockApi({
-        'api/profiles': PROFILES,
+        'api/models': MODELS,
         'api/auth': AUTH,
         'api/mcp': MCP,
         'api/prompts': { prompts: [], issues: [] },
@@ -3249,7 +3247,7 @@ describe('saved prompts', () => {
 })
 
 describe('coming back to it', () => {
-  it('reopens on the profile and the draft it was left on', async () => {
+  it('reopens on the model and the draft it was left on', async () => {
     const user = userEvent.setup()
     const first = render(<App />)
 
@@ -3292,17 +3290,17 @@ describe('coming back to it', () => {
     expect(await screen.findByPlaceholderText('paste the credential')).toHaveValue('')
   })
 
-  it('falls back to a profile that exists when the remembered one is gone', async () => {
+  it('falls back to a model that exists when the remembered one is gone', async () => {
     const user = userEvent.setup()
     const first = render(<App />)
     await user.click(await screen.findByRole('button', { name: /as-me/ }))
     first.unmount()
 
     // The file was deleted between the two visits.
-    const fewer = { ...PROFILES, profiles: PROFILES.profiles.filter((one) => one.name !== 'as-me') }
+    const fewer = { ...MODELS, models: MODELS.models.filter((one) => one.name !== 'as-me') }
     vi.stubGlobal(
       'fetch',
-      mockApi({ 'api/profiles': fewer, 'api/auth': AUTH, 'api/mcp': MCP, 'api/prompts': PROMPTS }),
+      mockApi({ 'api/models': fewer, 'api/auth': AUTH, 'api/mcp': MCP, 'api/prompts': PROMPTS }),
     )
 
     render(<App />)
@@ -3348,7 +3346,7 @@ describe('taking the run away with you', () => {
     expect(clicked).toHaveBeenCalled()
     const payload = JSON.parse(written[0] ?? '{}')
     expect(payload.tool).toBe('mire')
-    expect(payload.profile).toBe('chat')
+    expect(payload.model).toBe('chat')
     expect(payload.endpoint).toBe('https://models.internal/v1/chat/completions')
     expect(payload.exchanges).toHaveLength(5)
     // The history as the next request would have carried it, not a rendering of it.
@@ -3410,13 +3408,13 @@ function bodySentTo(
 }
 
 /**
- * A profile whose request is built around a file, and which still has a question
+ * A model whose request is built around a file, and which still has a question
  * to ask about it — an OCR service, a vision endpoint. Both fields on, and they
  * are independent: `has_prompt:` says whether there is a box, `requires_upload:`
  * whether there is a call.
  */
 const NEEDS_A_FILE = {
-  profiles: [
+  models: [
     {
       name: 'describe-image',
       kind: 'chat',
@@ -3431,9 +3429,9 @@ const NEEDS_A_FILE = {
   issues: [],
 }
 
-/** What `profiles/whisper.yaml` declares: no box, and no call without a file. */
+/** What `models/whisper.yaml` declares: no box, and no call without a file. */
 const NEEDS_A_FILE_AND_NOTHING_ELSE = {
-  profiles: [
+  models: [
     {
       name: 'whisper',
       kind: 'chat',
@@ -3448,10 +3446,10 @@ const NEEDS_A_FILE_AND_NOTHING_ELSE = {
   issues: [],
 }
 
-describe('a profile that requires a file', () => {
+describe('a model that requires a file', () => {
   it('holds Send shut until one is attached, and says why', async () => {
     const fetchMock = mockApi({
-      'api/profiles': NEEDS_A_FILE,
+      'api/models': NEEDS_A_FILE,
       'api/auth': AUTH,
       'api/mcp': MCP,
       'api/prompts': PROMPTS,
@@ -3467,7 +3465,7 @@ describe('a profile that requires a file', () => {
     expect(screen.getByText(/describe-image needs a file/)).toBeInTheDocument()
 
     // Whatever the mock stores is what comes back, and any file clears the
-    // blocker: the profile asked for one, not for a particular one.
+    // blocker: the model asked for one, not for a particular one.
     pick([new File(['a known signal'], 'report.pdf', { type: 'application/pdf' })])
     await screen.findByText('report.pdf')
 
@@ -3475,11 +3473,11 @@ describe('a profile that requires a file', () => {
     expect(screen.queryByText(/needs a file/)).not.toBeInTheDocument()
   })
 
-  it('holds it shut on a profile with no box either', async () => {
+  it('holds it shut on a model with no box either', async () => {
     vi.stubGlobal(
       'fetch',
       mockApi({
-        'api/profiles': NEEDS_A_FILE_AND_NOTHING_ELSE,
+        'api/models': NEEDS_A_FILE_AND_NOTHING_ELSE,
         'api/auth': AUTH,
         'api/mcp': MCP,
         'api/prompts': PROMPTS,
@@ -3501,7 +3499,7 @@ describe('a profile that requires a file', () => {
   it('does not let Enter send it either', async () => {
     const user = userEvent.setup()
     const fetchMock = mockApi({
-      'api/profiles': NEEDS_A_FILE,
+      'api/models': NEEDS_A_FILE,
       'api/auth': AUTH,
       'api/mcp': MCP,
       'api/prompts': PROMPTS,
@@ -3520,7 +3518,7 @@ describe('a profile that requires a file', () => {
 describe('attaching a file', () => {
   it('sends it as multipart and shows what the server stored', async () => {
     const fetchMock = mockApi({
-      'api/profiles': PROFILES,
+      'api/models': MODELS,
       'api/auth': AUTH,
       'api/mcp': MCP,
       'api/prompts': PROMPTS,
@@ -3549,13 +3547,13 @@ describe('attaching a file', () => {
 
   /**
    * The claim has to stop where the truth does: the file goes to the template,
-   * and what the template does with it is the profile's business.
+   * and what the template does with it is the model's business.
    */
   it('says the file goes to the template rather than to the endpoint', async () => {
     vi.stubGlobal(
       'fetch',
       mockApi({
-        'api/profiles': PROFILES,
+        'api/models': MODELS,
         'api/auth': AUTH,
         'api/mcp': MCP,
         'api/prompts': PROMPTS,
@@ -3568,7 +3566,7 @@ describe('attaching a file', () => {
     pick([new File(['a known signal'], 'report.pdf', { type: 'application/pdf' })])
 
     await screen.findByText('report.pdf')
-    expect(panel('Conversation')).toHaveTextContent(/handed to this profile's template as uploads/)
+    expect(panel('Conversation')).toHaveTextContent(/handed to this model's template as uploads/)
     expect(panel('Conversation')).toHaveTextContent(/sends what it always sent/)
   })
 
@@ -3579,7 +3577,7 @@ describe('attaching a file', () => {
   it('names the attached files in the next call', async () => {
     const user = userEvent.setup()
     const fetchMock = mockApi({
-      'api/profiles': PROFILES,
+      'api/models': MODELS,
       'api/auth': AUTH,
       'api/mcp': MCP,
       'api/prompts': PROMPTS,
@@ -3604,7 +3602,7 @@ describe('attaching a file', () => {
   it('leaves the field out entirely when nothing is attached', async () => {
     const user = userEvent.setup()
     const fetchMock = mockApi({
-      'api/profiles': PROFILES,
+      'api/models': MODELS,
       'api/auth': AUTH,
       'api/mcp': MCP,
       'api/prompts': PROMPTS,
@@ -3621,7 +3619,7 @@ describe('attaching a file', () => {
 
   it('sends one request per file', async () => {
     const fetchMock = mockApi({
-      'api/profiles': PROFILES,
+      'api/models': MODELS,
       'api/auth': AUTH,
       'api/mcp': MCP,
       'api/prompts': PROMPTS,
@@ -3648,8 +3646,8 @@ describe('attaching a file', () => {
       'fetch',
       vi.fn((input: RequestInfo | URL) => {
         const url = String(input)
-        if (url.endsWith('api/profiles')) {
-          return Promise.resolve(Response.json(PROFILES))
+        if (url.endsWith('api/models')) {
+          return Promise.resolve(Response.json(MODELS))
         }
         if (url.endsWith('api/auth')) {
           return Promise.resolve(Response.json(AUTH))
@@ -3688,7 +3686,7 @@ describe('attaching a file', () => {
   it('forgets a file without asking the server to delete it', async () => {
     const user = userEvent.setup()
     const fetchMock = mockApi({
-      'api/profiles': PROFILES,
+      'api/models': MODELS,
       'api/auth': AUTH,
       'api/mcp': MCP,
       'api/prompts': PROMPTS,
@@ -3725,7 +3723,7 @@ describe('attaching a file', () => {
     vi.stubGlobal(
       'fetch',
       mockApi({
-        'api/profiles': PROFILES,
+        'api/models': MODELS,
         'api/auth': AUTH,
         'api/mcp': MCP,
         'api/prompts': PROMPTS,
@@ -3749,7 +3747,7 @@ describe('attaching a file', () => {
 })
 
 describe('on a narrow screen', () => {
-  it('folds the profile list away, and closes it again once one is picked', async () => {
+  it('folds the model list away, and closes it again once one is picked', async () => {
     Object.defineProperty(window, 'matchMedia', {
       configurable: true,
       writable: true,
@@ -3765,13 +3763,13 @@ describe('on a narrow screen', () => {
     render(<App />)
 
     // One line saying where you are, rather than a screenful to scroll past.
-    await waitFor(() => expect(within(panel('Profiles')).getByText('chat')).toBeInTheDocument())
+    await waitFor(() => expect(within(panel('Models')).getByText('chat')).toBeInTheDocument())
     expect(screen.queryByRole('button', { name: /guarded/ })).not.toBeInTheDocument()
 
-    await user.click(within(panel('Profiles')).getByRole('button', { name: 'Change' }))
+    await user.click(within(panel('Models')).getByRole('button', { name: 'Change' }))
     await user.click(screen.getByRole('button', { name: /guarded/ }))
 
     expect(screen.queryByRole('button', { name: /guarded/ })).not.toBeInTheDocument()
-    expect(within(panel('Profiles')).getByText('guarded')).toBeInTheDocument()
+    expect(within(panel('Models')).getByText('guarded')).toBeInTheDocument()
   })
 })

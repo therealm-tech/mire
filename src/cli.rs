@@ -28,17 +28,21 @@ pub struct Cli {
     #[arg(long, env = "CONFIG_FILE")]
     pub config: Option<PathBuf>,
 
-    /// Directory holding the profile YAML files (and, optionally, `auth.yaml`)
-    /// [default: `./profiles`].
+    /// Directory holding `models/`, `auth/`, `mcp/` and `prompts/`
+    /// [default: `./config`].
+    ///
+    /// One subdirectory per kind of thing, one file per entry: `models/qwen3.yaml`
+    /// is the model named `qwen3`. A subdirectory that is not there declares
+    /// nothing, which is how a directory that only adds prompts works.
     ///
     /// Repeatable, and `:`-separated in the environment variable, the way `PATH`
-    /// is. Several directories are layered in the order given: a profile — or an
+    /// is. Several directories are layered in the order given: a model — or an
     /// auth provider, MCP server, saved prompt — declared in more than one
     /// belongs to the last directory that declares it, and the one it displaced
     /// is named in a warning. A directory somebody else maintains, and yours on
     /// top of it, without copying theirs to change one line.
-    #[arg(long, env = "PROFILES_DIR", value_delimiter = ':')]
-    pub profiles: Option<Vec<PathBuf>>,
+    #[arg(long = "config-dir", env = "CONFIG_DIR", value_delimiter = ':')]
+    pub config_dir: Option<Vec<PathBuf>>,
 
     /// Directory attached files are written to [default: `./uploads`].
     ///
@@ -101,7 +105,7 @@ mod tests {
         let cli = parse(&[]);
 
         assert_eq!(cli.config, None);
-        assert_eq!(cli.profiles, None);
+        assert_eq!(cli.config_dir, None);
         assert_eq!(cli.uploads, None);
         assert_eq!(cli.host, None);
         assert_eq!(cli.port, None);
@@ -112,25 +116,25 @@ mod tests {
     #[test]
     fn one_directory_is_still_one_directory() {
         assert_eq!(
-            parse(&["--profiles", "./profiles"]).profiles,
-            Some(vec![PathBuf::from("./profiles")])
+            parse(&["--config-dir", "./config"]).config_dir,
+            Some(vec![PathBuf::from("./config")])
         );
     }
 
     #[test]
     fn the_flag_repeats_and_keeps_the_order_it_was_given() {
         assert_eq!(
-            parse(&["--profiles", "./base", "--profiles", "./mine"]).profiles,
+            parse(&["--config-dir", "./base", "--config-dir", "./mine"]).config_dir,
             Some(vec![PathBuf::from("./base"), PathBuf::from("./mine")])
         );
     }
 
-    /// The same separator `PATH` uses, so that `PROFILES_DIR` — which is one
+    /// The same separator `PATH` uses, so that `CONFIG_DIR` — which is one
     /// string and cannot be repeated — can carry a list at all.
     #[test]
     fn a_colon_separated_value_is_a_list() {
         assert_eq!(
-            parse(&["--profiles", "./base:./mine"]).profiles,
+            parse(&["--config-dir", "./base:./mine"]).config_dir,
             Some(vec![PathBuf::from("./base"), PathBuf::from("./mine")])
         );
     }

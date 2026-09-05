@@ -26,7 +26,7 @@ CORS to fight and why workload identities stay testable.
 ```sh
 (cd ui && npm install && npm run build)
 cargo build --release
-./target/release/mire --profiles ./profiles
+./target/release/mire --config-dir ./config
 ```
 
 The UI is built into the binary, so that is the whole deployment. Building
@@ -39,7 +39,7 @@ also an environment variable, and a key in a configuration file:
 | Flag | Variable | Default | What it does |
 | --- | --- | --- | --- |
 | `--config` | `CONFIG_FILE` | `~/.config/mire/mire.yaml` | YAML file carrying every option below — see [below](#the-configuration-file) |
-| `--profiles` | `PROFILES_DIR` | `./profiles` | Directories of profile YAML files — see [below](#more-than-one-profiles-directory) |
+| `--config-dir` | `CONFIG_DIR` | `./config` | Directories holding `models/`, `auth/`, `mcp/` and `prompts/` — see [below](#whats-in-a-configuration-directory) |
 | `--uploads` | `UPLOADS_DIR` | `./uploads` | Where **Attach** writes — see [below](#attaching-a-file) |
 | `--host` | `HOST` | `127.0.0.1` | Listen address; widening it is deliberate |
 | `--port` | `PORT` | `8787` | Listen port |
@@ -55,9 +55,9 @@ Every flag in that table is also a key in a YAML file, read from
 
 ```yaml
 ---
-profiles:
-  - /etc/mire/profiles
-  - ~/.config/mire/profiles
+config_dir:
+  - /etc/mire/config
+  - ~/.config/mire/config
 uploads: ~/.local/share/mire/uploads
 port: 8788
 ca_bundle: /etc/ssl/certs/internal.pem
@@ -66,15 +66,15 @@ log_filter: mire=debug
 
 The keys are the long flag names with underscores — `base_path`, `public_url`,
 `ca_bundle`, `log_filter` — and every one of them is optional: a file that sets
-one thing is a perfectly good file. `profiles:` takes a list, or a bare string
+one thing is a perfectly good file. `config_dir:` takes a list, or a bare string
 when there is only one.
 
 **A flag beats the environment, the environment beats the file, and the file
 beats the defaults.** The file is for the settings that stopped being a decision
-— where your profiles live, the CA bundle somebody put on the machine, the port
-you already bookmarked. A shell alias covers those too, right up until you open a
-different shell. The flag is still there for the afternoon you want something
-else:
+— where your configuration lives, the CA bundle somebody put on the machine, the
+port you already bookmarked. A shell alias covers those too, right up until you
+open a different shell. The flag is still there for the afternoon you want
+something else:
 
 ```sh
 mire --port 9000            # the file's port, overruled, for this run
@@ -93,7 +93,7 @@ file you *name* with `--config` does have to be there: a typo in that path must
 not read as "you have no configuration file".
 
 A file that is there and broken, on the other hand, is fatal — the opposite of
-what happens to a broken profile. Those are the input to the tool, and coming up
+what happens to a broken model. Those are the input to the tool, and coming up
 to show you the problem beats refusing to start. This file is the tool's own
 wiring: a `port:` that did not parse means listening somewhere you did not ask
 for, and `log_fitler:` means a setting you believe is in effect and is not. So it
@@ -102,25 +102,59 @@ says which key, and stops:
 ```
 ERROR mire: mire stopped error=cannot parse the configuration file
   /home/you/.config/mire/mire.yaml: unknown field `log_fitler`, expected one of
-  `profiles`, `uploads`, `host`, `port`, `base_path`, `public_url`, `ca_bundle`,
-  `log_filter`
+  `config_dir`, `uploads`, `host`, `port`, `base_path`, `public_url`,
+  `ca_bundle`, `log_filter`
 ```
 
-It is read once, at startup. The profiles directories are watched because what is
-in them changes while you work; the file that says *which* directories those are,
-and which address to bind, cannot change under a running process.
+It is read once, at startup. The configuration directories are watched because
+what is in them changes while you work; the file that says *which* directories
+those are, and which address to bind, cannot change under a running process.
 
-### More than one profiles directory
+### What's in a configuration directory
 
-`--profiles` takes more than one directory, repeated or `:`-separated the way
+One subdirectory per kind of thing, one file per entry:
+
+```
+config/
+├── models/          one model endpoint per file
+│   ├── qwen3.yaml
+│   ├── nomic.yaml
+│   └── whisper.yaml
+├── auth/            one credential provider per file
+│   ├── static-token.yaml
+│   ├── keycloak-workload.yaml
+│   └── keycloak-user.yaml
+├── mcp/             one MCP server per file
+│   └── dev.yaml
+└── prompts/         one saved prompt per file
+    ├── 01-ping.yaml
+    └── 02-call-a-tool.yaml
+```
+
+The name is the `name:` field inside the file, not the file name: renaming
+`qwen3.yaml` must not silently rename the thing every other file refers to. The
+file name is for whoever is reading the directory — which is why the prompts are
+numbered, since the listing's order is the order the UI offers them in.
+
+A subdirectory that is not there declares nothing. So does a file that declares
+nothing — an empty one, or one that is entirely commented out, which is how
+`config/mcp/` ships eight worked examples next to the one server it really has.
+Uncomment one and it is live.
+
+The directory itself does have to exist: a `--config-dir` that is not there is a
+typo worth stopping for, and the startup error says which one.
+
+### More than one configuration directory
+
+`--config-dir` takes more than one directory, repeated or `:`-separated the way
 `PATH` is:
 
 ```sh
-mire --profiles /etc/mire/profiles --profiles ~/.config/mire/profiles
-PROFILES_DIR=/etc/mire/profiles:~/.config/mire/profiles mire
+mire --config-dir /etc/mire/config --config-dir ~/.config/mire/config
+CONFIG_DIR=/etc/mire/config:~/.config/mire/config mire
 ```
 
-This is for the case where the profiles are somebody else's. A team keeps a
+This is for the case where the configuration is somebody else's. A team keeps a
 directory of endpoints under review, checked into a repository, mounted
 read-only; you want the same thing plus two of your own, and one of theirs
 pointed at staging for the afternoon. Copying the whole directory to change one
@@ -128,22 +162,21 @@ line means never getting their next change.
 
 Directories are layered in the order given, and **the last one wins**: a name
 declared in more than one belongs to the last directory that declares it. That
-is true of every kind of name in there — profiles, and the entries of
-`auth.yaml`, `mcp.yaml` and `prompts.yaml` alike, each merged on
-its own. Names
-nobody else claimed are simply added, so the usual case is a base you leave
-alone and a short directory of your own on top.
+is true of every kind of name in there — models, auth providers, MCP servers and
+saved prompts alike, each merged on its own. Names nobody else claimed are simply
+added, so the usual case is a base you leave alone and a short directory of your
+own on top.
 
 An override is a warning rather than an error, naming both files:
 
 ```
-WARN mire::profile::loader: profile overridden by a later directory
-  name=mistral-small path=/home/you/.config/mire/profiles/mistral-small.yaml
-  shadowed=/etc/mire/profiles/mistral-small.yaml
+WARN mire::model::loader: model overridden by a later directory
+  name=mistral-small path=/home/you/.config/mire/config/mistral-small.yaml
+  shadowed=/etc/mire/config/mistral-small.yaml
 ```
 
 Deliberate, so it does not belong in the UI's list of things that failed to
-load — but not silent either, because "why is this profile pointing at staging"
+load — but not silent either, because "why is this model pointing at staging"
 is a question that deserves an answer in the log rather than an afternoon.
 
 The rule is about *different* directories. Two files in the **same** directory
@@ -160,7 +193,7 @@ says which one.
 ```sh
 docker build -t mire:0.1.0 .
 docker run --rm --read-only -p 127.0.0.1:8787:8787 \
-  -v "$PWD/profiles:/etc/mire/profiles:ro" mire:0.1.0
+  -v "$PWD/config:/etc/mire/config:ro" mire:0.1.0
 ```
 
 Layering works the same way, and is most of the reason it exists — a shared
@@ -168,9 +201,9 @@ directory mounted read-only, yours writable on top:
 
 ```sh
 docker run --rm --read-only -p 127.0.0.1:8787:8787 \
-  -v "$PWD/team-profiles:/etc/mire/profiles:ro" \
-  -v "$PWD/profiles:/etc/mire/profiles.local:ro" \
-  -e PROFILES_DIR=/etc/mire/profiles:/etc/mire/profiles.local mire:0.1.0
+  -v "$PWD/team-config:/etc/mire/config:ro" \
+  -v "$PWD/config:/etc/mire/config.local:ro" \
+  -e CONFIG_DIR=/etc/mire/config:/etc/mire/config.local mire:0.1.0
 ```
 
 One static binary on `distroless/static` — a certificate bundle, timezone data,
@@ -181,7 +214,7 @@ wants a disk. Give it one, owned by the user the container runs as:
 
 ```sh
 docker run --rm --read-only -p 127.0.0.1:8787:8787 \
-  -v "$PWD/profiles:/etc/mire/profiles:ro" \
+  -v "$PWD/config:/etc/mire/config:ro" \
   -v "$PWD/uploads:/var/lib/mire/uploads" \
   -e UPLOADS_DIR=/var/lib/mire/uploads mire:0.1.0
 ```
@@ -191,10 +224,10 @@ fails is an upload — with a `500` naming the path it could not write. The
 directory is created on the first attachment rather than at startup, so nothing
 about this changes how the container comes up.
 
-The profiles are **mounted, not baked in**. They are the input to the tool, not
-part of it: an image carrying them would ship endpoints pointing at somebody
+The configuration is **mounted, not baked in**. It is the input to the tool, not
+part of it: an image carrying it would ship endpoints pointing at somebody
 else's laptop, and testing a new endpoint would mean building a new image.
-`/etc/mire/profiles` exists in the image so a run without a mount starts cleanly
+`/etc/mire/config` exists in the image so a run without a mount starts cleanly
 with nothing to offer.
 
 `HOST` defaults to `0.0.0.0` here, and only here. Inside a container, loopback is
@@ -202,14 +235,14 @@ a network nobody else can reach, so a published port would answer nothing. The
 isolation is the container's to provide — publish to `127.0.0.1:8787` and the
 exposure is the same as running the binary directly.
 
-The image sets `HOST`, `PORT`, `PROFILES_DIR` and `LOG_FILTER` in its
+The image sets `HOST`, `PORT`, `CONFIG_DIR` and `LOG_FILTER` in its
 environment, and the environment outranks the file — so a `mire.yaml` you mount
 is read, but those four keys in it are not what takes effect. Change them with
 `-e` and leave the file for everything else:
 
 ```sh
 docker run --rm --read-only -p 127.0.0.1:8787:8787 \
-  -v "$PWD/profiles:/etc/mire/profiles:ro" \
+  -v "$PWD/config:/etc/mire/config:ro" \
   -v "$PWD/mire.yaml:/etc/mire/mire.yaml:ro" \
   -e CONFIG_FILE=/etc/mire/mire.yaml mire:0.1.0
 ```
@@ -222,7 +255,7 @@ For an internal CA, mount the bundle and point `--ca-bundle` at it:
 
 ```sh
 docker run --rm --read-only -p 127.0.0.1:8787:8787 \
-  -v "$PWD/profiles:/etc/mire/profiles:ro" \
+  -v "$PWD/config:/etc/mire/config:ro" \
   -v /etc/ssl/certs/internal.pem:/etc/mire/ca.pem:ro \
   -e CA_BUNDLE=/etc/mire/ca.pem mire:0.1.0
 ```
@@ -240,7 +273,7 @@ one configuration mistake that produces a genuinely cryptic error** — so find 
 first:
 
 ```sh
-mire --profiles ./profiles --log-filter 'mire=debug,tower_http=debug'
+mire --config-dir ./config --log-filter 'mire=debug,tower_http=debug'
 ```
 
 Load the page through the proxy and read the `uri=` field of the request log.
@@ -249,7 +282,7 @@ Load the page through the proxy and read the `uri=` field of the request log.
 tell `mire` about it and every route moves under it:
 
 ```sh
-mire --profiles ./profiles --base-path /notebook/my-namespace/my-notebook/proxy/8787
+mire --config-dir ./config --base-path /notebook/my-namespace/my-notebook/proxy/8787
 ```
 
 Everything moves together — API, `/docs`, `/healthz` and the UI. The server
@@ -281,7 +314,7 @@ listen address explicitly with `--host 0.0.0.0`. That is a choice, not a default
 
 ## The UI
 
-Deliberately small. It does not edit anything — the profiles are yours and your
+Deliberately small. It does not edit anything — the models are yours and your
 editor's — and it holds no logic of its own: it shows what the API returns.
 
 - **What the next call will do**, above the box you would make it from. Where it
@@ -294,14 +327,14 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   It says nothing about whether the endpoint is up. That is the question you came
   to ask, and answering it here would be answering it by guessing.
 - **Auth, folded away until it is wanted, and read-only.** The identity is the
-  profile's, declared in its `auth:` next to the URL it authenticates against,
+  model's, declared in its `auth:` next to the URL it authenticates against,
   so the panel shows it rather than offering alternatives — what you read in the
   file is what went out, and the UI never puts an `auth` of its own on the wire.
-  To ask the same endpoint as somebody else, copy the profile and change one
+  To ask the same endpoint as somebody else, copy the model and change one
   line; that copy is a thing you can name, keep and re-run, which a click never
-  was. A profile with no `auth:` says so and resolves to `anonymous`, where a
+  was. A model with no `auth:` says so and resolves to `anonymous`, where a
   `401` shows up green with a note that the route is protected, because that is
-  a pass. A profile naming a credential whose `allowed_hosts` excludes its own
+  a pass. A model naming a credential whose `allowed_hosts` excludes its own
   URL is flagged outright — every call it makes is refused before anything goes
   out.
 
@@ -312,25 +345,25 @@ editor's — and it holds no logic of its own: it shows what the API returns.
 
   Under it, in its own section, the same panel lists the identities the
   **MCP servers** this run would set up will use. A separate question answered in
-  a separate file: the model's identity comes from the profile, a server's from
-  `mcp.yaml`, and neither follows the other. Each row names the provider (or
+  a separate file: the model's identity comes from the model, a server's from
+  `mcp/`, and neither follows the other. Each row names the provider (or
   `anonymous`), says when it comes from a header template rather than `auth:`,
   and warns when it is a browser provider nobody has signed in to — that call
   answers `409 not_signed_in` and sends nothing, so the **Sign in** button for it
   is on the row itself. Once somebody has been through, the row says who, and
   carries the **Sign out** that drops that identity again — a server's provider
-  is often not the profile's, so this row is the only place it appears.
+  is often not the model's, so this row is the only place it appears.
 
-  That whole section is there for a chat profile and gone for an embedding one,
+  That whole section is there for a chat model and gone for an embedding one,
   which has no loop for a tool call to be part of. A server unticked in
   **Servers** leaves it the same way and for a better-aimed reason: this run does
   not reach it, so it needs nothing from you — no discovery, no listing, no
   sign-in, and no refusal on the bar above about a credential it never uses.
-- **Conversation**, for chat profiles. A transcript: your question on the right,
+- **Conversation**, for chat models. A transcript: your question on the right,
   the answer on the left, the tools the run called in between, and a composer at
   the bottom. `Enter` sends, `Shift`+`Enter` starts a line. There is one button,
   **Send**, and it runs the [loop](#the-loop) — it answers the tool calls the
-  model makes until it stops making them, and a profile with no tools ends on
+  model makes until it stops making them, and a model with no tools ends on
   turn one anyway. Two controls next to it say how far it goes and how the answer
   arrives. **max turns** is the budget, and it is also the whole of the
   "one turn or several" question: at **1** the run sends a turn and stops, which
@@ -342,7 +375,7 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   whole-bodied single turn are both a tick away — and the box is **off by
   default**, at every turn count. More on what that costs a loop
   [below](#streaming-and-the-number-everybody-actually-wants).
-  **Servers** is a checkbox per server `mcp.yaml` declares:
+  **Servers** is a checkbox per server in `mcp/`:
   untick one and this run does not set it up, does not sign in to it and is not
   offered its tools — the file still declares it, and the run
   [says so](#switching-one-off-for-a-run) rather than shrinking quietly. **All**
@@ -354,18 +387,18 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   Nothing is sent upstream to call the work off: an endpoint that has been asked
   a question is going to answer it, so this is about your tab and says only that.
   More on what the transcript is [below](#having-a-conversation).
-- **Saved**, a dropdown above either box. The prompts `prompts.yaml` declares,
+- **Saved**, a dropdown above either box. The prompts in `prompts/`,
   picked by name and dropped in the box — nothing is sent, and what the text
-  becomes on the wire is still the profile's template's decision. More
+  becomes on the wire is still the model's template's decision. More
   [below](#saving-a-prompt).
-- **Input**, for embedding profiles. One text per line, a run count, and a
+- **Input**, for embedding models. One text per line, a run count, and a
   checkbox for the full vectors. There is no second turn of an embedding, so
   there is no conversation and no loop.
 - **Traffic**, under the conversation. Everything that left the process, in the
   order it left, one card per exchange, filtered by kind or down to the failures
   — and reachable from the transcript above, which names the card each of its
   rows summarises. See [below](#reading-the-traffic).
-- **Profiles**, a column where there is room for one and a fold-away where there
+- **Models**, a column where there is room for one and a fold-away where there
   is not — on a phone the list was a screenful to scroll past before reaching the
   thing it configures.
 - **Embedding.** Count, width, encoding, the five checks, and per vector its
@@ -378,20 +411,19 @@ with the call and never stored, never logged, never echoed back. A credential
 `mire` fetched for you never reaches the tab at all — the browser sees a
 username, the granted scopes and a countdown.
 
-**The tab remembers a little, and never that.** Which profile you were on, what
+**The tab remembers a little, and never that.** Which model you were on, what
 you had half typed, how many turns you allow, which revision you pinned, which
-MCP servers you switched off — small
-settings whose loss is pure annoyance, kept in the browser's own storage. The
-credential is not among them, and neither is the conversation or the traffic: a
-session's bodies are unbounded, and the first oversized run would start throwing
-quota errors at a tool whose job is to be dependable while other things fail.
-Storage that is missing or full is a browser with no memory, never a page that
-fails to load. `mire` still holds nothing — this is the same side of the wire the
-conversation has always been on.
+MCP servers you switched off — small settings whose loss is pure annoyance, kept
+in the browser's own storage. The credential is not among them, and neither is
+the conversation or the traffic: a session's bodies are unbounded, and the first
+oversized run would start throwing quota errors at a tool whose job is to be
+dependable while other things fail. Storage that is missing or full is a browser
+with no memory, never a page that fails to load. `mire` still holds nothing —
+this is the same side of the wire the conversation has always been on.
 
 ### Having a conversation
 
-A chat profile keeps its turns. Send, get an answer, ask a follow-up: the
+A chat model keeps its turns. Send, get an answer, ask a follow-up: the
 question goes out with everything that came before it. It reads like a chat
 window, because that is the fastest way to tell whether a model is following you.
 
@@ -420,9 +452,9 @@ Four things follow, each of which is a decision:
   attached — the button says how many it takes with it, and what leaves the
   conversation stays in **Traffic**, which keeps every exchange this tab ever
   made. **Send** stays greyed out until there is something to say, so no request
-  ever leaves without the transcript showing what it carried — unless the profile
+  ever leaves without the transcript showing what it carried — unless the model
   says there is nothing to say at all, which is what
-  [`has_prompt: false`](#a-profile-with-nothing-to-type) is for.
+  [`has_prompt: false`](#a-model-with-nothing-to-type) is for.
 - **Only the answer the run finished on rejoins the history.** The tool calls in
   between and their results stay out of it: replaying them into the next request
   without their results is how you get a `400` from an endpoint that was working
@@ -455,13 +487,13 @@ by default — and lists what it stored. That is the whole feature, and the next
 sentence is the important one.
 
 **The file goes to the template, not to the endpoint.** The next **Send** hands
-it over as `uploads`, and what happens next is the profile's decision: a template
+it over as `uploads`, and what happens next is the model's decision: a template
 that never mentions `uploads` sends exactly what it always sent, the same way one
 that never mentions `stream` never streams. That is not a limitation to work
 around — it is the only arrangement in which "what did we send?" has one answer,
 written down, in a file you can read.
 
-So an attachment is an ingredient, and the profile is the recipe:
+So an attachment is an ingredient, and the model is the recipe:
 
 ```jinja
 {
@@ -511,7 +543,7 @@ serialised — nothing is reachable from one request source and not the other.
 
 The third recipe does not inline the file at all. An endpoint that wants a
 `multipart/form-data` — a transcriber, a diariser — gets the bytes as a form
-part, and the profile says so with `request.multipart:` instead of a template;
+part, and the model says so with `request.multipart:` instead of a template;
 see [When the endpoint takes a form, not
 JSON](#when-the-endpoint-takes-a-form-not-json).
 
@@ -526,7 +558,7 @@ Attachments are re-rendered on **every turn** of an agent loop, since the body i
 built from the template each time. And a template that inlines one puts it in the
 request body, so it arrives in **Traffic** at its full base64 size — a 12 MB photo
 is a 16 MB request to scroll past. Attach the file you meant to test with. (A
-`multipart:` profile does not have this problem: the panel names its parts rather
+`multipart:` model does not have this problem: the panel names its parts rather
 than repeating their bytes.)
 
 What the server does with the name it is given is worth knowing, since it is the
@@ -549,9 +581,9 @@ one place `mire` writes anything:
   Deleting things off a disk because a browser tab said so is not a thing this
   process does; the directory is yours to empty.
 
-#### When the profile cannot work without one
+#### When the model cannot work without one
 
-Some profiles have no call in them without a file. A transcriber, a diariser, an
+Some models have no call in them without a file. A transcriber, a diariser, an
 OCR service: the file *is* the question, and pressing **Send** with nothing
 attached renders a request built around something that is not there. Say so, and
 the refusal happens here rather than at the endpoint:
@@ -578,12 +610,12 @@ refused before a body is rendered, whatever sent it:
 ```json
 {
   "code": "upload_required",
-  "message": "profile `whisper` needs a file attached, and this call carries none"
+  "message": "model `whisper` needs a file attached, and this call carries none"
 }
 ```
 
 It says the call must carry *a* file, not which one, and not what becomes of it.
-Which upload the template reads is still the template's decision — a profile that
+Which upload the template reads is still the template's decision — a model that
 asks for a file and then never mentions `uploads` is asking for one it throws
 away, and that is visible in the same file, two lines down. This is a rule about
 whether there is a call to make at all.
@@ -591,40 +623,44 @@ whether there is a call to make at all.
 It is not the same check as a `multipart:` field naming a file nobody attached
 — see [When the endpoint takes a form, not
 JSON](#when-the-endpoint-takes-a-form-not-json). That one fires while the form is
-being built, and only for the profiles that build one; this one fires before any
+being built, and only for the models that build one; this one fires before any
 of that, for a `template:` and a `script:` too, and is what greys the button.
 
-It pairs with [`has_prompt: false`](#a-profile-with-nothing-to-type), which is
-what `profiles/whisper.yaml` declares: no box to type in, and the file the only
-thing left holding **Send** back. The two are independent — a vision endpoint
-asking a question *about* an attachment wants a box and a required file both —
-but on the profiles whose input is bytes they travel together.
+It pairs with [`has_prompt: false`](#a-model-with-nothing-to-type), which is
+what `config/models/whisper.yaml` declares: no box to type in, and the file the
+only thing left holding **Send** back. The two are independent — a vision
+endpoint asking a question *about* an attachment wants a box and a required file
+both — but on the models whose input is bytes they travel together.
 
 ### Saving a prompt
 
-A profile says how to reach an endpoint. A prompt says what to send it, and that
+A model says how to reach an endpoint. A prompt says what to send it, and that
 half is worth keeping for the same reason the first one is — the question that
 makes it call the tool, the one that makes it refuse, the paragraph that
 reproduces the bug. Retyping those from memory is how a comparison quietly stops
 being one.
 
-They live in `prompts.yaml`, next to the profiles, `auth.yaml` and `mcp.yaml`:
+They live one per file in `prompts/`, next to `models/`, `auth/` and `mcp/`:
 
 ```yaml
-prompts:
-  - name: ping
-    text: ping
-
-  - name: call a tool
-    text: What is the weather in Lyon right now?
-
-  - name: strict json
-    text: |
-      Answer with a JSON object and nothing else — no prose, no fences.
-      Keys: "city" (string), "temperature_c" (number), "measured_at" (RFC 3339).
+# prompts/01-ping.yaml
+---
+name: ping
+text: ping
 ```
 
-A name and its text. That is the whole shape, and the omissions are the design:
+```yaml
+# prompts/05-strict-json.yaml
+---
+name: strict json
+text: |
+  Answer with a JSON object and nothing else — no prose, no fences.
+  Keys: "city" (string), "temperature_c" (number), "measured_at" (RFC 3339).
+```
+
+A name and its text. That is the whole shape, and the omissions are the design.
+The file names carry the order the dropdown lists them in, which is why they are
+numbered — a library is a list somebody arranged:
 
 **Read-only, like everything else in this directory.** The file is the source of
 truth, your editor writes it, the watcher picks the change up without a restart.
@@ -634,12 +670,12 @@ also why the container can still run `--read-only`. A bad entry is reported in
 the UI and skipped; the rest still work, the same policy every other file here
 gets.
 
-**A prompt says nothing about where it goes.** No profile, no kind, no `auth:`.
+**A prompt says nothing about where it goes.** No model, no kind, no `auth:`.
 Picking one fills the box and stops there — nothing is sent, and what the text
-becomes on the wire is still the profile's template's decision. That is what
+becomes on the wire is still the model's template's decision. That is what
 lets the same question be replayed against every endpoint in the directory,
 which is the comparison you came here to make. The same library is offered to
-an embedding profile's **Input** box, where one saved text can be several: the
+an embedding model's **Input** box, where one saved text can be several: the
 box is one text per line and a multi-line `text:` arrives whole.
 
 **Picking replaces what is in the box.** It is the honest reading of "load the
@@ -756,8 +792,8 @@ export MODEL_TOKEN=anything   # the gateway only checks that a credential exists
 mire
 ```
 
-The profiles in `./profiles` — the default directory — point at that stack, so
-there is nothing to pass.
+The models in `./config/models` — under the default configuration directory —
+point at that stack, so there is nothing to pass.
 
 | Service | Port | What it is |
 | --- | --- | --- |
@@ -780,7 +816,7 @@ Models, as of August 2026 — these rankings move monthly, so revisit the choice
   Ollama. Faster than real time on a laptop CPU at `int8`. `-tiny` is a third of
   the size and audibly worse; `-small` is better and four times the download.
 
-Three profiles come with it:
+Three models come with it:
 
 - **`qwen3`** — the chat one, and it carries everything `mire` does with a chat
   endpoint at once: a template driven by the call, a decode cascade, an agent
@@ -834,9 +870,9 @@ gateway checks that a credential is *present* rather than valid, and Keycloak
 runs in dev mode against an in-memory database. Do not mistake it for a
 deployment.
 
-## Write a profile from a curl you already have
+## Write a model from a curl you already have
 
-One YAML file per endpoint, in the profiles directory. Take the `curl` you are
+One YAML file per endpoint, in `models/`. Take the `curl` you are
 pasting around today and split it into three parts: the URL, the body, the
 credential.
 
@@ -849,7 +885,7 @@ curl -X POST https://models.internal/mistral-small/v1/chat/completions \
   -d '{"model": "mistral-small", "messages": [{"role": "user", "content": "ping"}]}'
 ```
 
-The profile is:
+The model is:
 
 ```yaml
 ---
@@ -873,20 +909,20 @@ decode:
 ```
 
 The `Authorization` header became `auth: gateway-token`, a reference to an entry
-in `auth.yaml` next to your profiles:
+in `auth/`, next to your models:
 
 ```yaml
+# auth/gateway-token.yaml
 ---
-providers:
-  - name: gateway-token
-    kind: token
-    value:
-      env: MODEL_TOKEN
+name: gateway-token
+kind: token
+value:
+  env: MODEL_TOKEN
 ```
 
-**The token itself never goes in a profile.** It comes from an environment
+**The token itself never goes in a model.** It comes from an environment
 variable, a file re-read on every call (so a rotated service account token just
-works), or the UI. `auth.yaml` is safe to commit; it only says where to look.
+works), or the UI. `auth/` is safe to commit; it only says where to look.
 
 `anonymous` always exists without being declared. That is what lets you ask "is
 this route actually protected?" — and a `401` from it is a *passing* result, not
@@ -895,13 +931,13 @@ a failure.
 Any provider may add `allowed_hosts`, and every kind honours it:
 
 ```yaml
-    allowed_hosts:
-      - models.internal
+allowed_hosts:
+  - models.internal
 ```
 
 An empty list — the default — means anywhere. A non-empty one is a rule about
 where that credential may be sent, refused before anything goes out, and it is
-also what keeps the UI from offering a provider against a profile pointing
+also what keeps the UI from offering a provider against a model pointing
 somewhere it is not allowed to go.
 
 ### Testing with a workload identity
@@ -911,15 +947,15 @@ performs the `client_credentials` exchange itself, caches the access token and
 renews it 60 seconds before expiry:
 
 ```yaml
+# auth/oidc-workload.yaml
 ---
-providers:
-  - name: oidc-workload
-    kind: oidc
-    issuer: https://idp.internal/realms/models
-    client_id: mire
-    client_assertion:
-      file: /var/run/secrets/kubernetes.io/serviceaccount/token
-    audience: https://models.internal
+name: oidc-workload
+kind: oidc
+issuer: https://idp.internal/realms/models
+client_id: mire
+client_assertion:
+  file: /var/run/secrets/kubernetes.io/serviceaccount/token
+audience: https://models.internal
 ```
 
 `client_assertion` presents a **projected service account token** as an RFC 7523
@@ -944,15 +980,15 @@ in**, a tab opens at your identity provider, and the token that comes back is
 yours.
 
 ```yaml
+# auth/me.yaml
 ---
-providers:
-  - name: me
-    kind: oidc_browser
-    issuer: https://idp.internal/realms/models
-    client_id: mire-ui
-    scope:
-      - openid
-      - profile
+name: me
+kind: oidc_browser
+issuer: https://idp.internal/realms/models
+client_id: mire-ui
+scope:
+  - openid
+  - profile
 ```
 
 No `client_secret` — `mire` runs from a directory of YAML files and has no secret
@@ -988,24 +1024,24 @@ the `401` is then about something else (a missing scope, an audience mismatch),
 and replaying would only hide it.
 
 Since the same model can be pointed at all three modes without touching its
-profile, the matrix is two `POST /api/call` bodies apart:
+model, the matrix is two `POST /api/call` bodies apart:
 
 ```sh
 for auth in anonymous static-token keycloak-workload; do
   curl -s localhost:8787/api/call -H 'content-type: application/json' \
-    -d "{\"profile\": \"qwen3\", \"auth\": \"$auth\", \"prompt\": \"ping\"}" |
+    -d "{\"model\": \"qwen3\", \"auth\": \"$auth\", \"prompt\": \"ping\"}" |
     jq -r '"\(.auth): \(.response.http.status)"'
 done
 ```
 
-Editing anything in that directory — a profile *or* `auth.yaml` — reloads it: the
+Editing anything in that directory — a model *or* a provider — reloads it: the
 watcher picks the change up without a restart. Both swap together, so a call
-never sees a new profile against an old auth registry.
+never sees a new model against an old auth registry.
 
 A broken file never stops `mire` from starting, and never takes the good ones
-down with it. One malformed profile, or one bad entry in `auth.yaml`, is skipped
-and reported: `GET /api/profiles` and `GET /api/auth` each return an `issues`
-list with the file, the message and the position. You reach for this tool when
+down with it. One malformed model, or one bad provider, is skipped and reported:
+`GET /api/models` and `GET /api/auth` each return an `issues` list with the file,
+the message and the position. You reach for this tool when
 something is already wrong — it should come up and show you what, not refuse to
 run until its own config is perfect.
 
@@ -1020,7 +1056,7 @@ the thing you paste into a ticket:
 ```sh
 curl -s localhost:8787/api/call \
   -H 'content-type: application/json' \
-  -d '{"profile": "qwen3", "prompt": "ping"}' | jq -r .curl
+  -d '{"model": "qwen3", "prompt": "ping"}' | jq -r .curl
 ```
 
 Credentials are masked in the `curl` export, in the request view, and in every
@@ -1029,7 +1065,7 @@ trace and log line.
 ## Teach it a non-standard endpoint
 
 Not every endpoint answers like OpenAI. Each `decode:` field is a **cascade**:
-paths are tried in order and the first one that resolves wins, so one profile can
+paths are tried in order and the first one that resolves wins, so one model can
 cover several shapes — including an endpoint that changes between versions.
 
 ```yaml
@@ -1075,7 +1111,7 @@ and answers `200` with the complaint in the body is exactly the mismatch this
 catches — the UI badges it, and the traffic panel's failures filter finds it. The
 rule runs the other way too: a cascade that finds nothing under a `2xx` is not
 reported as a miss, because there was nothing to find; under a `4xx` or a `5xx`
-it is, because that is a profile with a blind spot.
+it is, because that is a model with a blind spot.
 
 Decoding never fails the call. If nothing matches you still get the raw JSON, the
 status, the latency — plus a trace saying exactly which paths were tried and what
@@ -1091,19 +1127,19 @@ went wrong:
 }
 ```
 
-That is the fast way to fix a profile: look at the raw tree, pick the right path,
-edit the file. See [`profiles/qwen3.yaml`](profiles/qwen3.yaml) for a worked
-example — one `decode:` block covering two unrelated response shapes, of which
-only the first wins until you point the profile at the other endpoint.
+That is the fast way to fix a model: look at the raw tree, pick the right path,
+edit the file. See [`config/models/qwen3.yaml`](config/models/qwen3.yaml) for a
+worked example — one `decode:` block covering two unrelated response shapes, of
+which only the first wins until you point the model at the other endpoint.
 
-A profile with no `decode:` block at all is valid — that is the normal state of
+A model with no `decode:` block at all is valid — that is the normal state of
 an endpoint you have not figured out yet.
 
 ### When a cascade is not enough
 
 Some things a path cannot do: strip a `<think>` block out of the content, join
 segments conditionally, compute anything. For those, and only for those, a
-profile can carry a Rhai script instead — on the request side, the response side,
+model can carry a Rhai script instead — on the request side, the response side,
 or both:
 
 ```yaml
@@ -1121,10 +1157,10 @@ decode:
     #{ content: content, finish_reason: raw.done_reason }
 ```
 
-A request script sees `messages`, `input`, `tools`, `model` and `params`, and
+A request script sees `messages`, `input`, `tools`, `model_id` and `params`, and
 returns the body — a string used verbatim, or a map or array that gets serialised
 for you. A decode script sees `raw`, `status` and `headers`, and returns a map:
-`content` / `tool_calls` / `finish_reason` / `usage` / `error` for a chat profile,
+`content` / `tool_calls` / `finish_reason` / `usage` / `error` for a chat model,
 `vectors` / `usage` / `error` for an embedding one — `vectors` being a list of
 vectors, or a list of *lists* of vectors for a multi-vector endpoint. `error` is read like the
 cascade reads one — a string is the message, a map is looked at for the usual
@@ -1145,10 +1181,10 @@ decode:
 is harder to read, harder to review, and it survives worse. It earns its place
 when the alternative is not supporting the endpoint at all. `template`, `script`
 and `multipart` are mutually exclusive, and so are `decode` paths and
-`decode.script` — a profile declaring two fails to load, so there is no
+`decode.script` — a model declaring two fails to load, so there is no
 precedence rule to remember. A request is one body.
 
-Scripts are compiled when the profile loads, so a syntax error names the file at
+Scripts are compiled when the model loads, so a syntax error names the file at
 startup. At call time they are bounded: 500k operations, a one-second deadline,
 caps on string, array and map sizes, and `eval` disabled. Rhai has no file,
 network or process access to begin with — there is nothing to take away, and a
@@ -1156,7 +1192,7 @@ test asserts it stays that way. A decode script that fails is *not* fatal: its
 message lands in the decode trace next to the raw response, exactly like a path
 that missed.
 
-Neither shipped chat profile uses one, on purpose: they are meant to be read, and
+Neither shipped chat model uses one, on purpose: they are meant to be read, and
 a script is what you add once a cascade has already failed you. The snippet above
 is the real motivating case — qwen3 emits its reasoning inside a
 `<think>…</think>` block, and no path can strip a prefix.
@@ -1180,9 +1216,9 @@ request:
 ```
 
 **A bare value is a text field**, and it is a template like any other — the same
-`messages`, `input`, `tools`, `model`, `params` and `uploads` a `template:` sees.
-Write a number or a boolean as itself if that is how the knob reads; a form sends
-text either way.
+`messages`, `input`, `tools`, `model_id`, `params` and `uploads` a `template:`
+sees. Write a number or a boolean as itself if that is how the knob reads; a form
+sends text either way.
 
 **`upload:` is what makes a field a file.** It names uploads of the call: the
 object whole (`{{ uploads[0] }}`), the list of them (`{{ uploads }}`), or a
@@ -1237,16 +1273,16 @@ Most parsers do not care, right up to the one that does.
 
 That refusal is the whole point of the shape. A form missing the one part the
 endpoint asked for goes out looking perfectly well-formed and comes back a `422`
-about a field nobody in the profile ever mentioned, which costs an afternoon.
+about a field nobody in the model ever mentioned, which costs an afternoon.
 
 It fires while the form is being built, though, which is after **Send**. Add
-`requires_upload: true` beside `kind:` and the same profile refuses earlier and
+`requires_upload: true` beside `kind:` and the same model refuses earlier and
 in the UI as well — the button greys rather than producing a failure to read. See
-[When the profile cannot work without
-one](#when-the-profile-cannot-work-without-one).
+[When the model cannot work without
+one](#when-the-model-cannot-work-without-one).
 
 You never write the `content-type`: the encoder settles it at send time, boundary
-included, and a `headers.content-type` in the profile is dropped with a warning
+included, and a `headers.content-type` in the model is dropped with a warning
 rather than sent beside the real one.
 
 The rest is unchanged. `auth:` still puts the credential where the provider says,
@@ -1275,19 +1311,19 @@ curl -sS -X POST \
   -F 'prompt=mire, endpoints'
 ```
 
-[`profiles/whisper.yaml`](profiles/whisper.yaml) is the worked example, and
-`docker compose up -d` serves something for it to talk to — see [A stack to point
-it at](#a-stack-to-point-it-at). The pyannote variant is written out in a comment
+[`config/models/whisper.yaml`](config/models/whisper.yaml) is the worked
+example, and `docker compose up -d` serves something for it to talk to — see
+[A stack to point it at](#a-stack-to-point-it-at). The pyannote variant is written out in a comment
 beside it.
 
-### A profile with nothing to type
+### A model with nothing to type
 
 The composer holds **Send** back until there is something in the box, because a
 request nobody can see the input of is the one thing this tool exists not to
 send. On a transcriber that rule is backwards: the input is the audio, and the
 box is a place to write a question the endpoint is never asked.
 
-So a profile can say so:
+So a model can say so:
 
 ```yaml
 name: whisper
@@ -1296,23 +1332,23 @@ has_prompt: false
 url: http://127.0.0.1:9000/v1/audio/transcriptions
 ```
 
-`true` is the default and every other profile takes it. `false` does two things
+`true` is the default and every other model takes it. `false` does two things
 and no more: the message box and the saved-prompt picker go away, and **Send**
 goes out with an empty conversation instead of waiting. **Attach**, **stream**,
 **max turns**, the servers, the traffic and the `401` replay are all unchanged —
 this is a statement about the composer, not about the wire.
 
-"Instead of waiting" is about the box only. A profile also declaring
-[`requires_upload: true`](#when-the-profile-cannot-work-without-one) still waits
+"Instead of waiting" is about the box only. A model also declaring
+[`requires_upload: true`](#when-the-model-cannot-work-without-one) still waits
 — for the file, which on an endpoint like this one is the whole of the input.
 
-Nothing else is special-cased. A template on such a profile still renders, now
+Nothing else is special-cased. A template on such a model still renders, now
 against an empty `messages`, which is the same rule `uploads` and `stream`
 follow: what goes out is what the request says goes out.
 
-`profiles/whisper.yaml` declares it, and moves whisper's `prompt` field — which
-is a vocabulary hint rather than an instruction — to a knob, since that is what
-it always was:
+`config/models/whisper.yaml` declares it, and moves whisper's `prompt` field —
+which is a vocabulary hint rather than an instruction — to a knob, since that is
+what it always was:
 
 ```yaml
     prompt: '{{ params.prompt | default("") }}'
@@ -1320,7 +1356,7 @@ it always was:
 
 ```sh
 curl -sS localhost:8787/api/call -H 'content-type: application/json' \
-  -d '{"profile": "whisper", "uploads": ["<id>"],
+  -d '{"model": "whisper", "uploads": ["<id>"],
        "params": {"prompt": "mire, Keycloak, speaches"}}'
 ```
 
@@ -1334,19 +1370,18 @@ with a result. They are deterministic, depend on nothing, and execute nothing �
 which is most of what you want, most of the time.
 
 The other half of "does tool calling work" needs a real server. Declare one in
-`mcp.yaml`, next to your profiles:
+`mcp/`, next to your models:
 
 ```yaml
 ---
-servers:
-  - name: files
-    url: https://mcp.internal/mcp
-    auth: keycloak-workload
+name: files
+url: https://mcp.internal/mcp
+auth: keycloak-workload
 ```
 
 That is the whole opt-in. Every server declared there is offered to every
-`kind: chat` profile — there is no second list to keep in step, and a server
-added to this file is reachable from the profile you were already running.
+`kind: chat` model — there is no second list to keep in step, and a server
+added to this file is reachable from the model you were already running.
 Declaring it is the deliberate act, because a tool call here really runs
 somewhere; leaving one out of a single run is what the composer's **Servers** row
 and `mcpServers:` are [for](#switching-one-off-for-a-run).
@@ -1417,9 +1452,10 @@ quietly settle for something and call it success.
 Pin it when the version is the thing under test:
 
 ```yaml
-  - name: files-on-the-old-one
-    url: https://mcp.internal/mcp
-    protocol_version: 2025-06-18
+---
+name: files-on-the-old-one
+url: https://mcp.internal/mcp
+protocol_version: 2025-06-18
 ```
 
 A pin skips both probes. Pinning a revision the server refuses gets you the
@@ -1436,19 +1472,19 @@ because both are parameters of the run — asks it directly, and `POST /api/agen
 takes the same thing:
 
 ```json
-{ "profile": "chat", "prompt": "weather in Paris?", "mcpProtocol": "2025-03-26" }
+{ "model": "chat", "prompt": "weather in Paris?", "mcpProtocol": "2025-03-26" }
 ```
 
-The dropdown is there for a chat profile only, and so is the endpoint that reads
+The dropdown is there for a chat model only, and so is the endpoint that reads
 it: an embedding call opens no connection to a server, so there is no revision
 for it to be spoken in.
 
 `auto` — the default, and the field simply left out — is the negotiation as
 described above, with `protocol_version:` still in charge where a server declares
 one. Naming a revision overrides both, for that run and no other: it applies to
-every server the profile reaches (one trace speaking two revisions is a result
+every server the model reaches (one trace speaking two revisions is a result
 nobody can attribute), it is stated rather than probed for, and it leaves the
-revision every other caller is speaking exactly where it was. `mcp.yaml` remains
+revision every other caller is speaking exactly where it was. `mcp/` remains
 the place for a pin you want to keep. A revision this build does not speak is a
 `422` before anything is sent, and `GET /api/mcp` lists the ones it does.
 
@@ -1459,7 +1495,7 @@ plumbing. Twice in a row is reported, because at that point it is not plumbing.
 
 ### Switching one off for a run
 
-Which servers exist at all is `mcp.yaml`'s business: declaring one is opt-in,
+Which servers exist at all is `mcp/`'s business: declaring one is opt-in,
 never implied, because a tool call here really runs somewhere. Which of them
 **this** run reaches is a different question, and it comes up constantly — does
 the model still get there without the search tool, is that server the thing that
@@ -1473,19 +1509,19 @@ credential is fetched, and its tools are not offered to the model.
 `POST /api/agent` takes the same thing:
 
 ```json
-{ "profile": "chat", "prompt": "weather in Paris?", "mcpServers": ["files"] }
+{ "model": "chat", "prompt": "weather in Paris?", "mcpServers": ["files"] }
 ```
 
 Leave the field out — the default — and the run reaches every declared server,
 which is what the file says. Send a list and it reaches those, `[]` included: a
-loop with nothing set up, offered the profile's own simulated `tools:` and
+loop with nothing set up, offered the model's own simulated `tools:` and
 nothing else. That empty list is not the same as saying nothing, on purpose —
 "none of them" is an answer, and it should not be spelled the same way as
 "whatever the file says". It is also one press of **None**, which is why the pair
 of buttons is there: the interesting extreme is worth asking for in one gesture
 rather than six.
 
-**It only ever narrows.** Naming a server `mcp.yaml` does not declare is a `404`
+**It only ever narrows.** Naming a server `mcp/` does not declare is a `404`
 (`unknown_mcp_server`) before anything is sent — a typo, not a server this
 request gets to invent. The file stays the authority on what exists, and the
 checkbox decides what this run actually did.
@@ -1494,9 +1530,9 @@ Switching one off takes its blockers with it. A server whose browser identity
 nobody has signed in to would have refused the first tool call with a `409`; off,
 it is not in the run, so the preflight bar goes green and the sign-in it was
 asking for disappears from the auth panel. What stays is a line naming what was
-left out, because a run reaching fewer
-servers than `mcp.yaml` declares is a fact you want in front of you rather than
-one to reconstruct from the traffic afterwards.
+left out, because a run reaching fewer servers than `mcp/` declares is a fact
+you want in front of you rather than one to reconstruct from the traffic
+afterwards.
 
 ### A token that does not fit
 
@@ -1504,17 +1540,18 @@ one to reconstruct from the traffic afterwards.
 tenant header, a scheme nobody else uses — `headers:` takes MiniJinja templates:
 
 ```yaml
-  - name: files
-    url: https://mcp.internal/mcp
-    headers:
-      x-api-key: "{{ env.FILES_API_KEY }}"
-      x-tenant: "{{ env.TENANT | default('dev') }}"
+---
+name: files
+url: https://mcp.internal/mcp
+headers:
+  x-api-key: "{{ env.FILES_API_KEY }}"
+  x-tenant: "{{ env.TENANT | default('dev') }}"
 ```
 
 They are rendered **on every request**, with `env` read fresh each time, so a
 rotated token is picked up without restarting — the same property that makes
 `value.file` work for a projected service account token. Templates are compiled
-when `mcp.yaml` loads, so a syntax error names the server at startup rather than
+when the file loads, so a syntax error names the server at startup rather than
 on the first agent run.
 
 An undefined variable is an **error**, not an empty string. `Authorization:
@@ -1533,10 +1570,11 @@ cannot have.
 name, each entry the **bare token** that provider would produce:
 
 ```yaml
-  - name: files
-    url: https://mcp.internal/mcp
-    headers:
-      x-api-key: '{{ auth["keycloak-workload"] }}'
+---
+name: files
+url: https://mcp.internal/mcp
+headers:
+  x-api-key: '{{ auth["keycloak-workload"] }}'
 ```
 
 So the two mechanisms compose instead of competing. `auth:` decides *where* a
@@ -1571,11 +1609,12 @@ may call — that is the honest default for a server you deliberately pointed at
 you only meant to read:
 
 ```yaml
-  - name: files
-    url: https://mcp.internal/mcp
-    tools:
-      - read_file
-      - list_directory
+---
+name: files
+url: https://mcp.internal/mcp
+tools:
+  - read_file
+  - list_directory
 ```
 
 Annotations (`readOnlyHint`, `destructiveHint`) are reported, never enforced:
@@ -1591,21 +1630,21 @@ the inputs before a task runs. `hooks:` on a server declares that, fired `before
 the call goes out, `after` it comes back, or both:
 
 ```yaml
-servers:
-  - name: files
-    url: https://mcp.internal/mcp
-    hooks:
-      - name: audit
-        on:
-          - before
-          - after
-        actions:
-          - http:
-              url: https://audit.internal/tool-calls
-              auth: keycloak-workload
-              json:
-                ran: '{{ tool }}'
-                arguments: '{{ arguments }}'
+---
+name: files
+url: https://mcp.internal/mcp
+hooks:
+  - name: audit
+    on:
+      - before
+      - after
+    actions:
+      - http:
+          url: https://audit.internal/tool-calls
+          auth: keycloak-workload
+          json:
+            ran: '{{ tool }}'
+            arguments: '{{ arguments }}'
 ```
 
 `actions:` is a list because one event is usually two calls to two different
@@ -1662,7 +1701,7 @@ shipping a run's whole variable bag to a third party because somebody wrote
 `{{ call }}` is a decision nobody made. Ask for them by name and they are yours.
 
 Undefined is an error in all of this, exactly as it is in a header template, and
-every template is compiled when `mcp.yaml` loads — so a typo names the hook and
+every template is compiled when the file loads — so a typo names the hook and
 the action at startup rather than twenty minutes into a run. `auth` is
 deliberately **not** in scope: a credential belongs in a header, where the
 redactor is.
@@ -1708,7 +1747,7 @@ Anchoring is the conservative half of the choice. A gate written as `write_file`
 must not quietly grow to cover `overwrite_file_backup` because the matcher got
 cleverer, so widening is something you ask for — `write_.*`, or `.*` for
 everything. Empty — the default — is every tool. Patterns compile when
-`mcp.yaml` loads, like the templates beside them: a `tools:` entry that is not a
+the file loads, like the templates beside them: a `tools:` entry that is not a
 regex names its hook at startup rather than covering nothing in silence.
 
 **It can send the run's files.** `multipart:` is one entry per form field, each
@@ -1740,7 +1779,7 @@ out with the part missing — and both are worth stopping for, because the
 alternative is an endpoint explaining your own configuration back to you.
 
 `json:` and `multipart:` are two bodies, and declaring both is refused when
-`mcp.yaml` loads: whichever one `mire` picked would be the other one you meant.
+the file loads: whichever one `mire` picked would be the other one you meant.
 For a webhook that wants the bytes inline instead, the files reach a `json:`
 template as `uploads`, whole — `base64`, `dataUrl`, `text`, the entries a model
 template gets from the same run:
@@ -1802,25 +1841,25 @@ not look like a slow tool).
 
 A tool answers, and something in that answer is what the next thing needs: a
 session id, a job handle, the path a server just wrote. `capture:` on a server in
-`mcp.yaml` names those, by JSONPath, per tool:
+A server file names those, by JSONPath, per tool:
 
 ```yaml
-servers:
-  - name: files
-    url: https://mcp.internal/mcp
-    capture:
-      - tools:
-          - create_session
-        vars:
-          session:
-            - $.sessionId
+---
+name: files
+url: https://mcp.internal/mcp
+capture:
+  - tools:
+      - create_session
+    vars:
+      session:
+        - $.sessionId
 ```
 
-**It lives on the server, not on a model's profile.** A rule is a statement about
+**It lives on the server, not on a model's model.** A rule is a statement about
 a **tool**, and a tool does not belong to a model: `create_session` answers a
 session id at `$.sessionId` whether the model that called it is the one you
 deployed or the one you are comparing it against. Written once beside the server
-that advertises the tool, every `kind: chat` profile gets it — and the comparison
+that advertises the tool, every `kind: chat` model gets it — and the comparison
 between two models is not a comparison between two copies of a rule that have to
 be kept identical by hand.
 
@@ -1846,11 +1885,11 @@ a tool that opens a session can put that session on every later request to the
 server it opened it on.
 
 ```yaml
-servers:
-  - name: files
-    url: https://mcp.internal/mcp
-    headers:
-      x-session: "{{ vars.session | default('') }}"
+---
+name: files
+url: https://mcp.internal/mcp
+headers:
+  x-session: "{{ vars.session | default('') }}"
 ```
 
 **The `| default('')` there is not decoration.** A server's headers render on
@@ -1860,7 +1899,7 @@ default, that run dies negotiating, which is a strange way to find out that a
 session is opened by a tool. A hook's headers have no such problem: a hook only
 fires around a call, so anything captured before that call is already there.
 
-`url:` is ordinarily just a URL, parsed and checked when `mcp.yaml` loads, and it
+`url:` is ordinarily just a URL, parsed and checked when the file loads, and it
 stays that: a template is only a template when it contains one, so a typo in a
 scheme is still a startup issue rather than a string that renders beautifully and
 fails on the first tool call. When it *is* a template it sees exactly what
@@ -1883,14 +1922,14 @@ order, first hit wins:
           - $.session.id
 ```
 
-Paths and `tools:` patterns compile when `mcp.yaml` loads, so a typo names the
+Paths and `tools:` patterns compile when the file loads, so a typo names the
 file and the field at startup. So does a variable name a template could not read:
 `{{ vars.my id }}` is not a thing, and finding that out in a rendered URL is
 finding it out too late.
 
 Three rules, each of them a decision rather than an accident:
 
-- **Only a real server's tools capture.** A profile's simulated
+- **Only a real server's tools capture.** A model's simulated
   [`tools:`](#agent-mode) are answered inside this process and belong to no
   server, so nothing is read out of them however JSON-shaped their answer is.
   `tools:` inside a rule is the same anchored-regex list a hook's is; empty is
@@ -1943,21 +1982,21 @@ endpoint that may well answer `200`.
 more than one statement, and the rules run in the order the file writes them:
 
 ```yaml
-servers:
-  - name: files
-    url: https://mcp.internal/mcp
-    capture:
-      - tools:
-          - create_session
-        vars:
-          session:
-            - $.sessionId
-            - $.session.id
-      - tools:
-          - read_.*
-        vars:
-          path:
-            - $.path
+---
+name: files
+url: https://mcp.internal/mcp
+capture:
+  - tools:
+      - create_session
+    vars:
+      session:
+        - $.sessionId
+        - $.session.id
+  - tools:
+      - read_.*
+    vars:
+      path:
+        - $.path
 ```
 
 The **rules** belong to a server; the **bag** they fill does not. A run reaching
@@ -1973,7 +2012,7 @@ what is wrong with it:
 
 ```json
 {
-  "file": "/etc/mire/profiles/mcp.yaml",
+  "file": "/etc/mire/config/mcp/files.yaml",
   "message": "MCP server `files`: capture rule 1: `my id` cannot be read as `vars.my id`: use letters, digits and underscores"
 }
 ```
@@ -2046,7 +2085,7 @@ got, and **Failed** leaves it alone.
 A condition that cannot be *evaluated* at all — an unknown filter, a call to
 something that is not callable — is a different thing, and it is a hook failure
 like any other: `on_error` decides what it does to the call. The expression
-itself is compiled when `mcp.yaml` loads, so a syntax error is a startup issue
+itself is compiled when the file loads, so a syntax error is a startup issue
 naming the hook rather than a surprise on the first tool call. What it *reads* is
 checked against nothing — a variable may be captured by this server, by another
 one the run happens to reach, or by nobody — so a condition naming a variable
@@ -2060,7 +2099,7 @@ took. That number is dominated by how much the model chose to say. The one worth
 having is **time to first token** — how long before it started answering — and
 you cannot measure it without reading the response in pieces.
 
-Two lines make a profile streamable:
+Two lines make a model streamable:
 
 ```yaml
 request:
@@ -2073,7 +2112,7 @@ decode:
     - $.message.content            # Ollama's native NDJSON
 ```
 
-`stream` comes from the call, not from the file, so one profile serves both
+`stream` comes from the call, not from the file, so one model serves both
 shapes: the **stream** box next to **Send** is what asks for chunks rather than a
 whole answer, and it asks it of the run whatever **max turns** says — one turn or
 the whole loop. It is off by default, because streaming is a second thing for an
@@ -2093,7 +2132,7 @@ request body — which is why the flag goes through the template rather than bei
 something `mire` does on your behalf.
 
 ```console
-$ curl -N -X POST localhost:8787/api/call/stream -d '{"profile":"qwen3","prompt":"…"}'
+$ curl -N -X POST localhost:8787/api/call/stream -d '{"model":"qwen3","prompt":"…"}'
 event: open
 data: {"event":"open","status":200,…}
 
@@ -2144,7 +2183,7 @@ every delta and lose nothing.
 
 ```console
 $ curl -N -X POST localhost:8787/api/agent \
-    -d '{"profile":"qwen3","prompt":"weather in Lyon?","stream":true}'
+    -d '{"model":"qwen3","prompt":"weather in Lyon?","stream":true}'
 event: delta
 data: {"event":"delta","turn":1,"text":"Let me"}
 …
@@ -2165,13 +2204,13 @@ sort of difference between two backends this tool exists to surface.
 
 ## Embeddings
 
-An embedding profile takes `input` — a string or a list of strings — instead of
+An embedding model takes `input` — a string or a list of strings — instead of
 `messages`, and the answer is judged on its *shape*:
 
 ```sh
 curl -s localhost:8787/api/call \
   -H 'content-type: application/json' \
-  -d '{"profile": "nomic", "input": ["one", "two"], "repeat": 2}' | jq .response.decoded
+  -d '{"model": "nomic", "input": ["one", "two"], "repeat": 2}' | jq .response.decoded
 ```
 
 ```json
@@ -2259,14 +2298,14 @@ is the only way to get it.
 
 ## The loop
 
-The loop is not a third payload format and not a second profile. It is the same
-`kind: chat` profile, run round: render, call, decode; if the stop condition is
+The loop is not a third payload format and not a second model. It is the same
+`kind: chat` model, run round: render, call, decode; if the stop condition is
 not met, answer the tool calls with their simulated results, feed them back, go
 round again. `POST /api/call` runs one turn of exactly the same thing.
 
 Which is why the UI has no mode to pick. **Send** is the loop, whatever the
-profile declares, and **max turns** says how far it may go — at **1**, one turn
-of the very same thing, which is one call and one answer. A profile that declares
+model declares, and **max turns** says how far it may go — at **1**, one turn
+of the very same thing, which is one call and one answer. A model that declares
 no tool stops on turn one anyway. So the only question the composer asks about
 turns is *how many*, never *which mechanism*: there has only ever been one. How
 the answer *arrives* is the **stream** box, which is a
@@ -2274,16 +2313,16 @@ the answer *arrives* is the **stream** box, which is a
 own answer, asked whatever the count.
 
 The servers are not part of that count. A declared server is set up for a chat
-profile's run whether it has one turn or twenty — one turn against a real server
+model's run whether it has one turn or twenty — one turn against a real server
 is a fair question, since "does the model ask for the tool `tools/list` showed
 it?" is answerable without ever answering the call. What takes a server out of a
 run is [unticking it](#switching-one-off-for-a-run), which leaves the model
-offered the profile's own `tools:` and nothing else, and answers the question
+offered the model's own `tools:` and nothing else, and answers the question
 that comes after: what does the loop do when the tool it wants is not there?
 
 The single-shot routes stay where they are useful, on the API rather than behind
 a button. `POST /api/call` and `POST /api/call/stream` never discover, list or
-call a tool, whatever `mcp.yaml` declares — which is exactly what you want from
+call a tool, whatever `mcp/` declares — which is exactly what you want from
 a `curl` that is asking one question about one request.
 
 It runs on the [conversation](#having-a-conversation) in the browser, and when it
@@ -2324,9 +2363,9 @@ script that sees `arguments`, `name` and `turn`. What is being checked is that
 the model emits calls matching the schema it was given, and knows what to do with
 a result. Arguments are validated against that schema and the mismatches are
 reported; the model still gets an answer, so it has a chance to correct itself. A
-tool the profile never declared gets an error back rather than silence.
+tool the model never declared gets an error back rather than silence.
 
-`POST /api/agent` streams server-sent events: one `setup` event if the profile
+`POST /api/agent` streams server-sent events: one `setup` event if the model
 has MCP servers, a `turn` event per turn as it happens, then one `done` carrying
 the whole trace. Send `"stream": true` and each turn is preceded by one `delta`
 event per chunk it was written in, each naming its turn — see
@@ -2350,7 +2389,7 @@ There is no silent loop. The one worth spelling out:
 {"outcome": "predicateNeverEvaluable", "predicate": "stop_when.finish_reason_in", "turns": 3}
 ```
 
-A profile that stops only on `finish_reason`, pointed at an endpoint that never
+A model that stops only on `finish_reason`, pointed at an endpoint that never
 reports one, would otherwise run to `max_iterations` and look like a slow agent.
 It is not — the condition could never be evaluated once, and that is what gets
 reported. The others are `stopped` (a predicate held), `maxIterations`,
@@ -2369,11 +2408,11 @@ ninety seconds.
 
 | Route | What it does |
 | --- | --- |
-| `GET /api/profiles` | Every profile, plus the files that failed to load and why |
-| `GET /api/profiles/{name}` | One profile, as declared |
-| `GET /api/prompts` | Prompts declared in `prompts.yaml`, plus the entries that did not load |
+| `GET /api/models` | Every model, plus the files that failed to load and why |
+| `GET /api/models/{name}` | One model, as declared |
+| `GET /api/prompts` | Prompts declared in `prompts/`, plus the entries that did not load |
 | `GET /api/auth` | Auth providers, with session status |
-| `GET /api/mcp` | MCP servers declared in `mcp.yaml` — what each one authenticates with, the hooks around its calls, and what it captures — plus the entries that did not load |
+| `GET /api/mcp` | MCP servers declared in `mcp/` — what each one authenticates with, the hooks around its calls, and what it captures — plus the entries that did not load |
 | `GET /api/mcp/{name}/tools` | Ask a server what it offers, right now, and on which revision |
 | `POST /api/auth/{name}/login` | Start a browser login; returns where to send it |
 | `POST /api/auth/{name}/logout` | Forget the session `mire` holds |

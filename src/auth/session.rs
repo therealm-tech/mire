@@ -1,7 +1,7 @@
 //! Browser login sessions, held outside the auth registry.
 //!
 //! A registry is rebuilt from scratch every time the configuration directory
-//! changes — which, in a tool whose selling point is that editing a profile takes
+//! changes — which, in a tool whose selling point is that editing a model takes
 //! effect immediately, would mean being logged out every time you fix a typo. So
 //! the tokens live here instead, in a store the reload does not touch, and the
 //! providers only borrow it.

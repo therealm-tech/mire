@@ -84,12 +84,12 @@ export function ChatPanel({
   /** The last run was called off rather than finished. */
   stopped: boolean
   prompt: string
-  /** The library `prompts.yaml` declares, offered above the box. */
+  /** The library `prompts/` declares, offered above the box. */
   prompts: PromptsResponse
   /**
-   * Whether this profile takes a message at all.
+   * Whether this model takes a message at all.
    *
-   * False on a profile declaring `has_prompt: false` — a transcriber, a
+   * False on a model declaring `has_prompt: false` — a transcriber, a
    * classifier, anything whose input is the attachment rather than a sentence.
    * The box and the prompt library go with it, and **Send** stops waiting for
    * words nobody has to write.
@@ -105,7 +105,7 @@ export function ChatPanel({
   error: { code: string; message: string; detail?: unknown } | null
   revisions: string[]
   mcpProtocol: string | null
-  /** Every MCP server the profile names. */
+  /** Every MCP server the model names. */
   mcpServers: string[]
   /** The ones switched off for the next run. */
   mcpOff: string[]
@@ -117,7 +117,7 @@ export function ChatPanel({
   attaching: boolean
   attachError: { code: string; message: string; detail?: unknown } | null
   /**
-   * The profile declares `requires_upload:` and nothing is attached yet.
+   * The model declares `requires_upload:` and nothing is attached yet.
    *
    * **Send** stays shut until something is: the server refuses this call before
    * it renders a body, and a button that only produces a `422` is a button that
@@ -175,7 +175,7 @@ export function ChatPanel({
             <p className="py-8 text-center text-muted text-sm">
               {hasPrompt
                 ? 'Nothing said yet. Ask something below.'
-                : 'Nothing sent yet. Attach what this profile reads, and send.'}
+                : 'Nothing sent yet. Attach what this model reads, and send.'}
             </p>
           ) : null}
 
@@ -278,7 +278,7 @@ function Bubble({
   turns: number
   busy: boolean
   /**
-   * Nothing can be sent at all — a `requires_upload:` profile with the file since
+   * Nothing can be sent at all — a `requires_upload:` model with the file since
    * detached. A retry is a send, so it goes the same way **Send** does rather
    * than being the one door left open onto a `422`.
    */
@@ -318,7 +318,7 @@ function Bubble({
           aria-label={`Retry turn ${position}`}
           title={
             blocked
-              ? 'This profile is built around a file, and none is attached.'
+              ? 'This model is built around a file, and none is attached.'
               : (mine
                   ? 'Send the conversation again, ending on this message.'
                   : 'Drop this answer and ask the same question again.') + cost
@@ -601,7 +601,7 @@ function Writing({
  *
  * The bluntness is the point, and the sentence is a careful one. These files go
  * out with the next **Send** — as `uploads`, to the *template*, not to the
- * endpoint. Whether any of it reaches a wire is the profile's decision: a
+ * endpoint. Whether any of it reaches a wire is the model's decision: a
  * template that never mentions `uploads` sends exactly what it always sent, and
  * a chip promising otherwise would be this tool lying about what it transmitted.
  * So the line says where they go and stops there, and **Traffic** below settles
@@ -656,7 +656,7 @@ function Attachments({
           </ul>
           <p className="text-faint text-xs">
             Stored on the machine running <strong className="font-medium">mire</strong>, and handed
-            to this profile's template as <code className="font-mono">uploads</code> on the next{' '}
+            to this model's template as <code className="font-mono">uploads</code> on the next{' '}
             <strong>Send</strong>. Whether {files.length === 1 ? 'it reaches' : 'they reach'} the
             endpoint is the template's call — one that never mentions{' '}
             <code className="font-mono">uploads</code> sends what it always sent.{' '}
@@ -733,7 +733,7 @@ function Composer({
   attaching: boolean
   attachError: { code: string; message: string; detail?: unknown } | null
   /**
-   * The profile declares `requires_upload:` and nothing is attached yet.
+   * The model declares `requires_upload:` and nothing is attached yet.
    *
    * **Send** stays shut until something is: the server refuses this call before
    * it renders a body, and a button that only produces a `422` is a button that
@@ -753,7 +753,7 @@ function Composer({
 }) {
   // An empty box is nothing to say, not an instruction to send the history
   // again — that is what **Retry** is for, and it says which turn it repeats.
-  // Unless there is no box: a profile declaring `has_prompt: false` is one whose
+  // Unless there is no box: a model declaring `has_prompt: false` is one whose
   // input never was a sentence, so there is nothing to wait for and **Send** is
   // live from the start.
   const empty = hasPrompt && prompt.trim().length === 0
@@ -761,7 +761,7 @@ function Composer({
   // Every reason **Send** does not go, in one place, because Enter has to obey
   // the same list the button does. The last is the one worth pointing at: a
   // missing file is fixed by **Attach**, right there two buttons along, rather
-  // than by anything in the box — which on a `has_prompt: false` profile is not
+  // than by anything in the box — which on a `has_prompt: false` model is not
   // even there.
   const stuck = busy || empty || needsUpload
 
@@ -770,7 +770,7 @@ function Composer({
   // nobody wins, so it stays hidden and gets clicked from here.
   const picker = useRef<HTMLInputElement>(null)
 
-  // One turn is a run with no second turn to loop into: the same profile and the
+  // One turn is a run with no second turn to loop into: the same model and the
   // same rendered request as a longer run, stopped after one. A cap rather than a
   // mode of its own, because a mode implies two mechanisms and there is one.
   const single = maxIterations === 1
@@ -818,13 +818,13 @@ function Composer({
         </>
       ) : (
         /*
-          No box, because the profile says it has no question to ask: what goes
+          No box, because the model says it has no question to ask: what goes
           in is the attachment and whatever the request builds around it. Said
           out loud rather than left as the gap where a box used to be — a
           composer with nothing to type in reads as a bug otherwise.
         */
         <p className="text-muted text-sm">
-          This profile takes no message: what goes out is what its request builds — the file you
+          This model takes no message: what goes out is what its request builds — the file you
           attach, and the fields around it.
         </p>
       )}
@@ -843,10 +843,10 @@ function Composer({
           onClick={onSend}
           title={
             needsUpload
-              ? 'This profile is built around a file. Attach one, and Send comes back.'
+              ? 'This model is built around a file. Attach one, and Send comes back.'
               : single
-                ? 'One turn of this profile, and no second one: a tool call comes back unanswered.'
-                : 'Run the profile in a loop, answering its tools. A profile with none stops on turn one.'
+                ? 'One turn of this model, and no second one: a tool call comes back unanswered.'
+                : 'Run the model in a loop, answering its tools. A model with none stops on turn one.'
           }
         >
           Send
@@ -935,13 +935,13 @@ function Composer({
       <Attachments files={attachments} error={attachError} busy={attaching} onDetach={onDetach} />
 
       <p className="text-faint text-xs">
-        <strong>Send</strong> runs this profile in a loop, answering the tools the model asks for
+        <strong>Send</strong> runs this model in a loop, answering the tools the model asks for
         until it stops asking — or until <strong>max turns</strong>, which at{' '}
-        <strong className="font-medium">1</strong> is a single turn and no loop at all. A profile
-        that declares no tool stops on turn one anyway. <strong>stream</strong> is the other
-        question, asked whatever the count: read the answer chunk by chunk as it arrives, which is
-        the only way to see time to first token and the only way to watch it being written. It
-        reaches the wire only if the profile's template passes <code>stream</code> on.
+        <strong className="font-medium">1</strong> is a single turn and no loop at all. A model that
+        declares no tool stops on turn one anyway. <strong>stream</strong> is the other question,
+        asked whatever the count: read the answer chunk by chunk as it arrives, which is the only
+        way to see time to first token and the only way to watch it being written. It reaches the
+        wire only if the model's template passes <code>stream</code> on.
       </p>
       {single ? (
         <p className="text-faint text-xs">

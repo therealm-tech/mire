@@ -66,7 +66,7 @@ pub struct AuthorizationRequest {
     pub state: String,
 }
 
-/// Everything needed to build an [`OidcBrowserAuth`], as declared in `auth.yaml`.
+/// Everything needed to build an [`OidcBrowserAuth`], as declared in `auth/`.
 #[derive(Debug, Clone)]
 pub struct OidcBrowserConfig {
     /// Registry name.
@@ -110,7 +110,7 @@ pub struct OidcBrowserAuth {
     http: Client,
     discovery: RwLock<Option<Endpoints>>,
     /// Shared with every other provider, and *not* rebuilt on a config reload —
-    /// which is what keeps you signed in while you edit a profile.
+    /// which is what keeps you signed in while you edit a model.
     sessions: Arc<SessionStore>,
     /// Serialises refreshes so a burst of calls triggers one exchange, not ten.
     refreshing: tokio::sync::Mutex<()>,
@@ -502,7 +502,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn openid_is_added_when_the_profile_forgets_it() {
+    async fn openid_is_added_when_the_provider_forgets_it() {
         let sessions = Arc::new(SessionStore::default());
         let auth = provider(Arc::clone(&sessions));
 

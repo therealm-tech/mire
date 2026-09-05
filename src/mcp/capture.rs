@@ -9,10 +9,10 @@
 //! A rule is a statement about a **tool**, and a tool belongs to the server that
 //! advertises it. `create_session` answers a session id at `$.sessionId`
 //! whichever model happens to call it, so writing the rule into each model's
-//! profile made a comparison between two files that had to be kept identical by
+//! model made a comparison between two files that had to be kept identical by
 //! hand — exactly the shape of thing that quietly stops being identical.
 //!
-//! So the rule sits with the server, in `mcp.yaml`, beside the `headers:` and
+//! So the rule sits with the server, in `mcp/`, beside the `headers:` and
 //! `hooks:` that read what it captures:
 //!
 //! ```yaml
@@ -27,12 +27,12 @@
 //!             - $.sessionId
 //! ```
 //!
-//! Every chat profile that reaches that server captures the same thing, because
+//! Every chat model that reaches that server captures the same thing, because
 //! there is only one place it is written.
 //!
 //! # What this means for simulated tools
 //!
-//! Nothing: a profile's `tools:` are answered inside this process and belong to
+//! Nothing: a model's `tools:` are answered inside this process and belong to
 //! no server, so they capture nothing. Capture is what a *real* server's answer
 //! leaves behind.
 
@@ -42,8 +42,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use validator::{Validate, ValidationError};
 
+use crate::model::JsonPathExpr;
 use crate::pattern::NamePattern;
-use crate::profile::JsonPathExpr;
 
 /// Variables to pull out of a tool's result, and the tools they come from.
 ///
@@ -131,7 +131,7 @@ mod tests {
         let error = rule("vars:\n  id: ['not a path']\n").expect_err("it is not a path");
 
         // Named down to the variable, because "a parser error somewhere in
-        // mcp.yaml" is not a thing anybody can act on.
+        // `mcp/`" is not a thing anybody can act on.
         assert!(error.contains("vars.id"), "{error}");
     }
 

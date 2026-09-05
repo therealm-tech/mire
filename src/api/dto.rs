@@ -16,67 +16,67 @@ use crate::auth::registry::AuthDescriptor;
 use crate::exec::{CallEvent, CallInput, CallOutcome};
 use crate::issue::LoadIssue;
 use crate::message::Message;
-use crate::profile::loader::ProfileSet;
-use crate::profile::{Profile, ProfileKind};
+use crate::model::loader::ModelSet;
+use crate::model::{Model, ModelKind};
 use crate::prompt::{Prompt, PromptRegistry};
 use crate::redact::Secret;
 
-/// One profile, as listed.
+/// One model, as listed.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct ProfileSummary {
-    /// Profile name, the identifier used everywhere else.
+pub struct ModelSummary {
+    /// Model name, the identifier used everywhere else.
     pub name: String,
     /// What the endpoint does.
-    pub kind: ProfileKind,
-    /// `false` when the profile takes no typed message, so the composer hides
+    pub kind: ModelKind,
+    /// `false` when the model takes no typed message, so the composer hides
     /// the box instead of holding **Send** back for one.
     pub has_prompt: bool,
     /// Where it points.
     pub url: Url,
-    /// Auth provider the profile defaults to, for the call to the model.
+    /// Auth provider the model defaults to, for the call to the model.
     pub auth: Option<String>,
     /// File it was read from.
     pub source: String,
-    /// `false` when the profile has no `decode:` block yet, so the UI can offer
+    /// `false` when the model has no `decode:` block yet, so the UI can offer
     /// the assisted discovery flow instead of showing an empty result.
     pub has_decode: bool,
-    /// `true` when the profile declares `requires_upload:`, so the composer can
+    /// `true` when the model declares `requires_upload:`, so the composer can
     /// say so before **Send** rather than after the `422` — the refusal is the
     /// server's either way.
     pub requires_upload: bool,
 }
 
-impl From<&Profile> for ProfileSummary {
-    fn from(profile: &Profile) -> Self {
+impl From<&Model> for ModelSummary {
+    fn from(model: &Model) -> Self {
         Self {
-            name: profile.name.clone(),
-            kind: profile.kind,
-            has_prompt: profile.has_prompt,
-            url: profile.url.clone(),
-            auth: profile.auth.clone(),
-            source: profile.source.display().to_string(),
-            has_decode: !profile.decode.is_empty(),
-            requires_upload: profile.requires_upload,
+            name: model.name.clone(),
+            kind: model.kind,
+            has_prompt: model.has_prompt,
+            url: model.url.clone(),
+            auth: model.auth.clone(),
+            source: model.source.display().to_string(),
+            has_decode: !model.decode.is_empty(),
+            requires_upload: model.requires_upload,
         }
     }
 }
 
-/// The profiles directory: what loaded, and what did not.
+/// The models directory: what loaded, and what did not.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct ProfilesResponse {
-    /// Profiles that parsed and validated.
-    pub profiles: Vec<ProfileSummary>,
+pub struct ModelsResponse {
+    /// Models that parsed and validated.
+    pub models: Vec<ModelSummary>,
     /// Files that did not, with the reason and position.
     pub issues: Vec<LoadIssue>,
 }
 
-impl ProfilesResponse {
-    /// The profiles directory as the UI reads it.
+impl ModelsResponse {
+    /// The models directory as the UI reads it.
     #[must_use]
-    pub fn new(set: &ProfileSet) -> Self {
+    pub fn new(set: &ModelSet) -> Self {
         Self {
-            profiles: set.iter().map(|profile| profile.as_ref().into()).collect(),
+            models: set.iter().map(|model| model.as_ref().into()).collect(),
             issues: set.issues().to_vec(),
         }
     }
@@ -86,10 +86,10 @@ impl ProfilesResponse {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptsResponse {
-    /// Declared prompts, in the order `prompts.yaml` writes them — a library is
+    /// Declared prompts, in the order the listing gives them — a library is
     /// a list somebody arranged, so it is not re-sorted on the way out.
     pub prompts: Vec<Prompt>,
-    /// Entries of `prompts.yaml` that did not load.
+    /// Entries of `prompts/` that did not load.
     pub issues: Vec<LoadIssue>,
 }
 
@@ -108,7 +108,7 @@ impl From<&PromptRegistry> for PromptsResponse {
 pub struct AuthResponse {
     /// Declared providers, plus the built-in anonymous one.
     pub providers: Vec<AuthDescriptor>,
-    /// Entries of `auth.yaml` that did not load. `anonymous` still works.
+    /// Entries of `auth/` that did not load. `anonymous` still works.
     pub issues: Vec<LoadIssue>,
 }
 
@@ -125,7 +125,7 @@ pub struct McpResponse {
     /// hard-codes it is a UI that offers a revision the server was never built
     /// with the day one is added or dropped.
     pub revisions: Vec<crate::mcp::Revision>,
-    /// Entries of `mcp.yaml` that did not load.
+    /// Entries of `mcp/` that did not load.
     pub issues: Vec<LoadIssue>,
 }
 
@@ -188,7 +188,7 @@ impl From<crate::uploads::StoredFile> for UploadResponse {
 /// Naming an MCP server in the path.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct McpPath {
-    /// Server name, as declared in `mcp.yaml`.
+    /// Server name, as declared in `mcp/`.
     pub name: String,
 }
 
@@ -238,17 +238,17 @@ impl JsonSchema for TextInput {
     }
 }
 
-/// Naming a profile in the path.
+/// Naming a model in the path.
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct ProfilePath {
-    /// Profile name.
+pub struct ModelPath {
+    /// Model name.
     pub name: String,
 }
 
 /// Path parameters for the auth routes.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AuthPath {
-    /// Auth provider name, as declared in `auth.yaml`.
+    /// Auth provider name, as declared in `auth/`.
     pub name: String,
 }
 
@@ -323,17 +323,17 @@ pub struct CallbackQuery {
 #[derive(Debug, Deserialize, JsonSchema, Validate)]
 #[serde(deny_unknown_fields)]
 #[schemars(extend("example" = serde_json::json!({
-    "profile": "mistral-small",
+    "model": "mistral-small",
     "auth": "anonymous",
     "prompt": "ping"
 })))]
 #[serde(rename_all = "camelCase")]
 pub struct CallRequest {
-    /// Profile to run.
+    /// Model to run.
     #[validate(length(min = 1))]
-    pub profile: String,
+    pub model: String,
 
-    /// Auth provider, overriding the profile's own. Omit to use the profile's,
+    /// Auth provider, overriding the model's own. Omit to use the model's,
     /// which is the point of the three-mode replay.
     #[serde(default)]
     pub auth: Option<String>,
@@ -366,9 +366,12 @@ pub struct CallRequest {
     #[serde(default)]
     pub uploads: Vec<String>,
 
-    /// Model identifier handed to the template.
+    /// Model identifier handed to the template, overriding whatever it bakes in.
+    ///
+    /// Reaches it as `model_id`, and names the model the *endpoint* serves — not
+    /// the `model:` of this request, which is the entry in `models/` being run.
     #[serde(default)]
-    pub model: Option<String>,
+    pub model_id: Option<String>,
 
     /// Credential for a provider that declares no source. Never stored, never
     /// echoed back.
@@ -427,19 +430,19 @@ impl From<CallRequest> for CallInput {
         };
 
         Self {
-            profile: request.profile,
+            model: request.model,
             auth: request.auth,
             messages,
             input: request.input.into(),
             params: request.params,
-            model: request.model,
+            model_id: request.model_id,
             token: request.token,
             stream: request.stream,
             include_vectors: request.include_vectors,
             repeat: request.repeat,
             tolerance: request.tolerance,
             // Both filled in after this: the tools by the agent loop from the
-            // profile's MCP servers, the uploads by the handler, which is the
+            // model's MCP servers, the uploads by the handler, which is the
             // only layer allowed to read a directory.
             extra_tools: Vec::new(),
             uploads: Vec::new(),
@@ -454,7 +457,7 @@ mod tests {
     #[test]
     fn prompt_is_shorthand_for_one_user_message() {
         let request: CallRequest =
-            serde_json::from_value(serde_json::json!({"profile": "p", "prompt": "ping"})).unwrap();
+            serde_json::from_value(serde_json::json!({"model": "p", "prompt": "ping"})).unwrap();
         let input: CallInput = request.into();
 
         assert_eq!(input.messages.len(), 1);
@@ -464,7 +467,7 @@ mod tests {
     #[test]
     fn explicit_messages_win_over_prompt() {
         let request: CallRequest = serde_json::from_value(serde_json::json!({
-            "profile": "p",
+            "model": "p",
             "prompt": "ignored",
             "messages": [{"role": "system", "content": "kept"}],
         }))
@@ -478,7 +481,7 @@ mod tests {
     #[test]
     fn a_supplied_token_never_reappears_in_debug_output() {
         let request: CallRequest =
-            serde_json::from_value(serde_json::json!({"profile": "p", "token": "s3cr3t-value"}))
+            serde_json::from_value(serde_json::json!({"model": "p", "token": "s3cr3t-value"}))
                 .unwrap();
         assert!(!format!("{request:?}").contains("s3cr3t-value"));
     }
@@ -486,7 +489,7 @@ mod tests {
     #[test]
     fn a_multi_word_field_is_camel_case_on_the_wire() {
         let request: CallRequest =
-            serde_json::from_value(serde_json::json!({"profile": "p", "includeVectors": true}))
+            serde_json::from_value(serde_json::json!({"model": "p", "includeVectors": true}))
                 .unwrap();
         assert!(request.include_vectors);
     }
@@ -496,33 +499,33 @@ mod tests {
 #[derive(Debug, Deserialize, JsonSchema, Validate)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 #[schemars(extend("example" = serde_json::json!({
-    "profile": "qwen3",
+    "model": "qwen3",
     "prompt": "What is the weather in Paris?",
     "maxIterations": 6
 })))]
 pub struct AgentRequest {
     /// Everything a single call needs. `includeVectors`, `repeat` and
     /// `tolerance` are ignored: they belong to `kind: embedding`, and agent mode
-    /// runs a chat profile.
+    /// runs a chat model.
     #[serde(flatten)]
     #[validate(nested)]
     pub call: CallRequest,
 
-    /// Turn budget, overriding the profile's `agent.max_iterations`.
+    /// Turn budget, overriding the model's `agent.max_iterations`.
     #[serde(default)]
     #[validate(range(min = 1, max = 50))]
     pub max_iterations: Option<u32>,
 
-    /// Which of the profile's MCP servers this run may reach.
+    /// Which of the model's MCP servers this run may reach.
     ///
-    /// Omit it — the default — and the run reaches every server the profile
+    /// Omit it — the default — and the run reaches every server the model
     /// names, which is what the file says. A list narrows that to the ones named,
-    /// `[]` included: a loop with no server set up offers the model the profile's
+    /// `[]` included: a loop with no server set up offers the model the model's
     /// simulated `tools:` and nothing else, which is how you ask what it does
-    /// when the tool it wants is not there, without editing the profile.
+    /// when the tool it wants is not there, without editing the model.
     ///
-    /// It only narrows. A server this profile does not name is a `422`, not a
-    /// server this run gets to add: `mcp:` is opt-in per profile because it is
+    /// It only narrows. A server this model does not name is a `422`, not a
+    /// server this run gets to add: `mcp:` is opt-in per model because it is
     /// the one thing here with effects outside the process, and a request is not
     /// where that opt-in is granted.
     #[serde(default)]
@@ -531,7 +534,7 @@ pub struct AgentRequest {
     /// Revision to speak to every MCP server this run touches.
     ///
     /// Omit it — the default — and each server settles its own the way it always
-    /// did: `protocol_version:` from `mcp.yaml` when it has one, the negotiation
+    /// did: `protocol_version:` from `mcp/` when it has one, the negotiation
     /// otherwise. Naming one here overrides both, for this run only, which is
     /// what makes "does my endpoint still work on `2025-03-26`?" a question you
     /// answer by asking rather than by editing a file.

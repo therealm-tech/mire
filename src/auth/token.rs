@@ -1,6 +1,6 @@
 //! Static-token auth: `Authorization: Bearer <token>`, with both parts configurable.
 //!
-//! The token value never comes from the profile YAML — that file goes in Git. It
+//! The token value never comes from the model YAML — that file goes in Git. It
 //! comes from an environment variable, a file re-read on every call (so rotation
 //! works), or the UI.
 

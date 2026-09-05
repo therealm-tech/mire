@@ -344,7 +344,7 @@ function Body({ text }: { text: string }) {
 /**
  * The parts of a `multipart:` request, in the order they went out.
  *
- * Order is shown because it is the profile's and the wire's, not the alphabet's
+ * Order is shown because it is the model's and the wire's, not the alphabet's
  * — and a reader comparing this against a `curl` that worked wants the two lists
  * to line up.
  */
@@ -494,7 +494,7 @@ function ModelCard({
 
             {/*
               Not said when the endpoint reported an error: there is nothing
-              wrong with the profile, and sending the reader off to fix its
+              wrong with the model, and sending the reader off to fix its
               paths would be sending them the wrong way.
             */}
             {decoded.content === null && !error ? (
@@ -752,7 +752,7 @@ function HookCard({
           And when there was neither. Said rather than left blank: an empty
           Request section reads as something the panel failed to show, and the
           answer — this action declares no body — is one somebody would otherwise
-          go looking for in `mcp.yaml`.
+          go looking for in `mcp/`.
         */}
         {skipped === undefined && hook.request.length === 0 && hook.files.length === 0 ? (
           <p className="text-muted text-sm">
@@ -1006,7 +1006,7 @@ function DecodeTraceView({ trace }: { trace: DecodeTrace }) {
   if (matched.length === 0 && missed.length === 0 && trace.issues.length === 0) {
     return (
       <p className="text-muted text-xs">
-        Nothing was decoded — the profile declares no <span className="font-mono">decode:</span>{' '}
+        Nothing was decoded — the model declares no <span className="font-mono">decode:</span>{' '}
         block, or the call never got far enough to try.
       </p>
     )
@@ -1040,7 +1040,7 @@ function DecodeTraceView({ trace }: { trace: DecodeTrace }) {
       </ul>
       {missed.length > 0 ? (
         <p className="text-muted text-xs">
-          Pick the right path in the raw response, then add it to the profile's{' '}
+          Pick the right path in the raw response, then add it to the model's{' '}
           <span className="font-mono">decode:</span> block — it reloads without a restart.
         </p>
       ) : null}

@@ -37,11 +37,11 @@ changelog:
         - fix
 
     # Worth its own section in a tool whose whole surface is a YAML file: a
-    # profile key that changed name is a release note, not an implementation
+    # model key that changed name is a release note, not an implementation
     # detail.
-    - title: Configuration and profiles
+    - title: Configuration and models
       labels:
-        - profiles
+        - models
         - config
 
     - title: Documentation

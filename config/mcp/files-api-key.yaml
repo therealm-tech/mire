@@ -1,0 +1,19 @@
+# The same credentials, placed by hand, for the server that wants the token
+# somewhere `auth:` would never put it. `auth` is the registry itself, keyed by
+# provider name, each entry the bare token that provider would produce — so every
+# provider in `../auth/` is available here, including inside a larger value.
+#
+# Write the bracket form: `auth.keycloak-workload` parses as a subtraction.
+#
+# Templated headers are applied first and the `auth:` provider last, so on a name
+# collision the named provider wins — it is the more specific statement, and it
+# should not be silently overwritten by a hand-written header. Only the providers
+# actually named get resolved: asking for a token costs an exchange and can fail,
+# and neither belongs to a server that never asked.
+
+# ---
+# name: files-api-key
+# url: https://mcp.internal/mcp
+# headers:
+#   x-api-key: '{{ auth["keycloak-workload"] }}'
+#   authorization: 'Custom tenant=acme token={{ auth["keycloak-user"] }}'

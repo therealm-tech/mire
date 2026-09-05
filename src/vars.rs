@@ -2,7 +2,7 @@
 //!
 //! A tool answers, and something in that answer is the thing the *next* request
 //! needs: a session id, a job handle, the path a server just wrote. `capture:`
-//! on a server in `mcp.yaml` names those, by `JSONPath`, per tool:
+//! on a server in `mcp/` names those, by `JSONPath`, per tool:
 //!
 //! ```yaml
 //! servers:
@@ -29,7 +29,7 @@
 //!
 //! Because [`crate::decode`] already reads responses that way, cascades and all:
 //! a list of paths, tried in order, first hit wins. One notation for "the bit of
-//! this JSON I mean", compiled when `mcp.yaml` loads, so a typo is a startup
+//! this JSON I mean", compiled when the file loads, so a typo is a startup
 //! issue naming the file and the field rather than a variable that is silently
 //! never set.
 //!
@@ -39,7 +39,7 @@
 //! as JSON otherwise. A tool answering something that is not JSON captures
 //! nothing — there is no path into prose.
 //!
-//! Only a real server's tools, at that. A profile's simulated `tools:` are
+//! Only a real server's tools, at that. A model's simulated `tools:` are
 //! answered in this process and belong to no server, so nothing captures from
 //! them — see [`crate::mcp::capture`].
 //!
@@ -89,7 +89,7 @@ use tracing::{debug, warn};
 
 use crate::decode::paths::resolve_one;
 use crate::mcp::capture::CaptureRule;
-use crate::profile::JsonPathExpr;
+use crate::model::JsonPathExpr;
 
 /// Variables by name, in the order a template will see them.
 pub type Captured = BTreeMap<String, Value>;
@@ -187,7 +187,7 @@ impl Vars {
     }
 }
 
-/// The paths a cascade tried, as written in `mcp.yaml`.
+/// The paths a cascade tried, as written in `mcp/`.
 fn tried(cascade: &[JsonPathExpr]) -> String {
     cascade
         .iter()
@@ -218,8 +218,8 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::model::JsonPathExpr;
     use crate::pattern::NamePattern;
-    use crate::profile::JsonPathExpr;
 
     fn rules(tools: &[&str], vars: &[(&str, &[&str])]) -> Vec<CaptureRule> {
         vec![CaptureRule {

@@ -1,0 +1,8 @@
+# Long enough to watch arriving. With **stream** ticked this is where time to
+# first token stops being a number and starts being something you can see.
+---
+name: stream something
+text: |
+  Explain, in about three hundred words, why a checksum is not a signature.
+  Use headings and a short list, so the markdown rendering has something to
+  chew on.

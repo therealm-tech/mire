@@ -16,7 +16,7 @@ import type { Exchange } from './conversation'
 export interface RunExport {
   tool: 'mire'
   exportedAt: string
-  profile: string | null
+  model: string | null
   /** Where it was pointed, and who it went as. */
   endpoint: string | null
   identity: string | null
@@ -26,14 +26,14 @@ export interface RunExport {
 }
 
 export function runExport({
-  profile,
+  model,
   endpoint,
   identity,
   messages,
   exchanges,
   at,
 }: {
-  profile: string | null
+  model: string | null
   endpoint: string | null
   identity: string | null
   messages: Message[]
@@ -44,7 +44,7 @@ export function runExport({
   return {
     tool: 'mire',
     exportedAt: at.toISOString(),
-    profile,
+    model,
     endpoint,
     identity,
     messages,
@@ -53,12 +53,12 @@ export function runExport({
 }
 
 /** `mire-chat-2026-08-14T09-31-07.json` — sortable, and safe on every filesystem. */
-export function exportFilename(profile: string | null, at: Date): string {
+export function exportFilename(model: string | null, at: Date): string {
   const stamp = at
     .toISOString()
     .replace(/\.\d+Z$/, '')
     .replace(/:/g, '-')
-  return `mire-${profile ?? 'run'}-${stamp}.json`
+  return `mire-${model ?? 'run'}-${stamp}.json`
 }
 
 /**

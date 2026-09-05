@@ -25,7 +25,7 @@ use serde_json::Value;
 use super::chat::type_name;
 use super::paths::{self, resolve_one};
 use super::{DecodeField, DecodeTrace};
-use crate::profile::DecodeSpec;
+use crate::model::DecodeSpec;
 
 /// What the endpoint said went wrong, normalised.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -115,7 +115,7 @@ impl DecodedError {
 /// not recorded: the endpoint answered, there is no error, and listing the paths
 /// that failed to find one on every successful call would bury the trace under
 /// the one thing that went right. A cascade that misses on a refusal *is*
-/// recorded — that is a profile with a blind spot, and it is worth naming.
+/// recorded — that is a model with a blind spot, and it is worth naming.
 ///
 /// A node that resolves but carries no message, class or code is not reported as
 /// an error either — and on a `2xx` it is not reported at all. `error: ["$"]` is
@@ -262,7 +262,7 @@ mod tests {
     }
 
     /// The other half of that rule: when the endpoint *did* refuse and no path
-    /// found the sentence, the profile has a blind spot worth naming.
+    /// found the sentence, the model has a blind spot worth naming.
     #[test]
     fn a_refusal_no_path_reaches_is_recorded_as_a_miss() {
         let raw = serde_json::json!({"failure": {"why": "quota"}});
@@ -276,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn a_profile_that_asks_for_nothing_is_never_reported_as_missing() {
+    fn a_model_that_asks_for_nothing_is_never_reported_as_missing() {
         let mut trace = DecodeTrace::default();
         assert!(
             decode(

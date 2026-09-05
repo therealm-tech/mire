@@ -1,0 +1,7 @@
+# Multi-line text arrives whole. For an embedding model the box is one text per
+# line, so this is two of them.
+---
+name: two texts
+text: |
+  the cat sat on the mat
+  le chat était assis sur le tapis

@@ -5,7 +5,7 @@ use serde_json::Value;
 use super::paths::{self, resolve, resolve_one};
 use super::{Completion, DecodeField, DecodeTrace, Usage};
 use crate::message::ToolCall;
-use crate::profile::DecodeSpec;
+use crate::model::DecodeSpec;
 
 /// Decodes `raw` according to `spec`.
 ///
@@ -238,7 +238,7 @@ usage: ["$.usage"]
     /// The endpoint that does not follow the `OpenAI` shape: content in blocks,
     /// tool calls at the top level with `input`, a differently named stop field.
     #[test]
-    fn decodes_a_block_shaped_response_through_the_same_profile() {
+    fn decodes_a_block_shaped_response_through_the_same_model() {
         let raw = serde_json::json!({
             "content": [
                 {"type": "text", "text": "let me check "},

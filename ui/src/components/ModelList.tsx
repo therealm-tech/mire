@@ -1,13 +1,13 @@
-import type { LoadIssue, ProfileSummary } from '../api'
+import type { LoadIssue, ModelSummary } from '../api'
 import { Badge } from './primitives'
 
-export function ProfileList({
-  profiles,
+export function ModelList({
+  models,
   issues,
   selected,
   onSelect,
 }: {
-  profiles: ProfileSummary[]
+  models: ModelSummary[]
   issues: LoadIssue[]
   selected: string | null
   onSelect: (name: string) => void
@@ -15,36 +15,34 @@ export function ProfileList({
   return (
     <div className="space-y-3">
       <ul className="space-y-1">
-        {profiles.map((profile) => (
-          <li key={profile.name}>
+        {models.map((model) => (
+          <li key={model.name}>
             <button
               type="button"
-              aria-current={profile.name === selected ? 'true' : undefined}
-              onClick={() => onSelect(profile.name)}
+              aria-current={model.name === selected ? 'true' : undefined}
+              onClick={() => onSelect(model.name)}
               className={`w-full rounded border px-2 py-1.5 text-left transition-colors ${
-                profile.name === selected
+                model.name === selected
                   ? 'border-line-strong bg-well'
                   : 'border-transparent hover:bg-well'
               }`}
             >
               <span className="flex items-center gap-2">
-                <span className="truncate font-medium text-sm">{profile.name}</span>
-                <Badge tone={profile.kind === 'embedding' ? 'warn' : 'neutral'}>
-                  {profile.kind}
-                </Badge>
-                {profile.hasDecode ? null : <Badge tone="warn">no decode</Badge>}
+                <span className="truncate font-medium text-sm">{model.name}</span>
+                <Badge tone={model.kind === 'embedding' ? 'warn' : 'neutral'}>{model.kind}</Badge>
+                {model.hasDecode ? null : <Badge tone="warn">no decode</Badge>}
               </span>
               <span className="mt-0.5 block truncate font-mono text-[11px] text-faint">
-                {profile.url}
+                {model.url}
               </span>
             </button>
           </li>
         ))}
       </ul>
 
-      {profiles.length === 0 ? (
+      {models.length === 0 ? (
         <p className="text-muted text-xs">
-          No profile loaded. Drop a YAML file in the profiles directory — it is picked up without a
+          No model loaded. Drop a YAML file in the models directory — it is picked up without a
           restart.
         </p>
       ) : null}

@@ -1,13 +1,14 @@
-//! The auth registry: `auth.yaml`, sitting next to the profiles.
+//! The auth registry: one file per provider, in a configuration directory's
+//! `auth/`.
 //!
-//! Separate from the profiles so that one model can be replayed against every mode
+//! Separate from the models so that one model can be replayed against every mode
 //! without duplicating its file. Credentials are never *in* here — only where to
 //! find them.
 //!
-//! Loading follows the same policy as profiles: one bad entry is reported and
-//! skipped, the rest still work, and [`ANONYMOUS`] always exists. A registry you
+//! Loading follows the same policy as models: one bad entry is reported and
+//! skipped, the rest still work, and [`ANONYMOUS`] always exists. A provider you
 //! cannot load at all is exactly when you most want the tool to come up and tell
-//! you why. Layered directories follow the profiles' rule too: a provider
+//! you why. Layered directories follow the models' rule too: a provider
 //! declared in two of them is the later one's, said out loud in the log.
 
 use std::collections::BTreeMap;
@@ -26,8 +27,8 @@ use super::oidc::{ClientCredential, OidcAuth, OidcConfig};
 use super::session::{SessionStore, SessionView};
 use super::token::{TokenAuth, TokenValue};
 use super::{Anonymous, Auth, AuthProvider};
+use crate::config::layout;
 use crate::issue::LoadIssue;
-use crate::profile::loader::AUTH_REGISTRY_FILE;
 
 /// Name of the always-available anonymous provider.
 pub const ANONYMOUS: &str = "anonymous";
@@ -66,7 +67,7 @@ pub struct AuthDescriptor {
     /// Hosts this credential may be sent to. Empty — the default — means
     /// anywhere.
     ///
-    /// Advertised so the UI can stop offering a provider against a profile it
+    /// Advertised so the UI can stop offering a provider against a model it
     /// could never authenticate. The rule itself is enforced here, on every
     /// call; this is the same statement said early enough to be a choice rather
     /// than an error.
@@ -126,7 +127,8 @@ impl Default for AuthRegistry {
 }
 
 impl AuthRegistry {
-    /// Loads `auth.yaml` from each of the profile directories, in order.
+    /// Loads every provider file in each configuration directory's `auth/`, in
+    /// order.
     ///
     /// `http` is the shared client, handed to OIDC providers so that discovery and
     /// the token exchange go through the same CA bundle and redirect policy as
@@ -144,43 +146,41 @@ impl AuthRegistry {
     ) -> Self {
         let mut registry = Self::with_builtins();
         for dir in dirs {
-            registry.read(&dir.as_ref().join(AUTH_REGISTRY_FILE), http, sessions);
+            registry.read_dir(dir.as_ref(), http, sessions);
         }
         registry
     }
 
-    /// Loads `auth.yaml` from a single profiles directory.
+    /// Loads the providers of a single configuration directory.
     #[must_use]
     pub fn load(dir: &Path, http: &Client, sessions: &Arc<SessionStore>) -> Self {
         Self::load_dirs(&[dir], http, sessions)
     }
 
-    /// Folds one `auth.yaml` in, on top of whatever earlier directories declared.
-    fn read(&mut self, path: &Path, http: &Client, sessions: &Arc<SessionStore>) {
-        if !path.exists() {
-            debug!(path = %path.display(), "no auth registry, anonymous only");
-            return;
-        }
-
-        let text = match std::fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(error) => {
-                self.issues.push(LoadIssue::new(path, error.to_string()));
-                return;
-            }
-        };
-
-        let file: RegistryFile = match serde_yaml_ng::from_str(&text) {
-            Ok(file) => file,
-            Err(error) => {
-                self.issues.push(LoadIssue::from_yaml(path, &error));
-                return;
-            }
-        };
-
-        for config in file.providers {
-            if let Err(issue) = self.insert(path, config, http, sessions) {
+    /// Folds one directory's `auth/` in, on top of whatever earlier directories
+    /// declared.
+    fn read_dir(&mut self, dir: &Path, http: &Client, sessions: &Arc<SessionStore>) {
+        let paths = match layout::entries(dir, layout::AUTH) {
+            Ok(paths) => paths,
+            Err(issue) => {
                 self.issues.push(issue);
+                return;
+            }
+        };
+
+        // Which names *this* directory has already used, as opposed to the ones
+        // an earlier one declared: the first is a typo, the second is layering.
+        let mut here: BTreeMap<String, PathBuf> = BTreeMap::new();
+
+        for path in paths {
+            match layout::read::<ProviderConfig>(&path) {
+                Ok(None) => debug!(path = %path.display(), "file declares no auth provider"),
+                Ok(Some(config)) => {
+                    if let Err(issue) = self.insert(&path, &mut here, config, http, sessions) {
+                        self.issues.push(issue);
+                    }
+                }
+                Err(issue) => self.issues.push(issue),
             }
         }
     }
@@ -225,33 +225,36 @@ impl AuthRegistry {
     fn insert(
         &mut self,
         path: &Path,
+        here: &mut BTreeMap<String, PathBuf>,
         config: ProviderConfig,
         http: &Client,
         sessions: &Arc<SessionStore>,
     ) -> Result<(), LoadIssue> {
         let (name, provider, descriptor) = build(path, config, http, sessions)?;
 
-        match self.sources.get(&name) {
-            // Same file twice. Redeclaring `anonymous` is allowed — it is how you
-            // scope it with `allowed_hosts`. Any other collision is a mistake.
-            Some(previous) if previous == path => {
-                if name != ANONYMOUS {
-                    return Err(LoadIssue::new(
-                        path,
-                        format!("duplicate auth provider `{name}`"),
-                    ));
-                }
-            }
-            // A later directory redeclaring it, which is what layering is for.
-            // Not an issue, but not silent either: an OIDC provider quietly
-            // swapped for a token one is a long afternoon.
-            Some(previous) => warn!(
+        // Twice in this directory: a mistake, and the first file keeps the name.
+        if let Some(previous) = here.insert(name.clone(), path.to_path_buf()) {
+            return Err(LoadIssue::new(
+                path,
+                format!(
+                    "duplicate auth provider `{name}`, already declared in {}",
+                    previous.display()
+                ),
+            ));
+        }
+
+        // Once here and once in a directory read earlier: layering doing its job.
+        // Not an issue, but not silent either — an OIDC provider quietly swapped
+        // for a token one is a long afternoon. A file declaring `anonymous`
+        // reaches none of this: the built-in is not a declaration, so scoping it
+        // with `allowed_hosts` is an ordinary entry rather than a collision.
+        if let Some(previous) = self.sources.get(&name) {
+            warn!(
                 %name,
                 path = %path.display(),
                 shadowed = %previous.display(),
                 "auth provider overridden by a later directory"
-            ),
-            None => {}
+            );
         }
 
         debug!(name = %provider.name(), "auth provider registered");
@@ -262,13 +265,6 @@ impl AuthRegistry {
         self.providers.insert(name, provider);
         Ok(())
     }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RegistryFile {
-    #[serde(default)]
-    providers: Vec<ProviderConfig>,
 }
 
 /// One declared entry, turned into a live provider and what the UI is told.
@@ -520,12 +516,19 @@ mod tests {
         AuthRegistry::load(dir, &Client::new(), &Arc::new(SessionStore::default()))
     }
 
-    fn write_registry(tag: &str, body: &str) -> PathBuf {
+    /// A configuration directory whose `auth/` holds one file per provider.
+    fn write_providers(tag: &str, files: &[(&str, &str)]) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("mire-registry-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(AUTH_REGISTRY_FILE), body).unwrap();
+        std::fs::create_dir_all(dir.join(layout::AUTH)).unwrap();
+        for (name, body) in files {
+            std::fs::write(dir.join(layout::AUTH).join(name), body).unwrap();
+        }
         dir
+    }
+
+    fn write_provider(tag: &str, name: &str, body: &str) -> PathBuf {
+        write_providers(tag, &[(&format!("{name}.yaml"), body)])
     }
 
     #[test]
@@ -540,16 +543,30 @@ mod tests {
         assert!(registry.issues().is_empty());
     }
 
+    /// A file shipped commented out is an example, not a provider. It must not
+    /// come back as a complaint about a document that is `null`.
+    #[test]
+    fn a_file_that_declares_nothing_is_skipped() {
+        let dir = write_provider(
+            "commented",
+            "example",
+            "# - name: files-token\n#   kind: token\n",
+        );
+
+        let registry = load(&dir);
+
+        assert_eq!(registry.descriptors().len(), 1);
+        assert!(registry.issues().is_empty(), "{:?}", registry.issues());
+    }
+
     #[test]
     fn a_later_directory_takes_a_provider_the_earlier_one_declared() {
-        let base = write_registry(
+        let base = write_provider(
             "layer-base",
-            "providers:\n  - name: gateway\n    kind: token\n    value:\n      env: MODEL_TOKEN\n",
+            "gateway",
+            "name: gateway\nkind: token\nvalue:\n  env: MODEL_TOKEN\n",
         );
-        let mine = write_registry(
-            "layer-mine",
-            "providers:\n  - name: gateway\n    kind: anonymous\n",
-        );
+        let mine = write_provider("layer-mine", "gateway", "name: gateway\nkind: anonymous\n");
 
         let registry = AuthRegistry::load_dirs(
             &[&base, &mine],
@@ -574,13 +591,15 @@ mod tests {
     /// that says nothing about it — the built-in is not a redeclaration.
     #[test]
     fn a_later_directory_that_is_silent_leaves_a_scoped_anonymous_alone() {
-        let base = write_registry(
+        let base = write_provider(
             "layer-anon-base",
-            "providers:\n  - name: anonymous\n    kind: anonymous\n    allowed_hosts:\n      - models.internal\n",
+            "anonymous",
+            "name: anonymous\nkind: anonymous\nallowed_hosts:\n  - models.internal\n",
         );
-        let mine = write_registry(
+        let mine = write_provider(
             "layer-anon-mine",
-            "providers:\n  - name: gateway\n    kind: anonymous\n",
+            "gateway",
+            "name: gateway\nkind: anonymous\n",
         );
 
         let registry = AuthRegistry::load_dirs(
@@ -598,17 +617,21 @@ mod tests {
         assert!(registry.issues().is_empty(), "{:?}", registry.issues());
     }
 
-    /// Overriding is only ever *across* directories. Twice in one file is still
-    /// the typo it always was.
+    /// Overriding is only ever *across* directories. Two files in one directory
+    /// claiming the same name is still the typo it always was.
     #[test]
     fn a_duplicate_inside_the_later_directory_is_still_reported() {
-        let base = write_registry(
+        let base = write_provider(
             "layer-dup-base",
-            "providers:\n  - name: gateway\n    kind: anonymous\n",
+            "gateway",
+            "name: gateway\nkind: anonymous\n",
         );
-        let mine = write_registry(
+        let mine = write_providers(
             "layer-dup-mine",
-            "providers:\n  - name: gateway\n    kind: anonymous\n  - name: gateway\n    kind: anonymous\n",
+            &[
+                ("a.yaml", "name: gateway\nkind: anonymous\n"),
+                ("b.yaml", "name: gateway\nkind: anonymous\n"),
+            ],
         );
 
         let registry = AuthRegistry::load_dirs(
@@ -623,13 +646,20 @@ mod tests {
                 .message
                 .contains("duplicate auth provider")
         );
+        // Named against the file that actually holds the name, not the base's.
+        assert!(
+            registry.issues()[0].message.contains("a.yaml"),
+            "{:?}",
+            registry.issues()
+        );
     }
 
     #[test]
     fn parses_a_token_provider_with_defaults() {
-        let dir = write_registry(
+        let dir = write_provider(
             "token",
-            "providers:\n  - name: gateway\n    kind: token\n    value:\n      env: MODEL_TOKEN\n",
+            "gateway",
+            "name: gateway\nkind: token\nvalue:\n  env: MODEL_TOKEN\n",
         );
         let registry = load(&dir);
 
@@ -645,7 +675,7 @@ mod tests {
 
     #[test]
     fn a_provider_without_a_declared_source_asks_the_ui_for_one() {
-        let dir = write_registry("prompt", "providers:\n  - name: pasted\n    kind: token\n");
+        let dir = write_provider("prompt", "pasted", "name: pasted\nkind: token\n");
         let registry = load(&dir);
 
         let descriptor = registry
@@ -658,11 +688,18 @@ mod tests {
 
     #[test]
     fn one_bad_entry_is_reported_and_the_others_still_load() {
-        let dir = write_registry(
+        let dir = write_providers(
             "partial",
-            "providers:\n  \
-             - name: bad\n    kind: token\n    header: \"not a header\"\n  \
-             - name: good\n    kind: token\n    value:\n      env: MODEL_TOKEN\n",
+            &[
+                (
+                    "bad.yaml",
+                    "name: bad\nkind: token\nheader: \"not a header\"\n",
+                ),
+                (
+                    "good.yaml",
+                    "name: good\nkind: token\nvalue:\n  env: MODEL_TOKEN\n",
+                ),
+            ],
         );
         let registry = load(&dir);
 
@@ -674,9 +711,12 @@ mod tests {
 
     #[test]
     fn duplicate_names_are_reported() {
-        let dir = write_registry(
+        let dir = write_providers(
             "dup",
-            "providers:\n  - name: a\n    kind: anonymous\n  - name: a\n    kind: anonymous\n",
+            &[
+                ("a.yaml", "name: a\nkind: anonymous\n"),
+                ("b.yaml", "name: a\nkind: anonymous\n"),
+            ],
         );
         let registry = load(&dir);
         assert_eq!(registry.issues().len(), 1);
@@ -684,8 +724,8 @@ mod tests {
     }
 
     #[test]
-    fn a_registry_that_does_not_parse_still_leaves_anonymous_usable() {
-        let dir = write_registry("syntax", "providers: [unclosed\n");
+    fn a_provider_that_does_not_parse_still_leaves_anonymous_usable() {
+        let dir = write_provider("syntax", "broken", "name: [unclosed\n");
         let registry = load(&dir);
 
         assert!(registry.get(ANONYMOUS).is_some());
@@ -695,18 +735,18 @@ mod tests {
 
     #[test]
     fn parses_an_oidc_provider_with_a_client_secret() {
-        let dir = write_registry(
+        let dir = write_provider(
             "oidc-secret",
+            "workload",
             r"
-providers:
-  - name: workload
-    kind: oidc
-    issuer: https://idp.internal/realms/models
-    client_id: mire
-    client_secret:
-      env: OIDC_CLIENT_SECRET
-    scope: [openid, models:read]
-    audience: https://models.internal
+name: workload
+kind: oidc
+issuer: https://idp.internal/realms/models
+client_id: mire
+client_secret:
+  env: OIDC_CLIENT_SECRET
+scope: [openid, models:read]
+audience: https://models.internal
 ",
         );
         let registry = load(&dir);
@@ -725,16 +765,16 @@ providers:
 
     #[test]
     fn parses_an_oidc_provider_with_a_projected_service_account_token() {
-        let dir = write_registry(
+        let dir = write_provider(
             "oidc-assertion",
+            "workload",
             r"
-providers:
-  - name: workload
-    kind: oidc
-    issuer: https://idp.internal/realms/models
-    client_id: mire
-    client_assertion:
-      file: /var/run/secrets/kubernetes.io/serviceaccount/token
+name: workload
+kind: oidc
+issuer: https://idp.internal/realms/models
+client_id: mire
+client_assertion:
+  file: /var/run/secrets/kubernetes.io/serviceaccount/token
 ",
         );
         let registry = load(&dir);
@@ -744,14 +784,14 @@ providers:
 
     #[test]
     fn an_oidc_provider_needs_exactly_one_client_credential() {
-        let neither = write_registry(
+        let neither = write_provider(
             "oidc-neither",
+            "workload",
             r"
-providers:
-  - name: workload
-    kind: oidc
-    issuer: https://idp.internal/realms/models
-    client_id: mire
+name: workload
+kind: oidc
+issuer: https://idp.internal/realms/models
+client_id: mire
 ",
         );
         let registry = load(&neither);
@@ -762,18 +802,18 @@ providers:
                 .contains("needs a `client_secret`")
         );
 
-        let both = write_registry(
+        let both = write_provider(
             "oidc-both",
+            "workload",
             r"
-providers:
-  - name: workload
-    kind: oidc
-    issuer: https://idp.internal/realms/models
-    client_id: mire
-    client_secret:
-      env: OIDC_CLIENT_SECRET
-    client_assertion:
-      file: /var/run/secrets/token
+name: workload
+kind: oidc
+issuer: https://idp.internal/realms/models
+client_id: mire
+client_secret:
+  env: OIDC_CLIENT_SECRET
+client_assertion:
+  file: /var/run/secrets/token
 ",
         );
         let registry = load(&both);
@@ -783,11 +823,18 @@ providers:
 
     #[test]
     fn the_host_allow_list_reaches_the_descriptor() {
-        let dir = write_registry(
+        let dir = write_providers(
             "hosts",
-            "providers:\n  \
-             - name: pinned\n    kind: token\n    value:\n      env: MODEL_TOKEN\n    allowed_hosts:\n      - models.internal\n  \
-             - name: anywhere\n    kind: token\n    value:\n      env: MODEL_TOKEN\n",
+            &[
+                (
+                    "pinned.yaml",
+                    "name: pinned\nkind: token\nvalue:\n  env: MODEL_TOKEN\nallowed_hosts:\n  - models.internal\n",
+                ),
+                (
+                    "anywhere.yaml",
+                    "name: anywhere\nkind: token\nvalue:\n  env: MODEL_TOKEN\n",
+                ),
+            ],
         );
         let registry = load(&dir);
 
@@ -810,9 +857,10 @@ providers:
 
     #[test]
     fn anonymous_can_be_redeclared_to_scope_it() {
-        let dir = write_registry(
+        let dir = write_provider(
             "scoped",
-            "providers:\n  - name: anonymous\n    kind: anonymous\n    allowed_hosts:\n      - models.internal\n",
+            "anonymous",
+            "name: anonymous\nkind: anonymous\nallowed_hosts:\n  - models.internal\n",
         );
         let registry = load(&dir);
         assert!(registry.issues().is_empty());

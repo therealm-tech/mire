@@ -10,7 +10,7 @@ describe('exportFilename', () => {
     expect(exportFilename('chat', AT)).toBe('mire-chat-2026-08-14T09-31-07.json')
   })
 
-  it('still names a file when no profile was selected', () => {
+  it('still names a file when no model was selected', () => {
     expect(exportFilename(null, AT)).toBe('mire-run-2026-08-14T09-31-07.json')
   })
 })
@@ -21,7 +21,7 @@ describe('runExport', () => {
     const exchanges: Exchange[] = []
 
     const payload = runExport({
-      profile: 'chat',
+      model: 'chat',
       endpoint: 'https://models.internal/v1/chat/completions',
       identity: 'workload',
       messages,
@@ -32,7 +32,7 @@ describe('runExport', () => {
     expect(payload).toEqual({
       tool: 'mire',
       exportedAt: '2026-08-14T09:31:07.482Z',
-      profile: 'chat',
+      model: 'chat',
       endpoint: 'https://models.internal/v1/chat/completions',
       identity: 'workload',
       messages,
@@ -61,7 +61,7 @@ describe('runExport', () => {
     ] as Exchange[]
 
     const payload = runExport({
-      profile: 'chat',
+      model: 'chat',
       endpoint: null,
       identity: null,
       messages: [],
