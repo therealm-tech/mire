@@ -1,0 +1,157 @@
+# Hooks: something that happens around a tool call.
+#
+# Calling a live tool is the one thing `mire` does with effects outside this
+# process, which makes it the one thing somebody else usually wants to know
+# about. A hook fires `before` the call goes out, `after` it comes back, or both.
+#
+# `actions:` is a list, because one event is usually two calls to two different
+# people: the file goes to the API about to run it, the line goes to the audit
+# sink. They go out in the order written, each with its own address, credential
+# and body, and each lands in the trace as its own record.
+#
+# `- http:` is the only kind so far; the kind is the key it is written under so
+# the next one does not have to break this file.
+#
+# What an action sends is what it says it sends, and nothing otherwise: with
+# neither `json:` nor `multipart:`, the request carries **no body at all**. That
+# is deliberate — a payload nobody wrote is a request the endpoint never agreed
+# to read.
+#
+# `auth:` and `headers:` work exactly as they do on a server, with two
+# differences that are the hook's own: the credential is resolved against the
+# *action's* URL, so `allowed_hosts` means what it says, and it is resolved only
+# when the hook actually fires.
+
+# ---
+# name: files-hooks
+# url: https://mcp.internal/mcp
+# hooks:
+#   # An audit trail. `json:` is a document, not a string: written as YAML, sent
+#   # as JSON, every string in it a template. A string that is one `{{ … }}` and
+#   # nothing else keeps the type of what it names — so `arguments` below is the
+#   # arguments *object*, not a quoted rendering of one — while text around the
+#   # expression makes it a string again.
+#   #
+#   # Undefined is an error, like everywhere else here, and every template is
+#   # compiled when this file loads.
+#   #
+#   # `on_error: continue` because an audit sink being down is not a reason to
+#   # fail the run it was watching.
+#   - name: audit
+#     on:
+#       - before
+#       - after
+#     on_error: continue
+#     actions:
+#       - http:
+#           url: https://audit.internal/tool-calls
+#           auth: keycloak-workload
+#           json:
+#             phase: '{{ phase }}'
+#             ran: '{{ tool }}'
+#             arguments: '{{ arguments }}'
+#             by: '{{ env.USER }}'
+#
+#   # The whole call in one line, for a sink that wants exactly that: phase,
+#   # server, tool, arguments, and on the way back the result. `env` and `vars`
+#   # are never in it — a hook shipping those because somebody wrote `{{ call }}`
+#   # would be a leak nobody asked for.
+#   - name: mirror
+#     on:
+#       - after
+#     on_error: continue
+#     actions:
+#       - http:
+#           url: https://audit.internal/calls
+#           json: '{{ call }}'
+#
+#   # A policy gate. `on_error: fail` — the default — means anything outside 2xx
+#   # stops the call: the `tools/call` never goes out, and the model is told why
+#   # so it has a chance to recover.
+#   #
+#   # `tools:` narrows it to the calls worth asking about. Each entry is a regex
+#   # matched against the *whole* name, so `delete_file` means that tool and
+#   # `write_.*` is how you ask for the wider net. Empty is every tool, and a
+#   # pattern that is not a regex is caught when this file loads.
+#   - name: gate
+#     on:
+#       - before
+#     tools:
+#       - write_.*
+#       - delete_file
+#     actions:
+#       - http:
+#           url: https://policy.internal/decide
+#           headers:
+#             x-api-key: '{{ auth["keycloak-workload"] }}'
+#
+#   # An endpoint that wants the file itself. `multipart:` is one entry per form
+#   # field, each naming uploads of the run: the request becomes a
+#   # `multipart/form-data` carrying exactly those, under exactly those field
+#   # names — which is what an API asking for `file` is actually asking for.
+#   #
+#   # Each entry names one upload, by `path`, `name` or `id`, or by handing over
+#   # the upload itself. A field can carry several — write a list, or an
+#   # expression producing one, like `'{{ uploads }}'` for all of them — and they
+#   # go out as several parts under the same name.
+#   #
+#   # A field naming a file the run is not carrying fails the hook, and so does
+#   # one that resolves to nothing at all. Sending a form with the part missing is
+#   # how an endpoint ends up explaining this file back to you, in the shape of a
+#   # 422.
+#   #
+#   # `json:` and `multipart:` are two bodies; declaring both is refused when this
+#   # file loads.
+#   - name: upload
+#     on:
+#       - before
+#     tools:
+#       - run_task
+#     actions:
+#       - http:
+#           url: https://intake.internal/jobs/{{ arguments.job_id }}/inputs
+#           auth: keycloak-user
+#           multipart:
+#             file: '{{ uploads[0].path }}'
+#
+#   # A hook addressed with what an earlier call answered. `vars` is filled by a
+#   # server's `capture:` — this server's, or any other the run reached — and is
+#   # in scope for `url:`, `headers:`, `json:` and `multipart:` alike.
+#   #
+#   # `url:` is a template only when it contains one, so every URL above is still
+#   # parsed and checked when this file loads. A variable nobody captured fails
+#   # the hook rather than rendering away to `/sessions//tool-calls`, which is a
+#   # different endpoint that may well answer 200.
+#   #
+#   # `if:` is a MiniJinja expression asked once per firing: true and the hook
+#   # fires, false and it sits the call out. Without it, the URL below fails every
+#   # call made before a session exists; with it, the hook sits those out and
+#   # starts firing once one does.
+#   #
+#   # It sees exactly what `url:`, `json:` and `headers:` see, so the whole call
+#   # is fair game — `{{ result.is_error == false }}` audits only what worked,
+#   # `{{ arguments.size > 1048576 }}` asks about the big ones,
+#   # `{{ env.STAGE == "prod" }}` keeps a hook off your laptop.
+#   #
+#   # Undefined is false here rather than an error — the one place in a hook where
+#   # it is, because a condition is *asking* whether something is there.
+#   # Truthiness is MiniJinja's, so a variable captured as `null` is false too:
+#   # write `is defined` when presence is the question you meant.
+#   #
+#   # Not firing is not failing: `on_error` does not apply, nothing is sent, and
+#   # the tool call is untouched. The skip is still recorded, quoting the
+#   # condition that came back false — a hook that quietly never ran and a hook
+#   # that was never declared must not look the same in a trace. A condition that
+#   # cannot be *evaluated* is a hook failure like any other.
+#   - name: session-audit
+#     on:
+#       - after
+#     if: '{{ vars.session is defined }}'
+#     actions:
+#       - http:
+#           url: https://audit.internal/sessions/{{ vars.session }}/tool-calls
+#           auth: keycloak-workload
+#           headers:
+#             x-session: '{{ vars.session }}'
+#           json:
+#             result: '{{ result }}'

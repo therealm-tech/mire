@@ -1,0 +1,16 @@
+# A session an earlier tool call opened. `vars` is what this run's tool calls
+# have captured, per the `capture:` of the server that answered each of them.
+# This is how a tool that opens a session puts that session on every later
+# request to the same server.
+#
+# The `| default('')` is **not** decoration here. These headers render on every
+# request, and the first is the `tools/list` at setup — before any tool has been
+# called, so before anything has been captured. Without it, the run dies
+# negotiating. A hook's headers need no such thing: a hook only fires around a
+# call.
+
+# ---
+# name: files-session
+# url: https://mcp.internal/mcp
+# headers:
+#   x-session: "{{ vars.session | default('') }}"

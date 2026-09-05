@@ -1,0 +1,8 @@
+# A static token from the environment: the quickest thing that gets you past a
+# door. `static-token` reads MODEL_TOKEN; the value never appears in this file,
+# in a log, or in any API response.
+
+# ---
+# name: files-token
+# url: https://mcp.internal/mcp
+# auth: static-token

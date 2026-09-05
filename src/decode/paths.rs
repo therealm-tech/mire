@@ -2,12 +2,12 @@
 //!
 //! A field is declared as a list of paths and they are tried in order. The first
 //! one that resolves to something other than nothing-or-null wins. That is what
-//! lets one profile cover a provider that moved its content field between
+//! lets one model cover a provider that moved its content field between
 //! versions, without a script.
 
 use serde_json::Value;
 
-use crate::profile::JsonPathExpr;
+use crate::model::JsonPathExpr;
 
 /// The paths that were tried, for the decode trace.
 #[must_use]

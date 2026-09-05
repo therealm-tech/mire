@@ -72,14 +72,14 @@ async fn run(settings: Settings) -> Result<(), StartupError> {
     })?;
 
     let config =
-        ConfigStore::load(&settings.profiles, client.clone()).map_err(StartupError::Config)?;
+        ConfigStore::load(&settings.config_dir, client.clone()).map_err(StartupError::Config)?;
 
     {
         let snapshot = config.snapshot();
         info!(
-            profiles = snapshot.profiles.len(),
+            models = snapshot.models.len(),
             providers = snapshot.registry.descriptors().len(),
-            dirs = %config::describe(&settings.profiles),
+            dirs = %config::describe(&settings.config_dir),
             "configuration loaded"
         );
         // Never fatal: coming up and showing the problem beats refusing to start.

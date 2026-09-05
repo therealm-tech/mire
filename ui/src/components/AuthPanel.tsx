@@ -1,4 +1,4 @@
-import type { AuthResponse, McpResponse, ProfileSummary } from '../api'
+import type { AuthResponse, McpResponse, ModelSummary } from '../api'
 import { McpAuth } from './McpAuth'
 import { ModelAuth } from './ModelAuth'
 import { Panel } from './primitives'
@@ -7,20 +7,20 @@ import { Panel } from './primitives'
  * Who this run goes out as, in full.
  *
  * Two questions rather than one, and they are answered in two files: the model's
- * identity comes from the profile's `auth:`, a server's from its own entry in
- * `mcp.yaml`, and neither follows the other. What is here is the detail — the
+ * identity comes from the model's `auth:`, a server's from its own entry in
+ * `mcp/`, and neither follows the other. What is here is the detail — the
  * one-line answer, and anything that would refuse the call, is in the preflight
  * bar above, which is also what opens this.
  *
  * The second question is only asked when the run would ask it: an embedding
- * profile calls no tool, so no server is its business — and neither is one the
+ * model calls no tool, so no server is its business — and neither is one the
  * composer has switched off, which this run reaches exactly as little.
  */
 export function AuthPanel({
   auth,
   mcp,
   names,
-  profile,
+  model,
   provider,
   token,
   signingIn,
@@ -32,9 +32,9 @@ export function AuthPanel({
 }: {
   auth: AuthResponse
   mcp: McpResponse
-  /** The servers this run will set up: the profile's, minus the ones switched off. */
+  /** The servers this run will set up: the model's, minus the ones switched off. */
   names: string[]
-  profile: ProfileSummary | undefined
+  model: ModelSummary | undefined
   provider: AuthResponse['providers'][number] | undefined
   token: string
   signingIn: string | null
@@ -52,7 +52,7 @@ export function AuthPanel({
           <h3 className="font-semibold text-muted text-xs">Model endpoint</h3>
           <ModelAuth
             provider={provider}
-            profile={profile}
+            model={model}
             issues={auth.issues}
             token={token}
             signingIn={signingIn}

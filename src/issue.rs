@@ -1,6 +1,6 @@
 //! What we say when a file in the configuration directory does not load.
 //!
-//! Shared by the profile loader and the auth registry, because the policy is the
+//! Shared by the model loader and the auth registry, because the policy is the
 //! same for both: never refuse to start over one bad file. You reach for `mire`
 //! when something is already wrong; a tool that will not come up until its own
 //! config is perfect is a tool you cannot use to find out what is wrong.

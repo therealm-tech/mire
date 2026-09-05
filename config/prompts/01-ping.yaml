@@ -1,0 +1,12 @@
+# The smallest signal there is. If this comes back, the endpoint answers.
+#
+# A prompt is a name and its text, and nothing else. Where it goes is the model's
+# business, and what it becomes on the wire is the template's: picking one here
+# fills the box and stops there, so the same text can be replayed against every
+# endpoint in this directory without saying anything about them.
+#
+# The file names carry the order the UI lists them in, which is why they are
+# numbered: a library is a list somebody arranged.
+---
+name: ping
+text: ping

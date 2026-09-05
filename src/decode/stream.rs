@@ -10,7 +10,7 @@
 //!   native `/api/chat`, and most things that predate the `OpenAI` shape.
 //!
 //! Which one is in use is **detected, not declared**. The endpoint already says
-//! so in its `content-type`, and when it does not, the first line does: a profile
+//! so in its `content-type`, and when it does not, the first line does: a model
 //! knob here would be a question `mire` can answer by looking.
 //!
 //! Nothing in this module fails. A frame that will not parse is counted and
@@ -23,7 +23,7 @@ use serde_json::Value;
 
 use super::paths::{self, resolve};
 use super::{DecodeField, DecodeTrace};
-use crate::profile::DecodeSpec;
+use crate::model::DecodeSpec;
 
 /// How the endpoint delimits its chunks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
@@ -40,7 +40,7 @@ impl Framing {
     ///
     /// Anything that is not explicitly an event stream is read as NDJSON, which
     /// is the more forgiving of the two: a single JSON object arriving on one
-    /// line parses as one chunk, so a profile that asks for a stream and gets an
+    /// line parses as one chunk, so a model that asks for a stream and gets an
     /// ordinary answer still decodes.
     #[must_use]
     pub fn detect(content_type: Option<&str>) -> Self {
@@ -217,7 +217,7 @@ pub fn delta(chunk: &Value, spec: &DecodeSpec, trace: &mut DecodeTrace) -> Optio
 
 /// Records that no configured delta path ever resolved.
 ///
-/// Called once at the end rather than per chunk, and only when the profile
+/// Called once at the end rather than per chunk, and only when the model
 /// actually asked for something.
 pub fn record_miss(spec: &DecodeSpec, trace: &mut DecodeTrace) {
     if !trace.matched.contains_key(&DecodeField::Delta) {

@@ -217,7 +217,7 @@ mod tests {
 
     /// The one thing the two endpoints disagree about. `OpenAI` rejects an
     /// object here; Ollama's native API rejects a string. Handing back what
-    /// arrived is what satisfies both without a profile knob.
+    /// arrived is what satisfies both without a model knob.
     #[test]
     fn arguments_are_handed_back_the_way_they_arrived() {
         let message = Message {

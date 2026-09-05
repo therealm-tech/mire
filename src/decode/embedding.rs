@@ -29,7 +29,7 @@ use serde_json::Value;
 
 use super::paths::{self, resolve};
 use super::{DecodeField, DecodeTrace, Usage};
-use crate::profile::DecodeSpec;
+use crate::model::DecodeSpec;
 
 /// How many leading values are shown as a preview.
 const SAMPLE_LEN: usize = 8;
@@ -209,7 +209,7 @@ impl CheckOutcome {
 pub struct EmbeddingChecks {
     /// One vector per input sent.
     pub count: CheckOutcome,
-    /// Width matches the profile's `expect.dimensions`.
+    /// Width matches the model's `expect.dimensions`.
     pub dimensions: CheckOutcome,
     /// Every value is a finite number — no `NaN`, no `null`.
     pub finite: CheckOutcome,
@@ -248,7 +248,7 @@ impl EmbeddingChecks {
 
         let dimensions = match (expected_dimensions, &embedding.dimensions) {
             (None, _) => {
-                CheckOutcome::skipped("set `expect.dimensions` in the profile to check this")
+                CheckOutcome::skipped("set `expect.dimensions` in the model to check this")
             }
             (Some(expected), Dimensions::Uniform { value }) => {
                 CheckOutcome::from(*value == expected, || {

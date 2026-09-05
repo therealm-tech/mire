@@ -24,7 +24,7 @@ use crate::decode::{
     stream,
 };
 use crate::message::Message;
-use crate::profile::{DecodeSpec, HttpMethod, Profile, ProfileKind};
+use crate::model::{DecodeSpec, HttpMethod, Model, ModelKind};
 use crate::redact::{Redactor, Secret};
 use crate::render::{
     PartContent, RenderContext, RenderError, RenderedBody, RenderedPart, RenderedRequest,
@@ -36,10 +36,10 @@ use crate::uploads::UploadRef;
 /// Everything one call needs, already validated.
 #[derive(Debug, Default)]
 pub struct CallInput {
-    /// Profile name.
-    pub profile: String,
-    /// Auth provider to use, overriding the profile's own. Defaults to the
-    /// profile's, then to [`ANONYMOUS`].
+    /// Model name.
+    pub model: String,
+    /// Auth provider to use, overriding the model's own. Defaults to the
+    /// model's, then to [`ANONYMOUS`].
     pub auth: Option<String>,
     /// Conversation. `kind: chat`.
     pub messages: Vec<Message>,
@@ -53,8 +53,8 @@ pub struct CallInput {
     /// layer's business, and keeping it there is what lets this module — and
     /// rendering with it — stay a pure function of its input.
     pub uploads: Vec<UploadRef>,
-    /// Model override handed to the template.
-    pub model: Option<String>,
+    /// Model identifier handed to the template, overriding whatever it bakes in.
+    pub model_id: Option<String>,
     /// Credential typed in the UI, for a provider that declares no source.
     pub token: Option<Secret>,
     /// Attach the full vectors to an embedding response. Off by default, and it
@@ -66,7 +66,7 @@ pub struct CallInput {
     /// Largest absolute difference two runs may show and still count as
     /// deterministic.
     pub tolerance: f32,
-    /// Extra tool declarations, in wire shape, appended to the profile's own.
+    /// Extra tool declarations, in wire shape, appended to the model's own.
     /// Agent mode puts the live MCP tools here.
     pub extra_tools: Vec<Value>,
     /// Ask the endpoint to stream, and read the answer chunk by chunk.
@@ -103,7 +103,7 @@ pub struct RequestView {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PartView {
-    /// The form field it went out under, as the profile named it.
+    /// The form field it went out under, as the model named it.
     pub field: String,
     /// The part's `content-type`, when there is one to declare.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -145,14 +145,14 @@ pub struct ResponseView {
     /// Why the body could not be parsed, when it could not.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub json_error: Option<String>,
-    /// Normalised output, when the profile's kind has a decoder.
+    /// Normalised output, when the model's kind has a decoder.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decoded: Option<Decoded>,
     /// What the endpoint said went wrong, when a `decode.error` cascade — or a
     /// decode script — found it saying so.
     ///
     /// Beside `decoded` rather than inside it, because a refusal is neither a
-    /// completion nor a set of vectors, and because both kinds of profile report
+    /// completion nor a set of vectors, and because both kinds of model report
     /// one the same way. It does not follow the status either way: an endpoint
     /// can refuse under a `200`, and one that answers `500` with an empty body
     /// leaves this `None`.
@@ -174,8 +174,8 @@ pub struct ResponseView {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CallOutcome {
-    /// Profile that ran.
-    pub profile: String,
+    /// Model that ran.
+    pub model: String,
     /// Auth provider that ran.
     pub auth: String,
     /// The rendered request, as it went on the wire — this is the half you paste
@@ -213,23 +213,23 @@ impl Runner {
     ///
     /// # Errors
     ///
-    /// Fails when the profile or auth provider is unknown, the credential cannot
+    /// Fails when the model or auth provider is unknown, the credential cannot
     /// be produced, the template does not render, or the exchange itself fails. A
     /// `4xx`/`5xx` from the endpoint is **not** an error: it is the answer.
     pub async fn call(&self, input: CallInput) -> Result<CallOutcome, ExecError> {
-        // One snapshot for the whole call: the profile and the auth registry it
+        // One snapshot for the whole call: the model and the auth registry it
         // refers to must come from the same view of the directory.
         let config = self.config.snapshot();
-        let profile = config
-            .profiles
-            .get(&input.profile)
-            .ok_or_else(|| ExecError::UnknownProfile(input.profile.clone()))?;
-        check_uploads(profile, &input.uploads)?;
+        let model = config
+            .models
+            .get(&input.model)
+            .ok_or_else(|| ExecError::UnknownModel(input.model.clone()))?;
+        check_uploads(model, &input.uploads)?;
 
         let auth_name = input
             .auth
             .clone()
-            .or_else(|| profile.auth.clone())
+            .or_else(|| model.auth.clone())
             .unwrap_or_else(|| ANONYMOUS.to_owned());
         let provider = config
             .registry
@@ -243,65 +243,65 @@ impl Runner {
             redactor.add(token);
         }
 
-        let body = render_body(profile, &render_context(profile, &input))
+        let body = render_body(model, &render_context(model, &input))
             .map_err(|error| ExecError::Render(redact_render_error(error, &redactor)))?;
-        let base_headers = base_headers(profile, &body)?;
+        let base_headers = base_headers(model, &body)?;
 
         let mut headers = base_headers.clone();
         redactor.merge(
             &provider
-                .apply(&mut headers, &profile.url, input.token.as_ref())
+                .apply(&mut headers, &model.url, input.token.as_ref())
                 .await?,
         );
 
         let request = RenderedRequest {
-            method: profile.method,
-            url: profile.url.clone(),
+            method: model.method,
+            url: model.url.clone(),
             headers,
             body,
         };
         let view = request_view(&request, &redactor);
         let curl = request.to_curl(&redactor);
 
-        let mut raw = transport::send(&self.client, &request, profile.timeout()).await?;
+        let mut raw = transport::send(&self.client, &request, model.timeout()).await?;
         let mut retried = false;
 
         if raw.status == 401 && provider.invalidate().await == Retry::Once {
-            warn!(profile = %profile.name, auth = %auth_name, "401, refreshing the credential and replaying once");
+            warn!(model = %model.name, auth = %auth_name, "401, refreshing the credential and replaying once");
             let mut headers = base_headers;
             redactor.merge(
                 &provider
-                    .apply(&mut headers, &profile.url, input.token.as_ref())
+                    .apply(&mut headers, &model.url, input.token.as_ref())
                     .await?,
             );
             let replay = RenderedRequest {
                 headers,
                 ..request.clone()
             };
-            raw = transport::send(&self.client, &replay, profile.timeout()).await?;
+            raw = transport::send(&self.client, &replay, model.timeout()).await?;
             retried = true;
         }
 
         info!(
-            profile = %profile.name,
+            model = %model.name,
             auth = %auth_name,
             status = raw.status,
             latency_ms = raw.latency.as_millis(),
             "call completed"
         );
-        log_refusal(&profile.name, raw.status, &redactor.text(&raw.body));
+        log_refusal(&model.name, raw.status, &redactor.text(&raw.body));
 
         let (mut response, first_vectors) = response_view(
-            profile,
+            model,
             &raw,
             &redactor,
             input.include_vectors,
             input.input.len(),
         );
 
-        if profile.kind == ProfileKind::Embedding && input.repeat > 1 {
+        if model.kind == ModelKind::Embedding && input.repeat > 1 {
             let outcome = self
-                .check_determinism(profile, &request, first_vectors.as_ref(), &input, &redactor)
+                .check_determinism(model, &request, first_vectors.as_ref(), &input, &redactor)
                 .await?;
             if let Some(Decoded::Embedding(result)) = response.decoded.as_mut() {
                 result.checks.determinism = outcome;
@@ -309,7 +309,7 @@ impl Runner {
         }
 
         Ok(CallOutcome {
-            profile: profile.name.clone(),
+            model: model.name.clone(),
             auth: auth_name,
             request: view,
             curl,
@@ -335,16 +335,16 @@ impl Runner {
         mut on_event: impl FnMut(CallEvent),
     ) -> Result<CallOutcome, ExecError> {
         let config = self.config.snapshot();
-        let profile = config
-            .profiles
-            .get(&input.profile)
-            .ok_or_else(|| ExecError::UnknownProfile(input.profile.clone()))?;
-        check_uploads(profile, &input.uploads)?;
+        let model = config
+            .models
+            .get(&input.model)
+            .ok_or_else(|| ExecError::UnknownModel(input.model.clone()))?;
+        check_uploads(model, &input.uploads)?;
 
         let auth_name = input
             .auth
             .clone()
-            .or_else(|| profile.auth.clone())
+            .or_else(|| model.auth.clone())
             .unwrap_or_else(|| ANONYMOUS.to_owned());
         let provider = config
             .registry
@@ -356,45 +356,45 @@ impl Runner {
             redactor.add(token);
         }
 
-        let body = render_body(profile, &render_context(profile, &input))
+        let body = render_body(model, &render_context(model, &input))
             .map_err(|error| ExecError::Render(redact_render_error(error, &redactor)))?;
-        let base_headers = base_headers(profile, &body)?;
+        let base_headers = base_headers(model, &body)?;
 
         let mut headers = base_headers.clone();
         redactor.merge(
             &provider
-                .apply(&mut headers, &profile.url, input.token.as_ref())
+                .apply(&mut headers, &model.url, input.token.as_ref())
                 .await?,
         );
 
         let request = RenderedRequest {
-            method: profile.method,
-            url: profile.url.clone(),
+            method: model.method,
+            url: model.url.clone(),
             headers,
             body,
         };
         let view = request_view(&request, &redactor);
         let curl = request.to_curl(&redactor);
 
-        let mut open = transport::open(&self.client, &request, profile.timeout()).await?;
+        let mut open = transport::open(&self.client, &request, model.timeout()).await?;
         let mut retried = false;
 
         // The head is in before a single token is, which is exactly why the
         // replay still works here: a `401` is known immediately, and the body we
         // drop is an error page nobody wanted.
         if open.status == 401 && provider.invalidate().await == Retry::Once {
-            warn!(profile = %profile.name, auth = %auth_name, "401, refreshing the credential and replaying once");
+            warn!(model = %model.name, auth = %auth_name, "401, refreshing the credential and replaying once");
             let mut headers = base_headers;
             redactor.merge(
                 &provider
-                    .apply(&mut headers, &profile.url, input.token.as_ref())
+                    .apply(&mut headers, &model.url, input.token.as_ref())
                     .await?,
             );
             let replay = RenderedRequest {
                 headers,
                 ..request.clone()
             };
-            open = transport::open(&self.client, &replay, profile.timeout()).await?;
+            open = transport::open(&self.client, &replay, model.timeout()).await?;
             retried = true;
         }
 
@@ -407,7 +407,7 @@ impl Runner {
         let response_headers = redactor.headers(&open.headers);
         let started = open.started;
         let mut accumulator = StreamAccumulator::new(
-            &profile.decode,
+            &model.decode,
             &redactor,
             status,
             Framing::detect(open.content_type.as_deref()),
@@ -422,13 +422,13 @@ impl Runner {
         // evidence. The failure is reported through `terminated`, not by throwing
         // away what arrived.
         if let Err(error) = &read {
-            debug!(profile = %profile.name, error = %error, "the stream ended badly");
+            debug!(model = %model.name, error = %error, "the stream ended badly");
         }
 
         let streamed = accumulator.finish();
 
         info!(
-            profile = %profile.name,
+            model = %model.name,
             auth = %auth_name,
             status,
             latency_ms = started.elapsed().as_millis(),
@@ -438,12 +438,12 @@ impl Runner {
         );
         // Already redacted by the accumulator, and for a refusal it is the whole
         // body: an endpoint that says no says it in one shot, not in frames.
-        log_refusal(&profile.name, status, &streamed.body_text);
+        log_refusal(&model.name, status, &streamed.body_text);
 
         let response = streamed_response(status, response_headers, started, streamed);
 
         Ok(CallOutcome {
-            profile: profile.name.clone(),
+            model: model.name.clone(),
             auth: auth_name,
             request: view,
             curl,
@@ -463,7 +463,7 @@ impl Runner {
     /// differently is a failed check, not an error.
     async fn check_determinism(
         &self,
-        profile: &Profile,
+        model: &Model,
         request: &RenderedRequest,
         first: Option<&Vectors>,
         input: &CallInput,
@@ -477,14 +477,14 @@ impl Runner {
 
         let mut worst = 0.0_f32;
         for run in 2..=input.repeat {
-            let raw = transport::send(&self.client, request, profile.timeout()).await?;
+            let raw = transport::send(&self.client, request, model.timeout()).await?;
             if raw.status != 200 {
                 return Ok(CheckOutcome::Fail {
                     detail: format!("run {run} answered {} instead of 200", raw.status),
                 });
             }
 
-            let (_, vectors) = response_view(profile, &raw, redactor, false, input.input.len());
+            let (_, vectors) = response_view(model, &raw, redactor, false, input.input.len());
             let Some(deviation) = vectors.as_ref().and_then(|v| first.max_deviation(v)) else {
                 return Ok(CheckOutcome::Fail {
                     detail: format!(
@@ -495,7 +495,7 @@ impl Runner {
             worst = worst.max(deviation);
         }
 
-        debug!(profile = %profile.name, runs = input.repeat, deviation = worst, "determinism checked");
+        debug!(model = %model.name, runs = input.repeat, deviation = worst, "determinism checked");
         Ok(CheckOutcome::from(worst <= input.tolerance, || {
             format!(
                 "the same input produced vectors differing by up to {worst:e}, above the {:e} tolerance",
@@ -715,12 +715,12 @@ const REFUSAL_EXCERPT: usize = 512;
 /// not an answer, and whoever is reading the log is reading it precisely because
 /// they do not have the trace open. Not an error: a refusal is still an answer,
 /// so this is a `warn`, and the run carries on.
-fn log_refusal(profile: &str, status: u16, body: &str) {
+fn log_refusal(model: &str, status: u16, body: &str) {
     if status < 400 {
         return;
     }
     warn!(
-        %profile,
+        %model,
         status,
         body = %excerpt(body, REFUSAL_EXCERPT),
         "the endpoint refused the call"
@@ -742,7 +742,7 @@ fn millis(from: std::time::Instant, to: std::time::Instant) -> u64 {
     u64::try_from(to.saturating_duration_since(from).as_millis()).unwrap_or(u64::MAX)
 }
 
-/// Refuses a call to a `requires_upload:` profile that carries no file.
+/// Refuses a call to a `requires_upload:` model that carries no file.
 ///
 /// Checked here rather than only at the composer, because the composer is one of
 /// three ways in — `POST /api/call`, `/api/call/stream` and `/api/agent` all land
@@ -752,52 +752,52 @@ fn millis(from: std::time::Instant, to: std::time::Instant) -> u64 {
 ///
 /// # Errors
 ///
-/// [`ExecError::UploadRequired`], naming the profile that asked for the file.
-pub fn check_uploads(profile: &Profile, uploads: &[UploadRef]) -> Result<(), ExecError> {
-    if profile.requires_upload && uploads.is_empty() {
+/// [`ExecError::UploadRequired`], naming the model that asked for the file.
+pub fn check_uploads(model: &Model, uploads: &[UploadRef]) -> Result<(), ExecError> {
+    if model.requires_upload && uploads.is_empty() {
         return Err(ExecError::UploadRequired {
-            profile: profile.name.clone(),
+            model: model.name.clone(),
         });
     }
     Ok(())
 }
 
-fn render_context(profile: &Profile, input: &CallInput) -> RenderContext {
+fn render_context(model: &Model, input: &CallInput) -> RenderContext {
     RenderContext {
         messages: input.messages.clone(),
         input: input.input.clone(),
-        model: input.model.clone(),
+        model_id: input.model_id.clone(),
         params: input.params.clone(),
         uploads: input.uploads.clone(),
         stream: input.stream,
         ..RenderContext::default()
     }
-    .with_tools(&profile.tools)
+    .with_tools(&model.tools)
     .and_tools(input.extra_tools.clone())
 }
 
-/// Headers common to every attempt: `content-type`, then whatever the profile adds.
+/// Headers common to every attempt: `content-type`, then whatever the model adds.
 ///
 /// A form has no `content-type` here, and cannot be given one. The encoder
 /// settles it at send time — boundary and all, which is the half nothing written
-/// in a profile could get right — and `reqwest` *appends* rather than replaces,
-/// so a header surviving this far would go out beside the real one. A profile
+/// in a model could get right — and `reqwest` *appends* rather than replaces,
+/// so a header surviving this far would go out beside the real one. A model
 /// that declares one for a `multipart:` gets it dropped, loudly enough to find.
-fn base_headers(profile: &Profile, body: &RenderedBody) -> Result<HeaderMap, ExecError> {
+fn base_headers(model: &Model, body: &RenderedBody) -> Result<HeaderMap, ExecError> {
     let mut headers = HeaderMap::new();
     if body.as_json().is_some() {
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     }
 
-    for (name, value) in &profile.headers {
+    for (name, value) in &model.headers {
         let name = HeaderName::try_from(name.to_ascii_lowercase()).map_err(|_| {
             ExecError::InvalidHeader {
-                profile: profile.name.clone(),
+                model: model.name.clone(),
                 header: name.clone(),
             }
         })?;
         let value = HeaderValue::from_str(value).map_err(|_| ExecError::InvalidHeader {
-            profile: profile.name.clone(),
+            model: model.name.clone(),
             header: name.as_str().to_owned(),
         })?;
         headers.insert(name, value);
@@ -805,7 +805,7 @@ fn base_headers(profile: &Profile, body: &RenderedBody) -> Result<HeaderMap, Exe
 
     if body.as_json().is_none() && headers.remove(CONTENT_TYPE).is_some() {
         warn!(
-            profile = %profile.name,
+            model = %model.name,
             "`headers.content-type` dropped: a multipart's is the encoder's to write"
         );
     }
@@ -875,7 +875,7 @@ fn part_view(part: &RenderedPart, redactor: &Redactor) -> PartView {
 /// Builds the response view, and hands back the raw vectors for an embedding
 /// response so the determinism check has something to compare.
 fn response_view(
-    profile: &Profile,
+    model: &Model,
     raw: &transport::RawResponse,
     redactor: &Redactor,
     include_vectors: bool,
@@ -895,31 +895,31 @@ fn response_view(
 
     // The "never render a whole vector" rule has to bite here too, or `raw` hands
     // over everything the summaries were careful not to.
-    let elided = profile.kind == ProfileKind::Embedding && !include_vectors;
+    let elided = model.kind == ModelKind::Embedding && !include_vectors;
 
     // Nothing to decode out of a body that is not JSON. A `decode.script`
     // replaces the cascades entirely — validation rejects declaring both, so
     // there is no precedence rule here, just two paths.
-    let (decoded, mut decode, vectors, scripted_error) = match (&parsed, profile.kind) {
-        (Some(value), ProfileKind::Chat) => {
-            let (completion, error, trace) = if let Some(source) = &profile.decode.script {
+    let (decoded, mut decode, vectors, scripted_error) = match (&parsed, model.kind) {
+        (Some(value), ModelKind::Chat) => {
+            let (completion, error, trace) = if let Some(source) = &model.decode.script {
                 script::decode_chat(value, raw.status, &http.headers, source)
             } else {
-                let (completion, trace) = chat::decode(value, &profile.decode);
+                let (completion, trace) = chat::decode(value, &model.decode);
                 (completion, None, trace)
             };
             (Some(Decoded::Completion(completion)), trace, None, error)
         }
-        (Some(value), ProfileKind::Embedding) => {
-            let (embedding, vectors, error, trace) = if let Some(source) = &profile.decode.script {
+        (Some(value), ModelKind::Embedding) => {
+            let (embedding, vectors, error, trace) = if let Some(source) = &model.decode.script {
                 script::decode_embedding(value, raw.status, &http.headers, source, include_vectors)
             } else {
                 let (embedding, vectors, trace) =
-                    embedding::decode(value, &profile.decode, inputs, include_vectors);
+                    embedding::decode(value, &model.decode, inputs, include_vectors);
                 (embedding, vectors, None, trace)
             };
             let checks =
-                EmbeddingChecks::evaluate(&embedding, &vectors, inputs, profile.expect.dimensions);
+                EmbeddingChecks::evaluate(&embedding, &vectors, inputs, model.expect.dimensions);
             let result = EmbeddingResult { embedding, checks };
             (
                 Some(Decoded::Embedding(Box::new(result))),
@@ -932,13 +932,13 @@ fn response_view(
     };
 
     // The error cascade is the one field both kinds share and neither owns, so
-    // it runs here rather than inside either decoder. A profile with a script has
+    // it runs here rather than inside either decoder. A model with a script has
     // no cascades to run — declaring both fails to load — so the two never
     // compete for the same answer.
     let error = scripted_error.or_else(|| {
         parsed
             .as_ref()
-            .and_then(|value| error::decode(value, &profile.decode, raw.status, &mut decode))
+            .and_then(|value| error::decode(value, &model.decode, raw.status, &mut decode))
     });
 
     let view = ResponseView {
@@ -964,22 +964,22 @@ fn response_view(
 /// A response from the endpoint is never one of these, whatever its status.
 #[derive(Debug, thiserror::Error)]
 pub enum ExecError {
-    /// No such profile in the directory.
-    #[error("unknown profile `{0}`")]
-    UnknownProfile(String),
+    /// No such model in the directory.
+    #[error("unknown model `{0}`")]
+    UnknownModel(String),
 
-    /// The profile declares `requires_upload:` and the call attached nothing.
-    #[error("profile `{profile}` needs a file attached, and this call carries none")]
+    /// The model declares `requires_upload:` and the call attached nothing.
+    #[error("model `{model}` needs a file attached, and this call carries none")]
     UploadRequired {
-        /// Profile that asked for one.
-        profile: String,
+        /// Model that asked for one.
+        model: String,
     },
 
-    /// A header declared in the profile is not usable.
-    #[error("profile `{profile}`: header `{header}` is not a valid HTTP header")]
+    /// A header declared in the model is not usable.
+    #[error("model `{model}`: header `{header}` is not a valid HTTP header")]
     InvalidHeader {
-        /// Profile that declared it.
-        profile: String,
+        /// Model that declared it.
+        model: String,
         /// The offending header.
         header: String,
     },

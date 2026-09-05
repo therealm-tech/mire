@@ -4,7 +4,7 @@ import type { z } from 'zod'
 /**
  * What this tab remembers across a reload.
  *
- * Settings and a draft — which profile you were on, what you had half typed, how
+ * Settings and a draft — which model you were on, what you had half typed, how
  * many turns you allow. Small, bounded things whose loss is pure annoyance.
  *
  * Three things are deliberately not here. **The credential**, because a token
@@ -25,7 +25,7 @@ const PREFIX = 'mire.'
  *
  * Anything unreadable is dropped rather than repaired: a stored value from an
  * older build is not worth a migration, and storage itself can be missing
- * entirely — disabled cookies, a hardened profile — which is a reason to have no
+ * entirely — disabled cookies, a hardened model — which is a reason to have no
  * memory, never a reason to fail to start.
  */
 function load<T>(key: string, schema: z.ZodType<T>): T | undefined {

@@ -1,4 +1,4 @@
-import type { AuthDescriptor, LoadIssue, ProfileSummary, SessionView } from '../api'
+import type { AuthDescriptor, LoadIssue, ModelSummary, SessionView } from '../api'
 import { hostOf, reaches } from '../preflight'
 import { Badge, Button, Field, INPUT_CLASSES } from './primitives'
 
@@ -14,11 +14,11 @@ function expiry(session: SessionView): string {
 /**
  * Who the model call goes out as.
  *
- * Shown, not chosen: the identity belongs to the profile, in its `auth:` field,
+ * Shown, not chosen: the identity belongs to the model, in its `auth:` field,
  * next to the URL it authenticates against. Offering a different one here would
- * be offering to run something other than the profile — and the two are meant to
+ * be offering to run something other than the model — and the two are meant to
  * be the same thing, so that what you read in the file is what went out. To ask
- * the same endpoint under another identity, copy the profile and change one
+ * the same endpoint under another identity, copy the model and change one
  * line; that copy is then a thing you can keep, name and re-run.
  *
  * What is still interactive is what nobody could have put in a file: a
@@ -27,7 +27,7 @@ function expiry(session: SessionView): string {
  */
 export function ModelAuth({
   provider,
-  profile,
+  model,
   issues,
   token,
   signingIn,
@@ -37,7 +37,7 @@ export function ModelAuth({
   onLogout,
 }: {
   provider: AuthDescriptor | undefined
-  profile: ProfileSummary | null | undefined
+  model: ModelSummary | null | undefined
   issues: LoadIssue[]
   token: string
   signingIn: string | null
@@ -46,7 +46,7 @@ export function ModelAuth({
   onLogin: (name: string, prompt?: string) => void
   onLogout: (name: string) => void
 }) {
-  const declared = profile?.auth ?? null
+  const declared = model?.auth ?? null
 
   return (
     <div className="space-y-2">
@@ -54,7 +54,7 @@ export function ModelAuth({
         <p className="text-xs">
           <Badge tone="bad">{declared ?? 'unknown'}</Badge>{' '}
           <span className="text-muted">
-            named by this profile, declared in no <span className="font-mono">auth.yaml</span> entry
+            named by this model, declared in no <span className="font-mono">auth/</span> file
           </span>
         </p>
       ) : (
@@ -66,19 +66,19 @@ export function ModelAuth({
             )}
             {declared === null ? (
               <span className="text-faint text-xs">
-                no <span className="font-mono">auth:</span> in this profile
+                no <span className="font-mono">auth:</span> in this model
               </span>
             ) : null}
-            {profile && !reaches(provider, profile) ? (
+            {model && !reaches(provider, model) ? (
               <Badge tone="bad">out of allowed_hosts</Badge>
             ) : null}
           </div>
 
-          {profile && !reaches(provider, profile) ? (
+          {model && !reaches(provider, model) ? (
             <p className="text-muted text-xs">
               This credential may only be sent to{' '}
-              <span className="font-mono">{provider.allowedHosts.join(', ')}</span>, and the profile
-              points at <span className="font-mono">{hostOf(profile.url)}</span>. Every call is
+              <span className="font-mono">{provider.allowedHosts.join(', ')}</span>, and the model
+              points at <span className="font-mono">{hostOf(model.url)}</span>. Every call is
               refused before anything goes out.
             </p>
           ) : null}
@@ -126,8 +126,7 @@ export function ModelAuth({
         <ul className="space-y-1">
           {issues.map((issue) => (
             <li key={`${issue.file}:${issue.message}`} className="text-xs">
-              <Badge tone="bad">auth.yaml</Badge>{' '}
-              <span className="text-muted">{issue.message}</span>
+              <Badge tone="bad">auth/</Badge> <span className="text-muted">{issue.message}</span>
             </li>
           ))}
         </ul>

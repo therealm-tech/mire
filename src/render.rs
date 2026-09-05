@@ -1,7 +1,7 @@
-//! Turning a profile plus some input into an actual HTTP request.
+//! Turning a model plus some input into an actual HTTP request.
 //!
 //! The body comes from a `MiniJinja` template, which is the declarative level: you
-//! get `messages`, `input`, `tools`, `model`, `params` and `uploads`, and you emit
+//! get `messages`, `input`, `tools`, `model_id`, `params` and `uploads`, and you emit
 //! whatever JSON your endpoint wants.
 //!
 //! Rendering validates that the result is JSON. A template with a stray comma —
@@ -31,13 +31,13 @@ use url::Url;
 use crate::script::to_dynamic;
 
 use crate::message::Message;
-use crate::profile::{HttpMethod, MultipartSpec, PartKind, Profile, RequestSource, ToolSpec};
+use crate::model::{HttpMethod, Model, MultipartSpec, PartKind, RequestSource, ToolSpec};
 use crate::redact::Redactor;
 use crate::script::{ScriptError, ScriptSource};
 use crate::uploads::{UploadRef, carrying, mime_of, resolve};
 
 /// One `MiniJinja` environment for the whole process: templates are rendered from
-/// source strings, so there is nothing per-profile to register.
+/// source strings, so there is nothing per-model to register.
 static ENVIRONMENT: LazyLock<Environment<'static>> = LazyLock::new(Environment::new);
 
 /// What a template can see.
@@ -52,7 +52,7 @@ pub struct RenderContext {
     /// as-is. Remap it in the template for an endpoint that wants something else.
     pub tools: Vec<Value>,
     /// Model identifier, when the caller overrides the one baked into the template.
-    pub model: Option<String>,
+    pub model_id: Option<String>,
     /// Free-form knobs (`max_tokens`, `temperature`, …), reachable as `params.x`.
     pub params: Map<String, Value>,
     /// Files the caller attached, in the order they were asked for.
@@ -70,8 +70,8 @@ pub struct RenderContext {
     ///
     /// Exposed to the template because the endpoint has to be *told* — nothing
     /// `mire` does client-side makes a response arrive in chunks. Write
-    /// `"stream": {{ stream | tojson }}` and one profile serves both shapes;
-    /// hard-code it and the profile is whichever shape you wrote.
+    /// `"stream": {{ stream | tojson }}` and one model serves both shapes;
+    /// hard-code it and the model is whichever shape you wrote.
     ///
     /// The `| tojson` is not optional and not decoration: `MiniJinja` renders a
     /// bare boolean as `True`, which is Python and is not JSON. Rendering
@@ -122,7 +122,7 @@ pub enum RenderedBody {
     /// A JSON document, exactly as the template or script produced it,
     /// whitespace and all.
     Json(String),
-    /// A form, one entry per part, in the order the profile declared them.
+    /// A form, one entry per part, in the order the model declared them.
     Multipart(Vec<RenderedPart>),
 }
 
@@ -149,7 +149,7 @@ impl RenderedBody {
 /// One part of a rendered form.
 #[derive(Debug, Clone)]
 pub struct RenderedPart {
-    /// The form field it goes out under, as the profile named it.
+    /// The form field it goes out under, as the model named it.
     pub field: String,
     /// What it carries.
     pub content: PartContent,
@@ -162,7 +162,7 @@ pub enum PartContent {
     Text {
         /// The rendered value.
         value: String,
-        /// `content-type` the profile declared for it, if any.
+        /// `content-type` the model declared for it, if any.
         media_type: Option<String>,
     },
     /// A file, read and decoded once so that a replay does not go back to the
@@ -175,7 +175,7 @@ pub enum PartContent {
 pub struct AttachedFile {
     /// The upload's handle, as `POST /api/uploads` answered it.
     pub id: String,
-    /// The part's `filename`: the stored name, or what the profile overrode it
+    /// The part's `filename`: the stored name, or what the model overrode it
     /// with.
     pub filename: String,
     /// The part's `content-type`.
@@ -254,7 +254,7 @@ impl RenderedRequest {
 
 /// One `-F` argument: `field=value`, or `field=@path` for a file.
 ///
-/// `;type=` is only appended when the profile said something about the type. For
+/// `;type=` is only appended when the model said something about the type. For
 /// a file left to the extension's guess, `curl` makes the same guess, and a
 /// command carrying a type nobody wrote reads like a decision that was made.
 fn curl_form(part: &RenderedPart, redactor: &Redactor) -> String {
@@ -292,8 +292,8 @@ pub enum RenderError {
     },
 
     /// No `template`, no `script` and no `multipart`. Validation normally catches
-    /// this at load, so reaching it means a profile got in another way.
-    #[error("the profile declares no `request.template`, `request.script` or `request.multipart`")]
+    /// this at load, so reaching it means a model got in another way.
+    #[error("the model declares no `request.template`, `request.script` or `request.multipart`")]
     NoSource,
 
     /// The template ran, but produced something that is not JSON.
@@ -310,7 +310,7 @@ pub enum RenderError {
     },
 }
 
-/// Renders a profile's request body against `context`.
+/// Renders a model's request body against `context`.
 ///
 /// # Errors
 ///
@@ -318,11 +318,8 @@ pub enum RenderError {
 /// [`RenderError::InvalidJson`] when a JSON body renders to something that is
 /// not JSON, and [`RenderError::Multipart`] when a form field names a file the
 /// call is not carrying.
-pub fn render_body(
-    profile: &Profile,
-    context: &RenderContext,
-) -> Result<RenderedBody, RenderError> {
-    let body = match profile.request.source().ok_or(RenderError::NoSource)? {
+pub fn render_body(model: &Model, context: &RenderContext) -> Result<RenderedBody, RenderError> {
+    let body = match model.request.source().ok_or(RenderError::NoSource)? {
         RequestSource::Template(template) => ENVIRONMENT
             .render_str(template, context)
             .map_err(|error| RenderError::Template(Box::new(error)))?,
@@ -465,7 +462,7 @@ fn name_files<'a>(
     // A field that named nothing is the failure this whole shape exists to make
     // loud. A form missing the one part the endpoint asked for goes out looking
     // perfectly well-formed and comes back a `422` about a field nobody in the
-    // profile ever mentioned.
+    // model ever mentioned.
     if found.is_empty() {
         return Err(RenderError::Multipart {
             message: format!("`{field}` named no file ({})", carrying(uploads)),
@@ -553,7 +550,7 @@ mod tests {
     use super::*;
     use crate::redact::{MASK, Secret};
 
-    fn profile(template: &str) -> Profile {
+    fn model(template: &str) -> Model {
         let yaml = format!(
             "name: t\nkind: chat\nurl: https://models.internal/v1/chat/completions\nrequest:\n  template: {}\n",
             serde_json::to_string(template).unwrap()
@@ -561,10 +558,10 @@ mod tests {
         serde_yaml_ng::from_str(&yaml).unwrap()
     }
 
-    /// The rendered body of a JSON profile, as text. Panics on a form, which no
+    /// The rendered body of a JSON model, as text. Panics on a form, which no
     /// caller of it declares.
-    fn json_body(profile: &Profile, context: &RenderContext) -> String {
-        render_body(profile, context)
+    fn json_body(model: &Model, context: &RenderContext) -> String {
+        render_body(model, context)
             .unwrap()
             .as_json()
             .expect("a JSON body")
@@ -573,36 +570,35 @@ mod tests {
 
     #[test]
     fn renders_messages_as_json() {
-        let profile = profile(r#"{"model": "m", "messages": {{ messages | tojson }}}"#);
+        let model = model(r#"{"model": "m", "messages": {{ messages | tojson }}}"#);
         let context = RenderContext {
             messages: vec![Message::user("ping")],
             ..RenderContext::default()
         };
 
-        let body = json_body(&profile, &context);
+        let body = json_body(&model, &context);
         let parsed: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(parsed["messages"][0]["content"], "ping");
     }
 
     #[test]
     fn params_support_defaults() {
-        let profile = profile(r#"{"max_tokens": {{ params.max_tokens | default(512) }}}"#);
-        let body = json_body(&profile, &RenderContext::default());
+        let model = model(r#"{"max_tokens": {{ params.max_tokens | default(512) }}}"#);
+        let body = json_body(&model, &RenderContext::default());
         assert_eq!(body, r#"{"max_tokens": 512}"#);
 
         let context = RenderContext {
             params: serde_json::from_value(serde_json::json!({"max_tokens": 32})).unwrap(),
             ..RenderContext::default()
         };
-        let body = json_body(&profile, &context);
+        let body = json_body(&model, &context);
         assert_eq!(body, r#"{"max_tokens": 32}"#);
     }
 
     #[test]
     fn a_trailing_comma_is_caught_here_with_the_rendered_body_attached() {
-        let profile =
-            profile(r#"{"a": 1,{% if tools %}"tools": {{ tools | tojson }},{% endif %}}"#);
-        let error = render_body(&profile, &RenderContext::default()).unwrap_err();
+        let model = model(r#"{"a": 1,{% if tools %}"tools": {{ tools | tojson }},{% endif %}}"#);
+        let error = render_body(&model, &RenderContext::default()).unwrap_err();
 
         let RenderError::InvalidJson { rendered, line, .. } = error else {
             panic!("expected an InvalidJson error, got {error:?}");
@@ -613,21 +609,21 @@ mod tests {
 
     #[test]
     fn an_unknown_filter_is_a_template_error() {
-        let profile = profile("{{ messages | no_such_filter }}");
+        let model = model("{{ messages | no_such_filter }}");
         assert!(matches!(
-            render_body(&profile, &RenderContext::default()),
+            render_body(&model, &RenderContext::default()),
             Err(RenderError::Template(_))
         ));
     }
 
     #[test]
     fn embedding_input_is_available_as_a_list() {
-        let profile = profile(r#"{"input": {{ input | tojson }}}"#);
+        let model = model(r#"{"input": {{ input | tojson }}}"#);
         let context = RenderContext {
             input: vec!["a".to_owned(), "b".to_owned()],
             ..RenderContext::default()
         };
-        assert_eq!(json_body(&profile, &context), r#"{"input": ["a","b"]}"#);
+        assert_eq!(json_body(&model, &context), r#"{"input": ["a","b"]}"#);
     }
 
     fn upload(name: &str, media: Option<&str>, bytes: &[u8]) -> UploadRef {
@@ -650,10 +646,10 @@ mod tests {
     }
 
     /// The shape a vision endpoint actually reads, written in a template rather
-    /// than built in Rust: what an attachment turns into is the profile's call.
+    /// than built in Rust: what an attachment turns into is the model's call.
     #[test]
     fn an_upload_reaches_the_body_as_a_data_url() {
-        let profile = profile(
+        let model = model(
             r#"{"content": [{% for file in uploads %}{"type": "image_url", "image_url": {"url": "{{ file.dataUrl }}"}}{% endfor %}]}"#,
         );
         let context = RenderContext {
@@ -661,7 +657,7 @@ mod tests {
             ..RenderContext::default()
         };
 
-        let body = json_body(&profile, &context);
+        let body = json_body(&model, &context);
         let parsed: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(
             parsed["content"][0]["image_url"]["url"],
@@ -674,7 +670,7 @@ mod tests {
     /// carries both rather than the caller choosing at upload time.
     #[test]
     fn a_text_file_can_be_inlined_as_text() {
-        let profile = profile(
+        let model = model(
             r#"{"prompt": {{ uploads[0].text | tojson }}, "name": {{ uploads[0].name | tojson }}}"#,
         );
         let context = RenderContext {
@@ -682,7 +678,7 @@ mod tests {
             ..RenderContext::default()
         };
 
-        let body = json_body(&profile, &context);
+        let body = json_body(&model, &context);
         let parsed: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(parsed["prompt"], "ping");
         assert_eq!(parsed["name"], "notes.txt");
@@ -693,7 +689,7 @@ mod tests {
     /// in it, and this one is fiddly precisely where `MiniJinja` is unforgiving.
     #[test]
     fn the_documented_text_inlining_pattern_renders() {
-        let profile = profile(concat!(
+        let model = model(concat!(
             r#"{"messages": ["#,
             r#"{% for file in uploads %}{% if file.text %}"#,
             r#"{"role": "user", "content": {{ ("Contents of " ~ file.name ~ ":\n" ~ file.text) | tojson }}},"#,
@@ -712,7 +708,7 @@ mod tests {
             ..RenderContext::default()
         };
 
-        let parsed: Value = serde_json::from_str(&json_body(&profile, &context)).unwrap();
+        let parsed: Value = serde_json::from_str(&json_body(&model, &context)).unwrap();
         assert_eq!(parsed["messages"].as_array().unwrap().len(), 2);
         assert_eq!(
             parsed["messages"][0]["content"],
@@ -725,27 +721,26 @@ mod tests {
     /// rather than guess from the name.
     #[test]
     fn a_template_can_tell_text_from_binary() {
-        let profile =
-            profile(r#"{"kind": "{% if uploads[0].text %}text{% else %}binary{% endif %}"}"#);
+        let model = model(r#"{"kind": "{% if uploads[0].text %}text{% else %}binary{% endif %}"}"#);
 
         let text = RenderContext {
             uploads: vec![upload("notes.txt", Some("text/plain"), b"ping")],
             ..RenderContext::default()
         };
-        assert_eq!(json_body(&profile, &text), r#"{"kind": "text"}"#);
+        assert_eq!(json_body(&model, &text), r#"{"kind": "text"}"#);
 
         let binary = RenderContext {
             uploads: vec![upload("shot.png", Some("image/png"), &[0x89, 0xff])],
             ..RenderContext::default()
         };
-        assert_eq!(json_body(&profile, &binary), r#"{"kind": "binary"}"#);
+        assert_eq!(json_body(&model, &binary), r#"{"kind": "binary"}"#);
     }
 
-    /// A profile that never mentions `uploads` sends what it always sent.
+    /// A model that never mentions `uploads` sends what it always sent.
     /// Attaching a file is not a thing that happens *to* a template.
     #[test]
     fn a_template_that_ignores_uploads_is_unaffected_by_one() {
-        let profile = profile(r#"{"messages": {{ messages | tojson }}}"#);
+        let model = model(r#"{"messages": {{ messages | tojson }}}"#);
         let context = RenderContext {
             messages: vec![Message::user("ping")],
             uploads: vec![upload("shot.png", Some("image/png"), &[0x89, b'P'])],
@@ -753,7 +748,7 @@ mod tests {
         };
 
         assert_eq!(
-            json_body(&profile, &context),
+            json_body(&model, &context),
             r#"{"messages": [{"content":"ping","role":"user"}]}"#
         );
     }
@@ -764,19 +759,19 @@ mod tests {
     #[test]
     fn a_request_script_sees_the_uploads_too() {
         let yaml = "name: t\nkind: chat\nurl: https://models.internal/v1/chat/completions\nrequest:\n  script: |\n    #{ \"file\": uploads[0].name, \"bytes\": uploads[0].size }\n";
-        let profile: Profile = serde_yaml_ng::from_str(yaml).unwrap();
+        let model: Model = serde_yaml_ng::from_str(yaml).unwrap();
         let context = RenderContext {
             uploads: vec![upload("notes.txt", Some("text/plain"), b"ping")],
             ..RenderContext::default()
         };
 
-        let parsed: Value = serde_json::from_str(&json_body(&profile, &context)).unwrap();
+        let parsed: Value = serde_json::from_str(&json_body(&model, &context)).unwrap();
         assert_eq!(parsed["file"], "notes.txt");
         assert_eq!(parsed["bytes"], 4);
     }
 
-    /// A profile whose `request:` is the given YAML fragment.
-    fn multipart_profile(fields: &str) -> Profile {
+    /// A model whose `request:` is the given YAML fragment.
+    fn multipart_model(fields: &str) -> Model {
         let yaml = format!(
             "name: t\nkind: chat\nurl: https://models.internal/v1/audio/transcriptions\nrequest:\n  multipart:\n{fields}"
         );
@@ -803,11 +798,11 @@ mod tests {
             .collect()
     }
 
-    /// The shape a transcription endpoint actually reads, written in a profile:
+    /// The shape a transcription endpoint actually reads, written in a model:
     /// the audio as bytes, the knobs as ordinary fields beside it.
     #[test]
     fn a_form_carries_the_file_and_the_knobs_beside_it() {
-        let profile = multipart_profile(
+        let model = multipart_model(
             "    file:\n      upload: '{{ uploads[0] }}'\n    model: whisper-1\n    language: '{{ params.language | default(\"en\") }}'\n",
         );
         let context = RenderContext {
@@ -816,7 +811,7 @@ mod tests {
             ..RenderContext::default()
         };
 
-        let body = render_body(&profile, &context).unwrap();
+        let body = render_body(&model, &context).unwrap();
         assert!(body.as_json().is_none(), "a form is not text");
 
         let parts = body.parts();
@@ -835,8 +830,8 @@ mod tests {
     /// Order is the file's, not the alphabet's. A `BTreeMap` would have sorted
     /// this form to `file, model, response_format` without anybody noticing.
     #[test]
-    fn the_parts_go_out_in_the_order_the_profile_wrote_them() {
-        let profile = multipart_profile(
+    fn the_parts_go_out_in_the_order_the_model_wrote_them() {
+        let model = multipart_model(
             "    response_format: json\n    file:\n      upload: '{{ uploads[0] }}'\n    model: whisper-1\n",
         );
         let context = RenderContext {
@@ -844,7 +839,7 @@ mod tests {
             ..RenderContext::default()
         };
 
-        let body = render_body(&profile, &context).unwrap();
+        let body = render_body(&model, &context).unwrap();
         let fields: Vec<&str> = body.parts().iter().map(|p| p.field.as_str()).collect();
         assert_eq!(fields, vec!["response_format", "file", "model"]);
     }
@@ -854,7 +849,7 @@ mod tests {
     /// on the other side already reads.
     #[test]
     fn one_field_can_carry_several_files() {
-        let profile = multipart_profile("    file:\n      upload: '{{ uploads }}'\n");
+        let model = multipart_model("    file:\n      upload: '{{ uploads }}'\n");
         let context = RenderContext {
             uploads: vec![
                 upload("one.wav", Some("audio/wav"), b"a"),
@@ -863,7 +858,7 @@ mod tests {
             ..RenderContext::default()
         };
 
-        let parts = render_body(&profile, &context).unwrap();
+        let parts = render_body(&model, &context).unwrap();
         let files = file_parts(parts.parts());
         assert_eq!(files.len(), 2);
         assert!(files.iter().all(|(field, _)| *field == "file"));
@@ -876,7 +871,7 @@ mod tests {
     /// it is the same resolver.
     #[test]
     fn a_file_can_be_named_rather_than_handed_over() {
-        let profile = multipart_profile("    file:\n      upload: '{{ uploads[1].name }}'\n");
+        let model = multipart_model("    file:\n      upload: '{{ uploads[1].name }}'\n");
         let context = RenderContext {
             uploads: vec![
                 upload("one.wav", Some("audio/wav"), b"a"),
@@ -885,7 +880,7 @@ mod tests {
             ..RenderContext::default()
         };
 
-        let parts = render_body(&profile, &context).unwrap();
+        let parts = render_body(&model, &context).unwrap();
         let files = file_parts(parts.parts());
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].1.filename, "two.wav");
@@ -895,7 +890,7 @@ mod tests {
     /// lookup, and because some transcribers refuse a name they cannot classify.
     #[test]
     fn a_part_can_override_the_type_and_the_filename() {
-        let profile = multipart_profile(
+        let model = multipart_model(
             "    file:\n      upload: '{{ uploads[0] }}'\n      type: audio/wav\n      filename: recording.wav\n    config:\n      text: '{\"speakers\": 2}'\n      type: application/json\n",
         );
         let context = RenderContext {
@@ -903,7 +898,7 @@ mod tests {
             ..RenderContext::default()
         };
 
-        let body = render_body(&profile, &context).unwrap();
+        let body = render_body(&model, &context).unwrap();
         let files = file_parts(body.parts());
         assert_eq!(files[0].1.filename, "recording.wav");
         assert_eq!(files[0].1.media_type, "audio/wav");
@@ -924,13 +919,13 @@ mod tests {
     /// rather than a guess dressed up as a fact.
     #[test]
     fn a_file_with_no_recognisable_extension_says_octet_stream() {
-        let profile = multipart_profile("    file:\n      upload: '{{ uploads[0] }}'\n");
+        let model = multipart_model("    file:\n      upload: '{{ uploads[0] }}'\n");
         let context = RenderContext {
             uploads: vec![upload("recording", None, b"x")],
             ..RenderContext::default()
         };
 
-        let body = render_body(&profile, &context).unwrap();
+        let body = render_body(&model, &context).unwrap();
         assert_eq!(
             file_parts(body.parts())[0].1.media_type,
             "application/octet-stream"
@@ -939,11 +934,11 @@ mod tests {
 
     /// The failure the whole shape exists to make loud: a form that would go out
     /// looking perfectly well-formed and come back a `422` about a field nobody
-    /// in the profile ever mentioned.
+    /// in the model ever mentioned.
     #[test]
     fn a_file_field_with_nothing_attached_says_so_rather_than_sending_an_empty_form() {
-        let profile = multipart_profile("    file:\n      upload: '{{ uploads[0] }}'\n");
-        let error = render_body(&profile, &RenderContext::default()).unwrap_err();
+        let model = multipart_model("    file:\n      upload: '{{ uploads[0] }}'\n");
+        let error = render_body(&model, &RenderContext::default()).unwrap_err();
 
         let RenderError::Multipart { message } = error else {
             panic!("expected a Multipart error, got {error:?}");
@@ -956,14 +951,13 @@ mod tests {
     /// says what the call is actually carrying.
     #[test]
     fn naming_a_file_the_call_does_not_carry_lists_the_ones_it_does() {
-        let profile = multipart_profile("    file:\n      upload: absent.wav\n");
+        let model = multipart_model("    file:\n      upload: absent.wav\n");
         let context = RenderContext {
             uploads: vec![upload("present.wav", Some("audio/wav"), b"a")],
             ..RenderContext::default()
         };
 
-        let RenderError::Multipart { message } = render_body(&profile, &context).unwrap_err()
-        else {
+        let RenderError::Multipart { message } = render_body(&model, &context).unwrap_err() else {
             panic!("expected a Multipart error");
         };
         assert!(message.contains("present.wav"), "{message}");
@@ -973,7 +967,7 @@ mod tests {
     /// and the endpoint would be the one to notice.
     #[test]
     fn a_filename_override_is_refused_on_a_field_carrying_several_files() {
-        let profile = multipart_profile(
+        let model = multipart_model(
             "    file:\n      upload: '{{ uploads }}'\n      filename: only-one.wav\n",
         );
         let context = RenderContext {
@@ -984,8 +978,7 @@ mod tests {
             ..RenderContext::default()
         };
 
-        let RenderError::Multipart { message } = render_body(&profile, &context).unwrap_err()
-        else {
+        let RenderError::Multipart { message } = render_body(&model, &context).unwrap_err() else {
             panic!("expected a Multipart error");
         };
         assert!(message.contains("named 2 files"), "{message}");
@@ -995,8 +988,8 @@ mod tests {
     /// a stray brace is a text field, not a broken body.
     #[test]
     fn a_form_is_not_validated_as_json() {
-        let profile = multipart_profile("    prompt: 'not { json at all'\n");
-        let body = render_body(&profile, &RenderContext::default()).unwrap();
+        let model = multipart_model("    prompt: 'not { json at all'\n");
+        let body = render_body(&model, &RenderContext::default()).unwrap();
         assert_eq!(text_part(body.parts(), "prompt"), "not { json at all");
     }
 
@@ -1004,9 +997,8 @@ mod tests {
     /// comes in by path, from where `--uploads` put it.
     #[test]
     fn curl_export_of_a_form_uses_flags_and_the_file_on_disk() {
-        let profile = multipart_profile(
-            "    file:\n      upload: '{{ uploads[0] }}'\n    model: whisper-1\n",
-        );
+        let model =
+            multipart_model("    file:\n      upload: '{{ uploads[0] }}'\n    model: whisper-1\n");
         let context = RenderContext {
             uploads: vec![upload("meeting.mp3", Some("audio/mpeg"), b"ID3")],
             ..RenderContext::default()
@@ -1018,7 +1010,7 @@ mod tests {
             method: HttpMethod::Post,
             url: Url::parse("https://models.internal/v1/audio/transcriptions").unwrap(),
             headers,
-            body: render_body(&profile, &context).unwrap(),
+            body: render_body(&model, &context).unwrap(),
         };
 
         let curl = request.to_curl(&Redactor::new().with(&Secret::new("s3cr3t-token")));
@@ -1037,7 +1029,7 @@ mod tests {
     /// caller-supplied, so a form field reading one is a place a token can land.
     #[test]
     fn a_text_part_is_masked_like_a_body_is() {
-        let profile = multipart_profile("    key: '{{ params.key }}'\n");
+        let model = multipart_model("    key: '{{ params.key }}'\n");
         let context = RenderContext {
             params: serde_json::from_value(serde_json::json!({"key": "s3cr3t-token"})).unwrap(),
             ..RenderContext::default()
@@ -1047,7 +1039,7 @@ mod tests {
             method: HttpMethod::Post,
             url: Url::parse("https://models.internal/v1/audio/transcriptions").unwrap(),
             headers: HeaderMap::new(),
-            body: render_body(&profile, &context).unwrap(),
+            body: render_body(&model, &context).unwrap(),
         };
 
         let curl = request.to_curl(&Redactor::new().with(&Secret::new("s3cr3t-token")));

@@ -1,6 +1,6 @@
-import type { AuthDescriptor, McpDescriptor, ProfileSummary } from './api'
+import type { AuthDescriptor, McpDescriptor, ModelSummary } from './api'
 
-/** The host a profile points at, or `null` from a URL that will not parse. */
+/** The host a model points at, or `null` from a URL that will not parse. */
 export function hostOf(url: string): string | null {
   try {
     return new URL(url).hostname
@@ -10,17 +10,17 @@ export function hostOf(url: string): string | null {
 }
 
 /**
- * Whether this credential is allowed to go where this profile points.
+ * Whether this credential is allowed to go where this model points.
  *
- * `allowed_hosts` is enforced on the server for every call, so a profile whose
+ * `allowed_hosts` is enforced on the server for every call, so a model whose
  * own `auth:` excludes its own `url:` fails every time. That is a
  * misconfiguration you want to read, not discover.
  */
-export function reaches(provider: AuthDescriptor, profile: ProfileSummary): boolean {
+export function reaches(provider: AuthDescriptor, model: ModelSummary): boolean {
   if (provider.allowedHosts.length === 0) {
     return true
   }
-  const host = hostOf(profile.url)
+  const host = hostOf(model.url)
   return host === null || provider.allowedHosts.includes(host)
 }
 
@@ -64,7 +64,7 @@ export interface Preflight {
  * asked, and answering it here would be answering it by guessing.
  */
 export function preflight({
-  profile,
+  model,
   provider,
   providers,
   servers,
@@ -73,8 +73,8 @@ export function preflight({
   uploads = 0,
   mcpOff = [],
 }: {
-  profile: ProfileSummary
-  /** The resolved model identity, `undefined` when the profile names one that is not declared. */
+  model: ModelSummary
+  /** The resolved model identity, `undefined` when the model names one that is not declared. */
   provider: AuthDescriptor | undefined
   providers: AuthDescriptor[]
   servers: McpDescriptor[]
@@ -85,14 +85,14 @@ export function preflight({
    *
    * They are out of the picture entirely: no discovery, no listing, no sign-in —
    * so nothing about them can block a call they are not part of. It is still said out loud, in a note: a run reaching
-   * fewer servers than `mcp.yaml` declares is a fact about the run, and finding
+   * fewer servers than `mcp/` declares is a fact about the run, and finding
    * out by reading the traffic afterwards is finding out too late.
    */
   mcpOff?: string[]
   /**
    * Whether this run will speak to a server at all.
    *
-   * False on an embedding profile, which has no loop to call a tool from. Their
+   * False on an embedding model, which has no loop to call a tool from. Their
    * credentials are then not blockers of anything: reporting "tool calls answer
    * 409" about a run that makes none would be painting the bar red over a call
    * that is going to go through.
@@ -101,8 +101,8 @@ export function preflight({
   /**
    * How many files this tab has attached.
    *
-   * Only a blocker against a `requires_upload:` profile, and a count rather than
-   * a flag because that is what the rule is: the profile asks for a file, not for
+   * Only a blocker against a `requires_upload:` model, and a count rather than
+   * a flag because that is what the rule is: the model asks for a file, not for
    * a particular one. Which of them the request actually uses is the template's
    * business, and it is not read here.
    */
@@ -110,7 +110,7 @@ export function preflight({
 }): Preflight {
   const blockers: Blocker[] = []
   const notes: string[] = []
-  // Every declared server is offered to every chat profile, so the registry is
+  // Every declared server is offered to every chat model, so the registry is
   // the whole list — minus the ones this run has switched off, and minus all of
   // them where there is no loop to call a tool from.
   const names = servers.map((server) => server.name)
@@ -120,21 +120,21 @@ export function preflight({
   // Said first, because it is the one blocker fixed by a button on the composer
   // rather than by anything in the auth panel — and on a transcriber it is the
   // only thing between an empty run and an answer.
-  if (profile.requiresUpload && uploads === 0) {
+  if (model.requiresUpload && uploads === 0) {
     blockers.push({
-      message: `${profile.name} needs a file: attach one, since the request is built around it.`,
+      message: `${model.name} needs a file: attach one, since the request is built around it.`,
       needsUpload: true,
     })
   }
 
   if (provider === undefined) {
     blockers.push({
-      message: `This profile names ${profile.auth ?? 'an identity'}, which no auth.yaml entry declares.`,
+      message: `This model names ${model.auth ?? 'an identity'}, which no provider in auth/ declares.`,
     })
   } else {
-    if (!reaches(provider, profile)) {
+    if (!reaches(provider, model)) {
       blockers.push({
-        message: `${provider.name} may only be sent to ${provider.allowedHosts.join(', ')}, and this profile points at ${hostOf(profile.url) ?? profile.url}.`,
+        message: `${provider.name} may only be sent to ${provider.allowedHosts.join(', ')}, and this model points at ${hostOf(model.url) ?? model.url}.`,
       })
     }
     if (provider.needsValue && token.trim().length === 0) {
@@ -177,13 +177,13 @@ export function preflight({
     )
   }
 
-  if (!profile.hasDecode) {
+  if (!model.hasDecode) {
     notes.push('No decode: block, so nothing will be read out of the answer.')
   }
 
   return {
-    url: profile.url,
-    identity: provider?.name ?? profile.auth ?? 'unknown',
+    url: model.url,
+    identity: provider?.name ?? model.auth ?? 'unknown',
     servers: declared,
     blockers,
     notes,

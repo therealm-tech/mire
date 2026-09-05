@@ -3,17 +3,17 @@
 //! Every option `mire` has is a flag, an environment variable, and a key in this
 //! file, in that order of precedence: a flag beats the environment, the
 //! environment beats the file, the file beats the defaults. The file is for the
-//! settings that stopped being a decision — where your profiles live, the CA
+//! settings that stopped being a decision — where your configuration lives, the CA
 //! bundle somebody put on the machine, the port you already bookmarked. A shell
 //! alias covers those too, right up until you open a different shell.
 //!
-//! It is read once, at startup, and never again. The profiles directories are
-//! watched because their contents are the input to the tool and change while you
-//! work; this file says which directories those are and which address to bind,
-//! and neither of those can change under a running process.
+//! It is read once, at startup, and never again. The configuration directories
+//! are watched because their contents are the input to the tool and change while
+//! you work; this file says which directories those are and which address to
+//! bind, and neither of those can change under a running process.
 //!
 //! A broken file is fatal, which is the opposite of the policy for everything
-//! *in* the profiles directories. There, coming up and showing the problem beats
+//! *in* the configuration directories. There, coming up and showing the problem beats
 //! refusing to start — you reach for `mire` when something is already wrong.
 //! Here the file is the tool's own wiring: a `port:` that did not parse means
 //! listening somewhere you did not ask for, and a misspelt key means a setting
@@ -26,8 +26,8 @@ use serde::Deserialize;
 
 use crate::cli::Cli;
 
-/// Profiles directory used when nothing names one.
-pub const DEFAULT_PROFILES: &str = "./profiles";
+/// Configuration directory used when nothing names one.
+pub const DEFAULT_CONFIG_DIR: &str = "./config";
 
 /// Uploads directory used when nothing names one.
 pub const DEFAULT_UPLOADS: &str = "./uploads";
@@ -47,8 +47,8 @@ const FILE: &str = "mire/mire.yaml";
 /// Everything `mire` needs to start, with every source already folded in.
 #[derive(Debug)]
 pub struct Settings {
-    /// Directories holding the profile YAML files, in precedence order.
-    pub profiles: Vec<PathBuf>,
+    /// Configuration directories, in precedence order.
+    pub config_dir: Vec<PathBuf>,
     /// Directory attached files are written to.
     pub uploads: PathBuf,
     /// Address to listen on.
@@ -106,11 +106,14 @@ impl Settings {
         let (file, state) = SettingsFile::find(cli.config.as_deref(), home)?;
 
         Ok(Self {
-            profiles: cli
-                .profiles
+            config_dir: cli
+                .config_dir
                 .clone()
-                .or_else(|| file.profiles.map(|paths| home.expand_all(paths.into_vec())))
-                .unwrap_or_else(|| vec![PathBuf::from(DEFAULT_PROFILES)]),
+                .or_else(|| {
+                    file.config_dir
+                        .map(|paths| home.expand_all(paths.into_vec()))
+                })
+                .unwrap_or_else(|| vec![PathBuf::from(DEFAULT_CONFIG_DIR)]),
             uploads: cli
                 .uploads
                 .clone()
@@ -165,7 +168,7 @@ pub enum SettingsError {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SettingsFile {
-    profiles: Option<Directories>,
+    config_dir: Option<Directories>,
     uploads: Option<PathBuf>,
     host: Option<IpAddr>,
     port: Option<u16>,
@@ -206,7 +209,7 @@ impl SettingsFile {
 
 /// One directory, or a list of them.
 ///
-/// `profiles: /etc/mire/profiles` and `profiles: [a, b]` both say something
+/// `config_dir: /etc/mire` and `config_dir: [a, b]` both say something
 /// obvious, and rejecting the first because it is not a sequence would be
 /// pedantry. The flag's `:`-separated spelling is not repeated here: a file that
 /// can hold a list has no reason to pack one into a string.
@@ -257,7 +260,7 @@ impl Home {
     /// Only the file's paths get this. A flag or an environment assignment is
     /// written in a shell, which expands `~` before `mire` sees anything; a YAML
     /// document has no shell behind it, and a file that lives in the home
-    /// directory is precisely where somebody writes `~/profiles`.
+    /// directory is precisely where somebody writes `~/mire`.
     ///
     /// `~someone-else` is left alone: resolving another user's home needs the
     /// password database, and a wrong guess is worse than the literal path.
@@ -318,7 +321,7 @@ mod tests {
     fn nothing_anywhere_is_every_default() {
         let settings = Fixture::new().settings(&[]);
 
-        assert_eq!(settings.profiles, [PathBuf::from(DEFAULT_PROFILES)]);
+        assert_eq!(settings.config_dir, [PathBuf::from(DEFAULT_CONFIG_DIR)]);
         assert_eq!(settings.uploads, PathBuf::from(DEFAULT_UPLOADS));
         assert_eq!(settings.host, DEFAULT_HOST);
         assert_eq!(settings.port, DEFAULT_PORT);
@@ -332,15 +335,15 @@ mod tests {
     fn the_file_supplies_every_option() {
         let fixture = Fixture::new();
         fixture.write(
-            "profiles:\n  - /etc/mire/profiles\n  - /srv/mine\nuploads: /var/lib/mire/uploads\nhost: 0.0.0.0\nport: 9000\nbase_path: /proxy/8787\npublic_url: https://kubeflow.example\nca_bundle: /etc/ssl/internal.pem\nlog_filter: mire=debug\n",
+            "config_dir:\n  - /etc/mire/config\n  - /srv/mine\nuploads: /var/lib/mire/uploads\nhost: 0.0.0.0\nport: 9000\nbase_path: /proxy/8787\npublic_url: https://kubeflow.example\nca_bundle: /etc/ssl/internal.pem\nlog_filter: mire=debug\n",
         );
 
         let settings = fixture.settings(&[]);
 
         assert_eq!(
-            settings.profiles,
+            settings.config_dir,
             [
-                PathBuf::from("/etc/mire/profiles"),
+                PathBuf::from("/etc/mire/config"),
                 PathBuf::from("/srv/mine")
             ]
         );
@@ -365,11 +368,11 @@ mod tests {
     #[test]
     fn a_flag_beats_the_file() {
         let fixture = Fixture::new();
-        fixture.write("profiles:\n  - /etc/mire/profiles\nport: 9000\n");
+        fixture.write("config_dir:\n  - /etc/mire/config\nport: 9000\n");
 
-        let settings = fixture.settings(&["--profiles", "./mine", "--port", "1234"]);
+        let settings = fixture.settings(&["--config-dir", "./mine", "--port", "1234"]);
 
-        assert_eq!(settings.profiles, [PathBuf::from("./mine")]);
+        assert_eq!(settings.config_dir, [PathBuf::from("./mine")]);
         assert_eq!(settings.port, 1234);
     }
 
@@ -379,32 +382,32 @@ mod tests {
     #[test]
     fn a_flag_replaces_the_files_list_rather_than_extending_it() {
         let fixture = Fixture::new();
-        fixture.write("profiles:\n  - /etc/mire/profiles\n  - /srv/mine\n");
+        fixture.write("config_dir:\n  - /etc/mire/config\n  - /srv/mine\n");
 
-        let settings = fixture.settings(&["--profiles", "./mine"]);
+        let settings = fixture.settings(&["--config-dir", "./mine"]);
 
-        assert_eq!(settings.profiles, [PathBuf::from("./mine")]);
+        assert_eq!(settings.config_dir, [PathBuf::from("./mine")]);
     }
 
     #[test]
-    fn one_profiles_directory_may_be_written_as_a_string() {
+    fn one_configuration_directory_may_be_written_as_a_string() {
         let fixture = Fixture::new();
-        fixture.write("profiles: /etc/mire/profiles\n");
+        fixture.write("config_dir: /etc/mire/config\n");
 
         assert_eq!(
-            fixture.settings(&[]).profiles,
-            [PathBuf::from("/etc/mire/profiles")]
+            fixture.settings(&[]).config_dir,
+            [PathBuf::from("/etc/mire/config")]
         );
     }
 
     #[test]
     fn a_leading_tilde_is_the_home_directory() {
         let fixture = Fixture::new();
-        fixture.write("profiles:\n  - ~/profiles\nca_bundle: ~/certs/internal.pem\n");
+        fixture.write("config_dir:\n  - ~/mire\nca_bundle: ~/certs/internal.pem\n");
 
         let settings = fixture.settings(&[]);
 
-        assert_eq!(settings.profiles, [fixture.dir.path().join("profiles")]);
+        assert_eq!(settings.config_dir, [fixture.dir.path().join("mire")]);
         assert_eq!(
             settings.ca_bundle,
             Some(fixture.dir.path().join("certs/internal.pem"))
@@ -416,11 +419,11 @@ mod tests {
     #[test]
     fn another_users_tilde_is_left_alone() {
         let fixture = Fixture::new();
-        fixture.write("profiles:\n  - ~someone/profiles\n");
+        fixture.write("config_dir:\n  - ~someone/mire\n");
 
         assert_eq!(
-            fixture.settings(&[]).profiles,
-            [PathBuf::from("~someone/profiles")]
+            fixture.settings(&[]).config_dir,
+            [PathBuf::from("~someone/mire")]
         );
     }
 
@@ -438,7 +441,7 @@ mod tests {
     #[test]
     fn a_syntax_error_is_an_error_that_says_where() {
         let fixture = Fixture::new();
-        fixture.write("profiles: [unclosed\n");
+        fixture.write("config_dir: [unclosed\n");
 
         let error = fixture.resolve(&[]).expect_err("broken YAML is fatal");
 

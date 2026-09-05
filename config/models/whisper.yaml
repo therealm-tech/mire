@@ -23,7 +23,7 @@ kind: chat
 # box would be a box for a question this endpoint is never asked — and **Send**
 # would sit greyed out until somebody wrote something into it that changes
 # nothing. `has_prompt: false` takes the box away and lets the call go out with
-# an empty conversation; `true` is the default, and every other profile here
+# an empty conversation; `true` is the default, and every other model here
 # takes it.
 #
 # It changes nothing on the wire. The form below is still the whole request —
@@ -37,7 +37,7 @@ timeout_ms: 600000
 # which is the point. A run with no file attached would render a form around a
 # part that is not there, so the button stays greyed until **Attach** has been
 # pressed, and every API endpoint refuses the same call with a `422` naming this
-# profile.
+# model.
 #
 # The `upload:` field below refuses it too, one step later — while the form is
 # being built. This one is the earlier half, and the half a button can read.
@@ -81,7 +81,7 @@ request:
     model: Systran/faster-whisper-base
     # `json` is the shape the decode cascade below reads. Ask for `verbose_json`
     # and the segments arrive too — `$.segments` is then worth a look in the raw
-    # response, which is where anything this profile does not decode still shows
+    # response, which is where anything this model does not decode still shows
     # up.
     response_format: json
     temperature: 0
@@ -90,7 +90,7 @@ request:
     # so they come back spelled right. A knob, in other words, which is what
     # `params` is for, and why `has_prompt: false` above costs nothing:
     #
-    #   POST /api/call -d '{"profile": "whisper", "uploads": ["<id>"],
+    #   POST /api/call -d '{"model": "whisper", "uploads": ["<id>"],
     #                       "params": {"prompt": "mire, Keycloak, speaches"}}'
     #
     # Unset, it renders empty and the endpoint hears no hint. Drop the
@@ -129,7 +129,7 @@ decode:
 #
 # Then `params.config` is set per call — in the composer, or over the API:
 #
-#   POST /api/call -d '{"profile": "pyannote", "uploads": ["<id>"],
+#   POST /api/call -d '{"model": "pyannote", "uploads": ["<id>"],
 #                       "params": {"config": {"num_speakers": 2}}}'
 #
 # Several files under one field is a list, or an expression producing one. They

@@ -2,7 +2,7 @@
 #
 # The vectors arrive under `$.embeddings` as a list of lists, not under
 # `$.data[*].embedding` — so the OpenAI path is kept first in the cascade
-# precisely to watch it miss and the second one win. Point this same profile at
+# precisely to watch it miss and the second one win. Point this same model at
 # `/v1/embeddings` instead and the first path takes over, unchanged.
 #
 # No `auth:`: this one goes straight at Ollama, so it calls as `anonymous` —

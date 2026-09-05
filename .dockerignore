@@ -23,8 +23,8 @@
 /dev
 /docker-compose.yaml
 
-# Profiles are mounted at runtime, not baked in — see the Dockerfile.
-/profiles
+# The configuration is mounted at runtime, not baked in — see the Dockerfile.
+/config
 
 # Docs and editor leftovers. The licence travels with the release tarball, which
 # CI takes from the checkout — the image has no use for it.

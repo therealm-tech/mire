@@ -130,7 +130,7 @@ fn run(
 ///
 /// The error, when the script reported one, comes back next to the completion
 /// rather than inside it: an endpoint refusing a call has not produced a partial
-/// completion, and both kinds of profile report a refusal the same way.
+/// completion, and both kinds of model report a refusal the same way.
 #[must_use]
 pub fn decode_chat(
     raw: &Value,

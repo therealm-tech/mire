@@ -4,10 +4,10 @@ import type { LoadIssue, Prompt } from '../api'
 /**
  * The questions worth keeping, one dropdown away from the box.
  *
- * They come from `prompts.yaml`, which is a file somebody edits — so this is a
- * picker and never an editor, exactly like the profile list next to it. Picking
+ * They come from `prompts/`, which is a file somebody edits — so this is a
+ * picker and never an editor, exactly like the model list next to it. Picking
  * one drops its text in the box and stops there: nothing is sent, and what the
- * text becomes on the wire is still the profile's template's decision.
+ * text becomes on the wire is still the model's template's decision.
  *
  * It **replaces** what is in the box rather than appending to it, which is the
  * honest reading of "load the saved one" — and why the label says so.
@@ -23,7 +23,7 @@ export function SavedPrompts({
 }: {
   /** Every prompt that loaded, in the order the file wrote them. */
   prompts: Prompt[]
-  /** Entries of `prompts.yaml` that did not, so a typo is visible where it bites. */
+  /** Entries of `prompts/` that did not, so a typo is visible where it bites. */
   issues: LoadIssue[]
   disabled: boolean
   onPick: (text: string) => void
@@ -67,8 +67,8 @@ export function SavedPrompts({
 
       {issues.length > 0 ? (
         <span className="text-[11px] text-bad">
-          {issues.length === 1 ? '1 entry' : `${issues.length} entries`} of prompts.yaml did not
-          load: {issues.map((issue) => issue.message).join('; ')}
+          {issues.length === 1 ? '1 entry' : `${issues.length} entries`} of prompts/ did not load:{' '}
+          {issues.map((issue) => issue.message).join('; ')}
         </span>
       ) : null}
     </div>

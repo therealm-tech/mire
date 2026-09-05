@@ -77,7 +77,7 @@ pub struct RawResponse {
 ///
 /// # Errors
 ///
-/// Returns [`TransportError::Timeout`] when the profile's timeout elapses, and
+/// Returns [`TransportError::Timeout`] when the model's timeout elapses, and
 /// [`TransportError::Send`] for connection, TLS and protocol failures.
 pub async fn send(
     client: &Client,
@@ -140,7 +140,7 @@ impl OpenResponse {
     ///
     /// # Errors
     ///
-    /// Fails on a read error or the profile's timeout. Bytes already delivered
+    /// Fails on a read error or the model's timeout. Bytes already delivered
     /// stay delivered — a stream that dies halfway is a finding, and the caller
     /// keeps what arrived.
     pub async fn read(
@@ -334,7 +334,7 @@ fn classify(error: reqwest::Error, timeout: Duration) -> TransportError {
 /// reader precisely what they were already looking at.
 ///
 /// So: a first clause naming the kind of failure, then the causes it was hiding.
-/// One place, because every outbound call in this process — a profile's request,
+/// One place, because every outbound call in this process — a model's request,
 /// an MCP server, a hook, a token exchange — fails the same way and a reader
 /// should not have to learn two vocabularies for it.
 #[must_use]
@@ -418,7 +418,7 @@ pub enum TransportError {
 
     /// A form part could not be encoded.
     ///
-    /// In practice a `type:` the profile wrote that is not a media type. Caught
+    /// In practice a `type:` the model wrote that is not a media type. Caught
     /// here rather than sent, because a part with a broken `content-type` is a
     /// request the endpoint would only be able to complain about in the vaguest
     /// possible terms.
@@ -430,7 +430,7 @@ pub enum TransportError {
         message: String,
     },
 
-    /// The endpoint did not answer within the profile's timeout.
+    /// The endpoint did not answer within the model's timeout.
     #[error("the endpoint did not answer within {after_ms} ms")]
     Timeout {
         /// Timeout that elapsed.

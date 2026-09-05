@@ -165,9 +165,14 @@ mod tests {
     use crate::auth::registry::AuthRegistry;
     use crate::mcp::McpServer;
 
-    fn registry(yaml: &str) -> AuthRegistry {
+    /// A registry whose `auth/` holds one provider file per `yaml` document.
+    fn registry(providers: &[&str]) -> AuthRegistry {
         let dir = tempfile::TempDir::new().expect("temp dir");
-        std::fs::write(dir.path().join("auth.yaml"), yaml).expect("write");
+        let auth = dir.path().join(crate::config::layout::AUTH);
+        std::fs::create_dir_all(&auth).expect("create dir");
+        for (index, yaml) in providers.iter().enumerate() {
+            std::fs::write(auth.join(format!("{index}.yaml")), yaml).expect("write");
+        }
         AuthRegistry::load(
             dir.path(),
             &reqwest::Client::new(),
@@ -197,9 +202,8 @@ mod tests {
     /// produce, placed somewhere the provider would never have put it.
     #[tokio::test]
     async fn a_named_provider_reaches_a_header_template() {
-        let registry = registry(
-            "providers:\n  - name: workload\n    kind: token\n    value:\n      env: MIRE_TEST_MCP_TOKEN\n",
-        );
+        let registry =
+            registry(&["name: workload\nkind: token\nvalue:\n  env: MIRE_TEST_MCP_TOKEN\n"]);
         let server = server(None, &[("x-api-key", "{{ auth.workload }}")]);
 
         let error = McpCredentials::resolve(&registry, &server)
@@ -212,7 +216,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_provider_nobody_declared_is_named() {
-        let registry = registry("providers: []\n");
+        let registry = registry(&[]);
         let server = server(None, &[("x-api-key", r#"{{ auth["ghost"] }}"#)]);
 
         let error = McpCredentials::resolve(&registry, &server)
@@ -225,7 +229,7 @@ mod tests {
     /// refresh, no session lookup.
     #[tokio::test]
     async fn a_server_that_asks_for_nothing_resolves_nothing() {
-        let registry = registry("providers: []\n");
+        let registry = registry(&[]);
         let server = server(None, &[("x-tenant", "acme")]);
 
         let credentials = McpCredentials::resolve(&registry, &server)
@@ -237,7 +241,7 @@ mod tests {
 
     #[tokio::test]
     async fn anonymous_produces_no_credential_and_is_left_out() {
-        let registry = registry("providers: []\n");
+        let registry = registry(&[]);
         let server = server(None, &[("x-api-key", r#"{{ auth["anonymous"] }}"#)]);
 
         let credentials = McpCredentials::resolve(&registry, &server)

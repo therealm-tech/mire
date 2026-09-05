@@ -1,6 +1,7 @@
-//! `prompts.yaml`, sitting next to the profiles, `auth.yaml` and `mcp.yaml`.
+//! Saved prompts: one file per prompt, in a configuration directory's
+//! `prompts/`.
 //!
-//! A profile says how to reach an endpoint. A prompt says what to send it — and
+//! A model says how to reach an endpoint. A prompt says what to send it — and
 //! that half is worth keeping for the same reason the first one is. The question
 //! that used to make it call the tool, the one that used to make it refuse, the
 //! paragraph that reproduces the bug: retyping any of those from memory is how a
@@ -18,16 +19,14 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 use validator::Validate;
 
+use crate::config::layout;
 use crate::issue::LoadIssue;
-
-/// File declaring the saved prompts, in the profiles directory.
-pub const PROMPT_REGISTRY_FILE: &str = "prompts.yaml";
 
 /// One saved prompt: a name, and what it puts in the box.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Validate)]
 #[serde(deny_unknown_fields)]
 pub struct Prompt {
-    /// What it is called, unique within the file.
+    /// What it is called, unique within the directory.
     ///
     /// The whole of the metadata, deliberately: a prompt *is* its text, and the
     /// name is only what lets you ask for it by something shorter.
@@ -36,16 +35,17 @@ pub struct Prompt {
     /// The text itself, dropped in the box exactly as written.
     ///
     /// Never sent on its own — what a message becomes on the wire is the
-    /// profile's template's decision, here as everywhere else.
+    /// model's template's decision, here as everywhere else.
     #[validate(length(min = 1, message = "a prompt with no text puts nothing in the box"))]
     pub text: String,
 }
 
-/// Every prompt `prompts.yaml` declares, plus the entries that did not load.
+/// Every prompt the `prompts/` directories declare, plus the entries that did
+/// not load.
 ///
-/// The order is the file's rather than alphabetical: a library is a list
-/// somebody arranged, and re-sorting it here would throw that arrangement away
-/// with nothing to show for it.
+/// The order is the directory listing's: file names sorted, directories in
+/// precedence order. A library is a list somebody arranged, and naming the files
+/// `01-ping.yaml`, `02-refusal.yaml` is how that arrangement is written down.
 #[derive(Debug, Default)]
 pub struct PromptRegistry {
     prompts: Vec<Prompt>,
@@ -56,87 +56,94 @@ pub struct PromptRegistry {
 }
 
 impl PromptRegistry {
-    /// Loads `prompts.yaml` from each of the profile directories, in order.
+    /// Loads every prompt file in each configuration directory's `prompts/`, in
+    /// order.
     ///
-    /// Never fails: a missing file means no saved prompts — which is how every
-    /// directory starts — and a broken one is an issue you can read in the UI
-    /// rather than a refusal to start.
+    /// Never fails: a `prompts/` that is not there means no saved prompts —
+    /// which is how every directory starts — and a broken file is an issue you
+    /// can read in the UI rather than a refusal to start.
     #[must_use]
     pub fn load_dirs(dirs: &[impl AsRef<Path>]) -> Self {
         let mut registry = Self::default();
         for dir in dirs {
-            registry.read(&dir.as_ref().join(PROMPT_REGISTRY_FILE));
+            registry.read_dir(dir.as_ref());
         }
         registry
     }
 
-    /// Loads `prompts.yaml` from a single profiles directory.
+    /// Loads the prompts of a single configuration directory.
     #[must_use]
     pub fn load(dir: &Path) -> Self {
         Self::load_dirs(&[dir])
     }
 
-    /// Folds one `prompts.yaml` in, on top of whatever earlier directories said.
+    /// Folds one directory's `prompts/` in, on top of whatever earlier
+    /// directories said.
     ///
     /// An overridden prompt keeps its place in the list rather than moving to the
     /// end: the order is somebody's arrangement, and replacing one text should
     /// not reshuffle the library around it.
-    fn read(&mut self, path: &Path) {
-        if !path.exists() {
-            debug!(path = %path.display(), "no saved prompts");
-            return;
-        }
-
-        let text = match std::fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(error) => {
-                self.issues.push(LoadIssue::new(path, error.to_string()));
+    fn read_dir(&mut self, dir: &Path) {
+        let paths = match layout::entries(dir, layout::PROMPTS) {
+            Ok(paths) => paths,
+            Err(issue) => {
+                self.issues.push(issue);
                 return;
             }
         };
 
-        let file: RegistryFile = match serde_yaml_ng::from_str(&text) {
-            Ok(file) => file,
-            Err(error) => {
-                self.issues.push(LoadIssue::from_yaml(path, &error));
-                return;
-            }
-        };
+        // Which names *this* directory has already used, as opposed to the ones
+        // an earlier one declared: the first is a typo, the second is layering.
+        let mut here: BTreeMap<String, PathBuf> = BTreeMap::new();
 
-        for prompt in file.prompts {
+        for path in paths {
+            let prompt = match layout::read::<Prompt>(&path) {
+                Ok(Some(prompt)) => prompt,
+                Ok(None) => {
+                    debug!(path = %path.display(), "file declares no prompt");
+                    continue;
+                }
+                Err(issue) => {
+                    self.issues.push(issue);
+                    continue;
+                }
+            };
+
             if let Err(errors) = prompt.validate() {
                 // Named where there is a name to name it by. An entry that has
-                // none is the one case where the position in the file is all
-                // anybody has to go on, so the message says which entry it is.
+                // none leaves the file as the only thing anybody has to go on.
                 let subject = if prompt.name.is_empty() {
                     "a prompt".to_owned()
                 } else {
                     format!("prompt `{}`", prompt.name)
                 };
                 self.issues
-                    .push(LoadIssue::new(path, format!("{subject}: {errors}")));
+                    .push(LoadIssue::new(&path, format!("{subject}: {errors}")));
                 continue;
             }
 
-            match self.sources.get(&prompt.name) {
-                Some(previous) if previous == path => {
-                    self.issues.push(LoadIssue::new(
-                        path,
-                        format!("duplicate prompt `{}`", prompt.name),
-                    ));
-                    continue;
-                }
-                Some(previous) => warn!(
+            if let Some(previous) = here.insert(prompt.name.clone(), path.clone()) {
+                self.issues.push(LoadIssue::new(
+                    &path,
+                    format!(
+                        "duplicate prompt `{}`, already declared in {}",
+                        prompt.name,
+                        previous.display()
+                    ),
+                ));
+                continue;
+            }
+            if let Some(previous) = self.sources.get(&prompt.name) {
+                warn!(
                     name = %prompt.name,
                     path = %path.display(),
                     shadowed = %previous.display(),
                     "prompt overridden by a later directory"
-                ),
-                None => {}
+                );
             }
 
             debug!(name = %prompt.name, "prompt loaded");
-            self.sources.insert(prompt.name.clone(), path.to_path_buf());
+            self.sources.insert(prompt.name.clone(), path.clone());
             match self
                 .prompts
                 .iter_mut()
@@ -148,7 +155,7 @@ impl PromptRegistry {
         }
     }
 
-    /// Every prompt that loaded, in the order the file declares them.
+    /// Every prompt that loaded, in the order the directory listing gives them.
     #[must_use]
     pub fn prompts(&self) -> &[Prompt] {
         &self.prompts
@@ -173,48 +180,45 @@ impl PromptRegistry {
     }
 }
 
-/// The document itself.
-///
-/// One key rather than a bare list, so that the day this file needs a second
-/// thing to say it gains a key instead of changing shape under everyone.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RegistryFile {
-    #[serde(default)]
-    prompts: Vec<Prompt>,
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
     use super::*;
 
-    fn temp_dir(tag: &str) -> PathBuf {
+    /// A configuration directory whose `prompts/` holds one file per prompt.
+    fn write(tag: &str, files: &[(&str, &str)]) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("mire-prompts-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(dir.join(layout::PROMPTS)).unwrap();
+        for (name, body) in files {
+            std::fs::write(dir.join(layout::PROMPTS).join(name), body).unwrap();
+        }
         dir
     }
 
-    fn write(dir: &Path, body: &str) {
-        std::fs::write(dir.join(PROMPT_REGISTRY_FILE), body).unwrap();
-    }
-
     #[test]
-    fn no_file_is_no_prompts_and_no_complaint() {
-        let registry = PromptRegistry::load(&temp_dir("missing"));
+    fn no_directory_is_no_prompts_and_no_complaint() {
+        let dir = std::env::temp_dir().join(format!("mire-prompts-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let registry = PromptRegistry::load(&dir);
 
         assert!(registry.is_empty());
         assert!(registry.issues().is_empty());
     }
 
+    /// The arrangement is the file names, which is why they are not sorted by
+    /// prompt name: `01-` before `02-` puts a library in somebody's order.
     #[test]
-    fn prompts_keep_the_order_the_file_wrote_them_in() {
-        let dir = temp_dir("order");
-        write(
-            &dir,
-            "prompts:\n  - name: zebra\n    text: ping\n  - name: alpha\n    text: pong\n",
+    fn prompts_come_in_the_order_the_file_names_put_them_in() {
+        let dir = write(
+            "order",
+            &[
+                ("01-zebra.yaml", "name: zebra\ntext: ping\n"),
+                ("02-alpha.yaml", "name: alpha\ntext: pong\n"),
+            ],
         );
 
         let registry = PromptRegistry::load(&dir);
@@ -229,10 +233,9 @@ mod tests {
 
     #[test]
     fn multiline_text_survives_the_round_trip() {
-        let dir = temp_dir("multiline");
-        write(
-            &dir,
-            "prompts:\n  - name: two lines\n    text: |\n      one\n      two\n",
+        let dir = write(
+            "multiline",
+            &[("two-lines.yaml", "name: two lines\ntext: |\n  one\n  two\n")],
         );
 
         let registry = PromptRegistry::load(&dir);
@@ -242,10 +245,12 @@ mod tests {
 
     #[test]
     fn a_duplicate_name_is_reported_not_silently_overwritten() {
-        let dir = temp_dir("dup");
-        write(
-            &dir,
-            "prompts:\n  - name: ping\n    text: first\n  - name: ping\n    text: second\n",
+        let dir = write(
+            "dup",
+            &[
+                ("a.yaml", "name: ping\ntext: first\n"),
+                ("b.yaml", "name: ping\ntext: second\n"),
+            ],
         );
 
         let registry = PromptRegistry::load(&dir);
@@ -257,10 +262,12 @@ mod tests {
 
     #[test]
     fn an_empty_prompt_is_skipped_and_the_others_still_load() {
-        let dir = temp_dir("empty-text");
-        write(
-            &dir,
-            "prompts:\n  - name: hollow\n    text: ''\n  - name: real\n    text: ping\n",
+        let dir = write(
+            "empty-text",
+            &[
+                ("hollow.yaml", "name: hollow\ntext: ''\n"),
+                ("real.yaml", "name: real\ntext: ping\n"),
+            ],
         );
 
         let registry = PromptRegistry::load(&dir);
@@ -275,11 +282,25 @@ mod tests {
     }
 
     #[test]
+    fn a_file_that_declares_nothing_is_skipped() {
+        let dir = write(
+            "commented",
+            &[
+                ("example.yaml", "# name: ping\n# text: ping\n"),
+                ("real.yaml", "name: real\ntext: ping\n"),
+            ],
+        );
+
+        let registry = PromptRegistry::load(&dir);
+
+        assert_eq!(registry.len(), 1);
+        assert!(registry.issues().is_empty(), "{:?}", registry.issues());
+    }
+
+    #[test]
     fn a_later_directory_takes_a_prompt_the_earlier_one_declared() {
-        let base = temp_dir("layer-base");
-        let mine = temp_dir("layer-mine");
-        write(&base, "prompts:\n  - name: ping\n    text: first\n");
-        write(&mine, "prompts:\n  - name: ping\n    text: second\n");
+        let base = write("layer-base", &[("ping.yaml", "name: ping\ntext: first\n")]);
+        let mine = write("layer-mine", &[("ping.yaml", "name: ping\ntext: second\n")]);
 
         let registry = PromptRegistry::load_dirs(&[&base, &mine]);
 
@@ -292,13 +313,17 @@ mod tests {
     /// arrangement; swapping one text should not send it to the bottom.
     #[test]
     fn an_overridden_prompt_keeps_its_place_in_the_list() {
-        let base = temp_dir("layer-order-base");
-        let mine = temp_dir("layer-order-mine");
-        write(
-            &base,
-            "prompts:\n  - name: ping\n    text: first\n  - name: pong\n    text: first\n",
+        let base = write(
+            "layer-order-base",
+            &[
+                ("01-ping.yaml", "name: ping\ntext: first\n"),
+                ("02-pong.yaml", "name: pong\ntext: first\n"),
+            ],
         );
-        write(&mine, "prompts:\n  - name: ping\n    text: second\n");
+        let mine = write(
+            "layer-order-mine",
+            &[("ping.yaml", "name: ping\ntext: second\n")],
+        );
 
         let registry = PromptRegistry::load_dirs(&[&base, &mine]);
 
@@ -311,16 +336,20 @@ mod tests {
         assert_eq!(registry.prompts()[0].text, "second");
     }
 
-    /// Overriding is only ever *across* directories. Twice in one file is still
-    /// the typo it always was.
+    /// Overriding is only ever *across* directories. Two files in one directory
+    /// claiming the same name is still the typo it always was.
     #[test]
     fn a_duplicate_inside_the_later_directory_is_still_reported() {
-        let base = temp_dir("layer-dup-base");
-        let mine = temp_dir("layer-dup-mine");
-        write(&base, "prompts:\n  - name: ping\n    text: first\n");
-        write(
-            &mine,
-            "prompts:\n  - name: ping\n    text: second\n  - name: ping\n    text: third\n",
+        let base = write(
+            "layer-dup-base",
+            &[("ping.yaml", "name: ping\ntext: first\n")],
+        );
+        let mine = write(
+            "layer-dup-mine",
+            &[
+                ("a.yaml", "name: ping\ntext: second\n"),
+                ("b.yaml", "name: ping\ntext: third\n"),
+            ],
         );
 
         let registry = PromptRegistry::load_dirs(&[&base, &mine]);
@@ -333,8 +362,7 @@ mod tests {
 
     #[test]
     fn a_syntax_error_carries_a_position_and_costs_the_file() {
-        let dir = temp_dir("syntax");
-        write(&dir, "prompts: [unclosed\n");
+        let dir = write("syntax", &[("bad.yaml", "name: [unclosed\n")]);
 
         let registry = PromptRegistry::load(&dir);
 
@@ -344,8 +372,7 @@ mod tests {
 
     #[test]
     fn an_unknown_key_is_rejected_by_name() {
-        let dir = temp_dir("typo");
-        write(&dir, "prompts:\n  - name: ping\n    txet: ping\n");
+        let dir = write("typo", &[("ping.yaml", "name: ping\ntxet: ping\n")]);
 
         let registry = PromptRegistry::load(&dir);
 

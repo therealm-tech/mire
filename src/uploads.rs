@@ -2,7 +2,7 @@
 //!
 //! This is the one place in `mire` that writes to disk, and it is worth saying
 //! why that is unusual here. Everything else is read-only by construction:
-//! profiles are read, credentials are held in memory, and the container image
+//! models are read, credentials are held in memory, and the container image
 //! runs `--read-only` as UID 65532 with nothing to write to. An upload directory
 //! is a deliberate hole in that, so the rules below are not decoration.
 //!
@@ -311,7 +311,7 @@ fn content_type_for(name: &str) -> Option<String> {
         // Audio, because a transcriber is the whole reason a form body exists
         // here and every one of them reads the part's type. An endpoint handed
         // `application/octet-stream` for an MP3 is one that either guesses or
-        // refuses, and both are worse than saying so. A profile that disagrees
+        // refuses, and both are worse than saying so. A model that disagrees
         // still overrides it with `type:`.
         "mp3" | "mpga" => "audio/mpeg",
         "wav" => "audio/wav",
@@ -443,7 +443,7 @@ pub fn mime_of(upload: &UploadRef) -> &str {
 /// naming one — its `path`, its `name` or its `id`. Anything else is an error
 /// rather than a file quietly left out of a form.
 ///
-/// Shared by a hook's `multipart:` and a profile's, so the two cannot end up
+/// Shared by a hook's `multipart:` and a model's, so the two cannot end up
 /// with different answers to "which file did you mean". In a tool whose whole
 /// pitch is that what went out is written down, that is the divergence least
 /// worth having.

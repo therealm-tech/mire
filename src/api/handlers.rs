@@ -16,8 +16,8 @@ use validator::Validate;
 use super::AppState;
 use super::dto::{
     AgentEvent, AgentRequest, AuthPath, AuthResponse, CallRequest, CallbackQuery, LoginRequest,
-    LoginResponse, LogoutResponse, McpPath, McpResponse, McpToolsResponse, ProfilePath,
-    ProfilesResponse, PromptsResponse, StreamEvent, UploadResponse,
+    LoginResponse, LogoutResponse, McpPath, McpResponse, McpToolsResponse, ModelPath,
+    ModelsResponse, PromptsResponse, StreamEvent, UploadResponse,
 };
 use super::sse::EventStream;
 use super::ui;
@@ -27,7 +27,7 @@ use crate::config::Config;
 use crate::error::ApiError;
 use crate::exec::{self, CallInput, CallOutcome};
 use crate::mcp::{McpCredentials, McpError, Revision};
-use crate::profile::{Profile, ProfileKind};
+use crate::model::{Model, ModelKind};
 use crate::uploads::UploadError;
 
 /// Liveness probe. Deliberately outside the `OpenAPI` document.
@@ -35,10 +35,10 @@ pub async fn healthz() -> &'static str {
     "ok"
 }
 
-/// Every profile, and every file that failed to load.
-pub async fn list_profiles(State(state): State<AppState>) -> Json<ProfilesResponse> {
+/// Every model, and every file that failed to load.
+pub async fn list_models(State(state): State<AppState>) -> Json<ModelsResponse> {
     let config = state.runner.config().snapshot();
-    Json(ProfilesResponse::new(&config.profiles))
+    Json(ModelsResponse::new(&config.models))
 }
 
 /// Every saved prompt, and every entry that failed to load.
@@ -46,27 +46,24 @@ pub async fn list_prompts(State(state): State<AppState>) -> Json<PromptsResponse
     Json((&state.runner.config().snapshot().prompts).into())
 }
 
-/// One profile, as declared.
+/// One model, as declared.
 ///
 /// # Errors
 ///
-/// `404` when no profile carries that name.
-pub async fn get_profile(
+/// `404` when no model carries that name.
+pub async fn get_model(
     State(state): State<AppState>,
-    Path(path): Path<ProfilePath>,
-) -> Result<Json<Profile>, ApiError> {
+    Path(path): Path<ModelPath>,
+) -> Result<Json<Model>, ApiError> {
     state
         .runner
         .config()
         .snapshot()
-        .profiles
+        .models
         .get(&path.name)
-        .map(|profile| Json(profile.as_ref().clone()))
+        .map(|model| Json(model.as_ref().clone()))
         .ok_or_else(|| {
-            ApiError::not_found(
-                "unknown_profile",
-                format!("unknown profile `{}`", path.name),
-            )
+            ApiError::not_found("unknown_model", format!("unknown model `{}`", path.name))
         })
 }
 
@@ -564,42 +561,42 @@ pub async fn call(
 ///
 /// # Errors
 ///
-/// `404` for an unknown profile, `422` for an embedding profile.
+/// `404` for an unknown model, `422` for an embedding model.
 pub async fn call_stream(
     State(state): State<AppState>,
     Json(request): Json<CallRequest>,
 ) -> Result<EventStream<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
     request.validate()?;
 
-    let profile = state
+    let model = state
         .runner
         .config()
         .snapshot()
-        .profiles
-        .get(&request.profile)
+        .models
+        .get(&request.model)
         .cloned()
         .ok_or_else(|| {
             ApiError::not_found(
-                "unknown_profile",
-                format!("unknown profile `{}`", request.profile),
+                "unknown_model",
+                format!("unknown model `{}`", request.model),
             )
         })?;
-    if profile.kind != ProfileKind::Chat {
+    if model.kind != ModelKind::Chat {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "not_a_chat_profile",
+            "not_a_chat_model",
             format!(
-                "profile `{}` is `kind: embedding`; there is nothing to stream",
-                profile.name
+                "model `{}` is `kind: embedding`; there is nothing to stream",
+                model.name
             ),
         ));
     }
     // Before the stream opens, so a file that will not load is a status code
-    // rather than a stream that opens and immediately fails. The profile asking
+    // rather than a stream that opens and immediately fails. The model asking
     // for one and getting none is settled here for the same reason — the runner
     // refuses it either way, but a `422` beats a stream whose first event is one.
     let uploads = resolve_uploads(&state, &request.uploads).await?;
-    exec::check_uploads(&profile, &uploads)?;
+    exec::check_uploads(&model, &uploads)?;
 
     let (sender, mut receiver) = mpsc::unbounded_channel::<StreamEvent>();
     let runner = state.runner.clone();
@@ -656,39 +653,39 @@ pub async fn call_stream(
 
 /// Runs an agent loop, streaming one server-sent event per turn.
 ///
-/// Mistakes that can be caught before anything is sent — an unknown profile, an
-/// embedding profile — come back as a normal HTTP error, because a `404` is more
+/// Mistakes that can be caught before anything is sent — an unknown model, an
+/// embedding model — come back as a normal HTTP error, because a `404` is more
 /// use than a stream whose first event is a failure. Anything that goes wrong
 /// once the loop is running arrives as a `failed` event.
 ///
 /// # Errors
 ///
-/// `404` for an unknown profile, `422` for a profile agent mode cannot run.
+/// `404` for an unknown model, `422` for a model agent mode cannot run.
 pub async fn agent(
     State(state): State<AppState>,
     Json(request): Json<AgentRequest>,
 ) -> Result<EventStream<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
     request.validate()?;
 
-    let profile = state
+    let model = state
         .runner
         .config()
         .snapshot()
-        .profiles
-        .get(&request.call.profile)
+        .models
+        .get(&request.call.model)
         .cloned()
         .ok_or_else(|| {
             ApiError::not_found(
-                "unknown_profile",
-                format!("unknown profile `{}`", request.call.profile),
+                "unknown_model",
+                format!("unknown model `{}`", request.call.model),
             )
         })?;
-    if profile.kind != ProfileKind::Chat {
+    if model.kind != ModelKind::Chat {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "not_a_chat_profile",
+            "not_a_chat_model",
             AgentError::NotChat {
-                profile: profile.name.clone(),
+                model: model.name.clone(),
             }
             .to_string(),
         ));
@@ -707,7 +704,7 @@ pub async fn agent(
 
     // Same reasoning as the streamed call: settled before the stream opens.
     let uploads = resolve_uploads(&state, &request.call.uploads).await?;
-    exec::check_uploads(&profile, &uploads)?;
+    exec::check_uploads(&model, &uploads)?;
 
     let (sender, mut receiver) = mpsc::unbounded_channel::<AgentEvent>();
     let runner = state.runner.clone();

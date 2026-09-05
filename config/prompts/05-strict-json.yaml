@@ -1,0 +1,7 @@
+# Does anything actually enforce the shape you asked for? A refusal here is a
+# finding, not a failure.
+---
+name: strict json
+text: |
+  Answer with a JSON object and nothing else — no prose, no fences.
+  Keys: "city" (string), "temperature_c" (number), "measured_at" (RFC 3339).

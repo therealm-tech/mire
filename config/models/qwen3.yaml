@@ -1,4 +1,4 @@
-# The chat profile, behind the gateway that requires a credential.
+# The chat model, behind the gateway that requires a credential.
 #
 # One file, carrying everything `mire` does with a chat endpoint: a request
 # template driven by the call, a decode cascade covering two response shapes, an
@@ -7,7 +7,7 @@
 #
 # The URL is the gateway rather than Ollama itself, which is what makes that
 # question worth asking. Change the one line below — or override it per call with
-# `POST /api/call -d '{"profile": "qwen3", "auth": "..."}'` — and you get the
+# `POST /api/call -d '{"model": "qwen3", "auth": "..."}'` — and you get the
 # matrix this tool exists for:
 #
 #   anonymous          -> 401, and that is a pass: the route is protected
@@ -15,7 +15,7 @@
 #   keycloak-workload  -> 200, with a token really fetched from Keycloak
 #   keycloak-user      -> 200, as you, after signing in
 #
-# One profile, four answers, nothing duplicated. Point `url:` at
+# One model, four answers, nothing duplicated. Point `url:` at
 # http://127.0.0.1:11434/v1/chat/completions and delete `auth:` to talk to Ollama
 # with nothing in the way.
 ---
@@ -27,7 +27,7 @@ auth: keycloak-workload
 timeout_ms: 300000
 
 # `"stream": {{ stream | tojson }}` is what makes the composer's `stream` box do
-# anything: the flag comes from the call, so one profile serves both shapes,
+# anything: the flag comes from the call, so one model serves both shapes,
 # whatever the run's turn budget. The `| tojson` is not decoration
 # — MiniJinja renders a bare boolean as `True`, which is Python and is not JSON.
 #
@@ -112,7 +112,7 @@ decode:
     - $.usage
     - $
   # The one field that is not about the answer: what the endpoint says when there
-  # is no answer. Three shapes reach this profile, and `$` covers all three
+  # is no answer. Three shapes reach this model, and `$` covers all three
   # because the node is read wherever the complaint sits inside it:
   #
   #   {"error": {"message": "…", "type": "…", "code": "…"}}   the OpenAI-compatible endpoint
@@ -130,7 +130,7 @@ decode:
   error:
     - $
 
-# Agent mode runs this profile in a loop. Stop as soon as the model asks for no
+# Agent mode runs this model in a loop. Stop as soon as the model asks for no
 # more tools, or says it is done.
 #
 # `finish_reason_in` is affordable here because the OpenAI-compatible endpoint
@@ -155,7 +155,7 @@ agent:
   max_duration_ms: 600000
 
 # The tools are not declared here, and neither are the servers they come from.
-# Every server mcp.yaml declares is offered to every `kind: chat` profile: they
+# Every server `../mcp/` declares is offered to every `kind: chat` model: they
 # are fetched at the start of the run and **really called**, which is the
 # difference between checking that the model emits well-formed calls and checking
 # that tool calling works. The declarations the model sees come from each server's

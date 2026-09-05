@@ -3,7 +3,7 @@ import { Button, Field, INPUT_CLASSES, Panel } from './primitives'
 import { SavedPrompts } from './SavedPrompts'
 
 /**
- * The input side of an embedding profile.
+ * The input side of an embedding model.
  *
  * There is no second turn of an embedding, so there is no conversation here and
  * no loop to run — one call, one answer, and the interesting part is the shape

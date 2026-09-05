@@ -1,9 +1,12 @@
 //! Shared, hot-reloading view of the configuration directories.
 //!
-//! Profiles, the auth registry, the MCP servers and the saved prompts all come
+//! Models, the auth registry, the MCP servers and the saved prompts all come
 //! from the same directories and reload together, as one atomic snapshot: a call
-//! that starts with a given profile also gets the auth registry that was current
+//! that starts with a given model also gets the auth registry that was current
 //! when it started.
+//!
+//! What a directory holds is [`layout`]'s business: one subdirectory per kind of
+//! thing, one file per entry.
 //!
 //! There can be more than one directory, and then they are layered in the order
 //! given: a name declared twice belongs to the last directory that declared it,
@@ -12,6 +15,8 @@
 //! something you have to copy before you can change one line of it.
 //!
 //! Readers take a cheap [`Arc`] snapshot; a reload swaps a whole new one in.
+
+pub mod layout;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -25,7 +30,7 @@ use tracing::{debug, error, info, warn};
 use crate::auth::{AuthRegistry, SessionStore};
 use crate::issue::LoadIssue;
 use crate::mcp::McpRegistry;
-use crate::profile::loader::{self, ProfileSet};
+use crate::model::loader::{self, ModelSet};
 use crate::prompt::PromptRegistry;
 
 /// How long the directories must stay quiet before a reload is triggered.
@@ -37,8 +42,8 @@ const DEBOUNCE: Duration = Duration::from_millis(200);
 /// One consistent view of the configuration directories.
 #[derive(Debug, Default)]
 pub struct Config {
-    /// Profiles that parsed and validated, plus the files that did not.
-    pub profiles: ProfileSet,
+    /// Models that parsed and validated, plus the files that did not.
+    pub models: ModelSet,
     /// Auth providers, plus the entries that did not load.
     pub registry: AuthRegistry,
     /// MCP servers agent mode may call for real, plus the entries that did not
@@ -52,7 +57,7 @@ pub struct Config {
 impl Config {
     /// Every issue found, whichever directory and file it came from.
     pub fn issues(&self) -> impl Iterator<Item = &LoadIssue> {
-        self.profiles
+        self.models
             .issues()
             .iter()
             .chain(self.registry.issues().iter())
@@ -81,7 +86,7 @@ impl ConfigStore {
     /// # Errors
     ///
     /// Fails only if one of the directories cannot be read — the error names
-    /// which. Broken profiles and broken auth entries are recorded as issues, not
+    /// which. Broken models and broken auth entries are recorded as issues, not
     /// returned as errors.
     pub fn load(dirs: &[impl AsRef<Path>], http: Client) -> std::io::Result<Arc<Self>> {
         // A slice rather than an `IntoIterator`: `&Path` is itself iterable, over
@@ -131,7 +136,7 @@ impl ConfigStore {
         match read(&self.dirs, &self.http, &self.sessions) {
             Ok(config) => {
                 info!(
-                    profiles = config.profiles.len(),
+                    models = config.models.len(),
                     providers = config.registry.descriptors().len(),
                     prompts = config.prompts.len(),
                     issues = config.issues().count(),
@@ -160,8 +165,19 @@ pub fn describe(dirs: &[PathBuf]) -> String {
 }
 
 fn read(dirs: &[PathBuf], http: &Client, sessions: &Arc<SessionStore>) -> std::io::Result<Config> {
+    // The one thing worth refusing to start over. Everything *inside* a
+    // configuration directory is reported and skipped, but a directory that is
+    // not there at all is a typo in `--config-dir`, and carrying on would show an
+    // empty UI as if the typo were a fact about the machine. The error names the
+    // directory: with a list, "no such file or directory" does not say which.
+    for dir in dirs {
+        std::fs::read_dir(dir).map_err(|error| {
+            std::io::Error::new(error.kind(), format!("`{}`: {error}", dir.display()))
+        })?;
+    }
+
     Ok(Config {
-        profiles: loader::load_dirs(dirs)?,
+        models: loader::load_dirs(dirs),
         registry: AuthRegistry::load_dirs(dirs, http, sessions),
         mcp: McpRegistry::load_dirs(dirs, http),
         prompts: PromptRegistry::load_dirs(dirs),
@@ -188,8 +204,9 @@ pub fn watch(store: Arc<ConfigStore>) -> notify::Result<RecommendedWatcher> {
             }
             Err(error) => error!(%error, "configuration watcher error"),
         })?;
+    // Recursive: what changes is a file in `models/` or `auth/`, one level down.
     for dir in store.dirs() {
-        watcher.watch(dir, RecursiveMode::NonRecursive)?;
+        watcher.watch(dir, RecursiveMode::Recursive)?;
     }
 
     tokio::spawn(async move {
@@ -216,26 +233,34 @@ pub fn watch(store: Arc<ConfigStore>) -> notify::Result<RecommendedWatcher> {
 mod tests {
     use super::*;
 
+    /// A configuration directory with every subdirectory in place, the way one
+    /// somebody keeps looks.
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("mire-config-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        for kind in [layout::MODELS, layout::AUTH, layout::MCP, layout::PROMPTS] {
+            std::fs::create_dir_all(dir.join(kind)).unwrap();
+        }
         dir
     }
 
-    const PROFILE: &str =
+    fn write(dir: &Path, kind: &str, name: &str, body: &str) {
+        std::fs::write(dir.join(kind).join(name), body).unwrap();
+    }
+
+    const MODEL: &str =
         "name: late\nkind: chat\nurl: https://models.internal/late\nrequest:\n  template: '{}'\n";
 
     #[test]
-    fn a_reload_picks_up_a_new_profile() {
-        let dir = temp_dir("profile");
+    fn a_reload_picks_up_a_new_model() {
+        let dir = temp_dir("model");
         let store = ConfigStore::load(std::slice::from_ref(&dir), Client::new()).unwrap();
-        assert!(store.snapshot().profiles.is_empty());
+        assert!(store.snapshot().models.is_empty());
 
-        std::fs::write(dir.join("late.yaml"), PROFILE).unwrap();
+        write(&dir, layout::MODELS, "late.yaml", MODEL);
         store.reload();
 
-        assert_eq!(store.snapshot().profiles.len(), 1);
+        assert_eq!(store.snapshot().models.len(), 1);
     }
 
     #[test]
@@ -244,11 +269,12 @@ mod tests {
         let store = ConfigStore::load(std::slice::from_ref(&dir), Client::new()).unwrap();
         assert!(store.snapshot().registry.get("gateway").is_none());
 
-        std::fs::write(
-            dir.join("auth.yaml"),
-            "providers:\n  - name: gateway\n    kind: token\n    value:\n      env: MODEL_TOKEN\n",
-        )
-        .unwrap();
+        write(
+            &dir,
+            layout::AUTH,
+            "gateway.yaml",
+            "name: gateway\nkind: token\nvalue:\n  env: MODEL_TOKEN\n",
+        );
         store.reload();
 
         assert!(store.snapshot().registry.get("gateway").is_some());
@@ -260,20 +286,51 @@ mod tests {
         let store = ConfigStore::load(std::slice::from_ref(&dir), Client::new()).unwrap();
         assert!(store.snapshot().prompts.is_empty());
 
-        std::fs::write(
-            dir.join("prompts.yaml"),
-            "prompts:\n  - name: ping\n    text: ping\n",
-        )
-        .unwrap();
+        write(
+            &dir,
+            layout::PROMPTS,
+            "ping.yaml",
+            "name: ping\ntext: ping\n",
+        );
         store.reload();
 
         assert_eq!(store.snapshot().prompts.prompts()[0].text, "ping");
     }
 
+    /// A directory that is not there at all is a typo in `--config-dir`, and the
+    /// one thing in here worth refusing to start over.
     #[test]
-    fn a_broken_auth_registry_leaves_anonymous_working_and_reports_the_problem() {
+    fn a_directory_that_cannot_be_read_is_named_in_the_error() {
+        let base = temp_dir("missing");
+        let missing = base.join("nowhere");
+
+        let error = ConfigStore::load(&[&base, &missing], Client::new()).unwrap_err();
+
+        assert!(error.to_string().contains("nowhere"), "{error}");
+    }
+
+    /// The subdirectories are another matter: a configuration directory holding
+    /// only models is the ordinary case, not a broken one.
+    #[test]
+    fn a_directory_with_no_subdirectories_still_loads() {
+        let dir = std::env::temp_dir().join(format!("mire-config-bare-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let store = ConfigStore::load(std::slice::from_ref(&dir), Client::new()).unwrap();
+
+        let config = store.snapshot();
+        assert!(config.models.is_empty());
+        assert!(config.prompts.is_empty());
+        assert_eq!(config.issues().count(), 0);
+        // The one thing that exists without being declared anywhere.
+        assert!(config.registry.get("anonymous").is_some());
+    }
+
+    #[test]
+    fn a_broken_auth_provider_leaves_anonymous_working_and_reports_the_problem() {
         let dir = temp_dir("broken-auth");
-        std::fs::write(dir.join("auth.yaml"), "providers: [unclosed\n").unwrap();
+        write(&dir, layout::AUTH, "broken.yaml", "name: [unclosed\n");
 
         let store = ConfigStore::load(std::slice::from_ref(&dir), Client::new()).unwrap();
         let config = store.snapshot();
@@ -283,20 +340,21 @@ mod tests {
     }
 
     #[test]
-    fn profiles_and_providers_swap_together() {
+    fn models_and_providers_swap_together() {
         let dir = temp_dir("atomic");
         let store = ConfigStore::load(std::slice::from_ref(&dir), Client::new()).unwrap();
 
-        std::fs::write(dir.join("late.yaml"), PROFILE).unwrap();
-        std::fs::write(
-            dir.join("auth.yaml"),
-            "providers:\n  - name: gateway\n    kind: anonymous\n",
-        )
-        .unwrap();
+        write(&dir, layout::MODELS, "late.yaml", MODEL);
+        write(
+            &dir,
+            layout::AUTH,
+            "gateway.yaml",
+            "name: gateway\nkind: anonymous\n",
+        );
         store.reload();
 
         let config = store.snapshot();
-        assert!(config.profiles.get("late").is_some());
+        assert!(config.models.get("late").is_some());
         assert!(config.registry.get("gateway").is_some());
     }
 
@@ -304,39 +362,41 @@ mod tests {
     fn a_later_directory_wins_a_name_and_both_are_watched() {
         let base = temp_dir("layer-base");
         let mine = temp_dir("layer-mine");
-        std::fs::write(base.join("late.yaml"), PROFILE).unwrap();
-        std::fs::write(
-            mine.join("late.yaml"),
-            PROFILE.replace(
+        write(&base, layout::MODELS, "late.yaml", MODEL);
+        write(
+            &mine,
+            layout::MODELS,
+            "late.yaml",
+            &MODEL.replace(
                 "https://models.internal/late",
                 "https://staging.internal/late",
             ),
-        )
-        .unwrap();
+        );
 
         let store = ConfigStore::load(&[&base, &mine], Client::new()).unwrap();
 
         assert_eq!(store.dirs(), [base, mine.clone()]);
         let config = store.snapshot();
-        assert_eq!(config.profiles.len(), 1);
+        assert_eq!(config.models.len(), 1);
         assert_eq!(
-            config.profiles.get("late").unwrap().url.as_str(),
+            config.models.get("late").unwrap().url.as_str(),
             "https://staging.internal/late"
         );
 
         // And the win survives a reload, rather than depending on which
         // directory happened to be read first.
-        std::fs::write(
-            mine.join("late.yaml"),
-            PROFILE.replace(
+        write(
+            &mine,
+            layout::MODELS,
+            "late.yaml",
+            &MODEL.replace(
                 "https://models.internal/late",
                 "https://other.internal/late",
             ),
-        )
-        .unwrap();
+        );
         store.reload();
         assert_eq!(
-            store.snapshot().profiles.get("late").unwrap().url.as_str(),
+            store.snapshot().models.get("late").unwrap().url.as_str(),
             "https://other.internal/late"
         );
     }
@@ -349,11 +409,12 @@ mod tests {
         use crate::redact::Secret;
 
         let dir = temp_dir("session");
-        std::fs::write(
-            dir.join("auth.yaml"),
-            "providers:\n  - name: kc\n    kind: oidc_browser\n    issuer: https://idp.internal/realms/mire\n    client_id: mire-ui\n",
-        )
-        .unwrap();
+        write(
+            &dir,
+            layout::AUTH,
+            "kc.yaml",
+            "name: kc\nkind: oidc_browser\nissuer: https://idp.internal/realms/mire\nclient_id: mire-ui\n",
+        );
         let store = ConfigStore::load(std::slice::from_ref(&dir), Client::new()).unwrap();
 
         store.sessions().store(
@@ -367,12 +428,12 @@ mod tests {
             },
         );
 
-        // Editing a profile rebuilds the registry from scratch. The session must
+        // Editing a model rebuilds the registry from scratch. The session must
         // not be collateral damage — that is the whole reason it lives outside.
-        std::fs::write(dir.join("late.yaml"), PROFILE).unwrap();
+        write(&dir, layout::MODELS, "late.yaml", MODEL);
         store.reload();
 
-        assert_eq!(store.snapshot().profiles.len(), 1);
+        assert_eq!(store.snapshot().models.len(), 1);
         assert!(store.sessions().access_token("kc").is_some());
     }
 }

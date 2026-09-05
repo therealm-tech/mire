@@ -1,0 +1,9 @@
+# A projected service account token — what a pod actually holds. Declare
+# `workload-token` in `../auth/` (it is already there, commented) pointing at
+# /var/run/secrets/kubernetes.io/serviceaccount/token: the file is re-read on
+# every call, so rotation is a non-event and nothing has to restart.
+
+# ---
+# name: files-sa
+# url: https://mcp.internal/mcp
+# auth: workload-token

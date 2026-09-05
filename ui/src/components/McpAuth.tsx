@@ -20,8 +20,8 @@ export function identities(server: McpDescriptor): { name: string; templated: bo
  * Who the tool calls go out as — which is not who the model call goes out as.
  *
  * A separate question from the one above it, and answered in a separate file:
- * the model's identity comes from the profile's `auth:`, a server's from its own
- * entry in `mcp.yaml`, and neither follows the other. Only the servers this run
+ * the model's identity comes from the model's `auth:`, a server's from its own
+ * entry in `mcp/`, and neither follows the other. Only the servers this run
  * will actually set up are listed — one switched off in the composer takes its
  * `409` off this panel with it.
  *
@@ -30,7 +30,7 @@ export function identities(server: McpDescriptor): { name: string; templated: bo
  * outcome than a confusing `401` but still needs somebody to go and sign in —
  * and with one, the row is what says who the tool calls go out as, so it is also
  * where you drop that identity again. Both buttons are here, on the row that
- * needs them: the provider a server reaches for is often not the one the profile
+ * needs them: the provider a server reaches for is often not the one the model
  * authenticates the model with, so there is nowhere else they could go.
  */
 export function McpAuth({

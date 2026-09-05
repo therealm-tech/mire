@@ -31,7 +31,7 @@ use crate::uploads::{self, UploadStore};
 /// What the handlers need.
 #[derive(Clone, Debug)]
 pub struct AppState {
-    /// Profiles, auth registry and HTTP client.
+    /// Models, auth registry and HTTP client.
     pub runner: Runner,
     /// Where an attached file is written.
     pub uploads: Arc<UploadStore>,
@@ -61,7 +61,7 @@ pub fn normalise_base_path(raw: &str) -> String {
 /// The documented product surface, kept apart so `router` stays readable.
 fn documented(api: &mut OpenApi) -> Router<AppState> {
     ApiRouter::new()
-        .merge(profile_routes())
+        .merge(model_routes())
         .merge(prompt_routes())
         .merge(auth_routes())
         .merge(mcp_routes())
@@ -95,7 +95,7 @@ fn upload_routes() -> ApiRouter<AppState> {
                          The `id` that comes back is how a call names it: put it in \
                          `uploads` on `POST /api/call`, `/api/call/stream` or `/api/agent` \
                          and the file reaches the template as an entry of `uploads`, whole. \
-                         Whether it reaches the endpoint is the profile's decision — a \
+                         Whether it reaches the endpoint is the model's decision — a \
                          template that never mentions `uploads` sends what it always sent.",
                     )
                     .tag("uploads")
@@ -109,27 +109,27 @@ fn upload_routes() -> ApiRouter<AppState> {
 }
 
 /// Reading the configuration directory.
-fn profile_routes() -> ApiRouter<AppState> {
+fn model_routes() -> ApiRouter<AppState> {
     ApiRouter::new()
         .api_route(
-            "/api/profiles",
-            get_with(handlers::list_profiles, |op| {
-                op.summary("List profiles and load errors")
+            "/api/models",
+            get_with(handlers::list_models, |op| {
+                op.summary("List models and load errors")
                     .description(
-                        "Every profile in the directory, plus the files that failed to load \
-                         and why. Refreshed by the file watcher.",
+                        "Every model declared in `models/`, plus the files that failed to \
+                         load and why. Refreshed by the file watcher.",
                     )
-                    .tag("profiles")
-                    .response::<200, Json<dto::ProfilesResponse>>()
+                    .tag("models")
+                    .response::<200, Json<dto::ModelsResponse>>()
             }),
         )
         .api_route(
-            "/api/profiles/{name}",
-            get_with(handlers::get_profile, |op| {
-                op.summary("Fetch one profile")
-                    .description("The profile exactly as declared in YAML, field names included.")
-                    .tag("profiles")
-                    .response::<200, Json<crate::profile::Profile>>()
+            "/api/models/{name}",
+            get_with(handlers::get_model, |op| {
+                op.summary("Fetch one model")
+                    .description("The model exactly as declared in YAML, field names included.")
+                    .tag("models")
+                    .response::<200, Json<crate::model::Model>>()
             }),
         )
 }
@@ -141,12 +141,12 @@ fn prompt_routes() -> ApiRouter<AppState> {
         get_with(handlers::list_prompts, |op| {
             op.summary("List saved prompts")
                 .description(
-                    "Prompts declared in `prompts.yaml`, in the order the file writes them, \
+                    "Prompts declared in `prompts/`, in the order the listing gives them, \
                      plus the entries that did not load and why. Refreshed by the file \
                      watcher, like everything else in the directory.\n\n\
                      Read-only, and nothing here sends anything: a prompt is text the UI \
                      drops in the box, and what it becomes on the wire is still the \
-                     profile's template's decision.",
+                     model's template's decision.",
                 )
                 .tag("prompts")
                 .response::<200, Json<dto::PromptsResponse>>()
@@ -208,7 +208,7 @@ fn mcp_routes() -> ApiRouter<AppState> {
             get_with(handlers::list_mcp, |op| {
                 op.summary("List MCP servers")
                     .description(
-                        "Servers declared in `mcp.yaml`, plus the entries that failed to \
+                        "Servers declared in `mcp/`, plus the entries that failed to \
                          load. Declared, not contacted — nothing here talks to them.",
                     )
                     .tag("mcp")
@@ -279,9 +279,9 @@ fn call_routes() -> ApiRouter<AppState> {
         .api_route(
             "/api/agent",
             post_with(handlers::agent, |op| {
-                op.summary("Run a chat profile in a loop")
+                op.summary("Run a chat model in a loop")
                     .description(
-                        "Renders, calls, decodes; if the profile's stop condition is not \
+                        "Renders, calls, decodes; if the model's stop condition is not \
                          met, answers the tool calls with their simulated results and goes \
                          round again.\n\n\
                          Streams server-sent events: one `turn` event per turn as it \
@@ -310,7 +310,7 @@ pub fn router(state: AppState) -> Router {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             description: Some(
                 "A known signal in, a look at what comes out. Drive a model endpoint \
-                 through a profile, on any auth mode, and see exactly what was sent."
+                 through a model, on any auth mode, and see exactly what was sent."
                     .to_owned(),
             ),
             ..Info::default()

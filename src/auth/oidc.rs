@@ -92,7 +92,7 @@ pub struct OidcAuth {
     refreshing: Mutex<()>,
 }
 
-/// Everything needed to build an [`OidcAuth`], as declared in `auth.yaml`.
+/// Everything needed to build an [`OidcAuth`], as declared in `auth/`.
 #[derive(Debug, Clone)]
 pub struct OidcConfig {
     /// Registry name.

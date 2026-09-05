@@ -11,12 +11,12 @@ import {
   type Embedding,
   fetchAuth,
   fetchMcp,
-  fetchProfiles,
+  fetchModels,
   fetchPrompts,
   logout,
   type McpResponse,
   type Message,
-  type ProfilesResponse,
+  type ModelsResponse,
   type PromptsResponse,
   runAgent,
   startLogin,
@@ -29,8 +29,8 @@ import { EmbeddingPanel } from './components/EmbeddingPanel'
 import { EmbeddingRequest } from './components/EmbeddingRequest'
 import { Failure } from './components/Failure'
 import { Mark } from './components/Mark'
+import { ModelList } from './components/ModelList'
 import { Preflight } from './components/Preflight'
-import { ProfileList } from './components/ProfileList'
 import { Button, Panel, Spinner } from './components/primitives'
 import { TrafficPanel } from './components/TrafficPanel'
 import {
@@ -143,7 +143,7 @@ async function waitForSession(provider: string, popup: Window | null): Promise<A
 }
 
 export function App() {
-  const [profiles, setProfiles] = useState<ProfilesResponse | null>(null)
+  const [models, setModels] = useState<ModelsResponse | null>(null)
   const [auth, setAuth] = useState<AuthResponse | null>(null)
   const [mcp, setMcp] = useState<McpResponse | null>(null)
   const [prompts, setPrompts] = useState<PromptsResponse | null>(null)
@@ -151,8 +151,8 @@ export function App() {
 
   // Remembered across a reload, all of it small and none of it secret — see
   // `storage.ts` for what is deliberately left out, starting with the token.
-  const [selectedProfile, setSelectedProfile] = usePersisted<string | null>(
-    'profile',
+  const [selectedModel, setSelectedModel] = usePersisted<string | null>(
+    'model',
     z.string().nullable(),
     null,
   )
@@ -180,11 +180,11 @@ export function App() {
     z.string().nullable(),
     null,
   )
-  // The servers switched off, rather than the ones left on: `mcp.yaml` is a file
+  // The servers switched off, rather than the ones left on: `mcp/` is a file
   // somebody edits, and remembering the *on* set would quietly leave a server
   // added this morning out of every run until somebody noticed. Names are
-  // `mcp.yaml`'s and so global to the tab — which is also all they can be now
-  // that every declared server is offered to every profile.
+  // `mcp/`'s and so global to the tab — which is also all they can be now
+  // that every declared server is offered to every model.
   const [mcpOff, setMcpOff] = usePersisted<string[]>('mcpOff', z.array(z.string()), [])
 
   const [signingIn, setSigningIn] = useState<string | null>(null)
@@ -270,22 +270,22 @@ export function App() {
   }, [])
 
   useEffect(() => {
-    Promise.all([fetchProfiles(), fetchAuth(), fetchMcp(), fetchPrompts()])
-      .then(([loadedProfiles, loadedAuth, loadedMcp, loadedPrompts]) => {
-        setProfiles(loadedProfiles)
+    Promise.all([fetchModels(), fetchAuth(), fetchMcp(), fetchPrompts()])
+      .then(([loadedModels, loadedAuth, loadedMcp, loadedPrompts]) => {
+        setModels(loadedModels)
         setAuth(loadedAuth)
         setMcp(loadedMcp)
         setPrompts(loadedPrompts)
         // A remembered name is only good while the file behind it still is:
-        // profiles are a directory somebody edits, and coming back to a
+        // models are a directory somebody edits, and coming back to a
         // selection that no longer exists would be an empty page with no
         // explanation for it.
-        setSelectedProfile((current) => {
-          const kept = loadedProfiles.profiles.some((entry) => entry.name === current)
-          return kept ? current : (loadedProfiles.profiles[0]?.name ?? null)
+        setSelectedModel((current) => {
+          const kept = loadedModels.models.some((entry) => entry.name === current)
+          return kept ? current : (loadedModels.models[0]?.name ?? null)
         })
         logger.info('config.loaded', {
-          profiles: loadedProfiles.profiles.length,
+          models: loadedModels.models.length,
           providers: loadedAuth.providers.length,
           servers: loadedMcp.servers.length,
           prompts: loadedPrompts.prompts.length,
@@ -296,12 +296,12 @@ export function App() {
         logger.error('config.load_failed', { message })
         setLoadError(message)
       })
-  }, [setSelectedProfile])
+  }, [setSelectedModel])
 
-  const profile = profiles?.profiles.find((candidate) => candidate.name === selectedProfile)
+  const model = models?.models.find((candidate) => candidate.name === selectedModel)
 
   /**
-   * The identity this profile calls with. `auth:` when it names one, otherwise
+   * The identity this model calls with. `auth:` when it names one, otherwise
    * the anonymous provider that always exists — the same resolution the server
    * does, so what is shown is what goes out.
    *
@@ -309,17 +309,17 @@ export function App() {
    * the server would only work it out again, and a UI that sends it is a UI that
    * can disagree with the file.
    */
-  const provider = auth?.providers.find((entry) => entry.name === (profile?.auth ?? ANONYMOUS))
+  const provider = auth?.providers.find((entry) => entry.name === (model?.auth ?? ANONYMOUS))
 
   /**
-   * Whether this profile takes a message somebody types.
+   * Whether this model takes a message somebody types.
    *
-   * The profile's own answer, so the composer follows the file rather than a
+   * The model's own answer, so the composer follows the file rather than a
    * setting in this tab: `has_prompt: false` is a transcriber or a classifier
-   * saying its input is the attachment, not a sentence. True while no profile is
+   * saying its input is the attachment, not a sentence. True while no model is
    * selected, which is the state where there is no composer to hide anything in.
    */
-  const hasPrompt = profile?.hasPrompt !== false
+  const hasPrompt = model?.hasPrompt !== false
 
   /**
    * Whether the declared MCP servers are part of the run that is about to happen.
@@ -330,12 +330,12 @@ export function App() {
    * not the place to answer it. Leaving them out is what the **Servers** boxes
    * are for, one at a time or all of them at once.
    *
-   * Only on a chat profile, though: `kind: embedding` has no loop to be in, and
+   * Only on a chat model, though: `kind: embedding` has no loop to be in, and
    * the server refuses one outright.
    */
-  const usesMcp = profile?.kind === 'chat' && (mcp?.servers.length ?? 0) > 0
+  const usesMcp = model?.kind === 'chat' && (mcp?.servers.length ?? 0) > 0
 
-  /** Every declared server, which is what a chat profile is offered. */
+  /** Every declared server, which is what a chat model is offered. */
   const declaredMcp = useMemo(() => (mcp ? mcp.servers.map((server) => server.name) : []), [mcp])
 
   /**
@@ -354,9 +354,9 @@ export function App() {
   /** What the next call would do, and what would stop it. */
   const ready = useMemo(
     () =>
-      profile && auth && mcp
+      model && auth && mcp
         ? preflight({
-            profile,
+            model,
             provider,
             providers: auth.providers,
             servers: mcp.servers,
@@ -366,7 +366,7 @@ export function App() {
             mcpOff,
           })
         : null,
-    [profile, provider, auth, mcp, token, usesMcp, attachments, mcpOff],
+    [model, provider, auth, mcp, token, usesMcp, attachments, mcpOff],
   )
 
   /** Puts one server in or out of the next run. */
@@ -385,13 +385,13 @@ export function App() {
   /**
    * Every server in, or every server out, in one go.
    *
-   * With every declared server offered to every profile there can be a good few
+   * With every declared server offered to every model there can be a good few
    * of them, and the two questions worth a single click are the extremes: "what
    * does the loop do with none of these?" and "put them all back". Ticking six
    * boxes twice to ask that is how you stop asking it.
    *
    * Only the declared ones are touched. `mcpOff` is remembered across reloads and
-   * a server that has since been deleted from `mcp.yaml` has no business being
+   * a server that has since been deleted from `mcp/` has no business being
    * revived — or dropped — by a button about the ones that are there.
    */
   const toggleAllMcp = useCallback(
@@ -417,7 +417,7 @@ export function App() {
   // The one blocker the composer acts on rather than only reports. Every other
   // one is a credential the server will refuse, and refusing it is how you find
   // out that it does; this one has no call in it at all — a `requires_upload:`
-  // profile with nothing attached renders a request around a file that is not
+  // model with nothing attached renders a request around a file that is not
   // there — so **Send** is shut until **Attach** has been pressed.
   const needsUpload = ready?.blockers.some((blocker) => blocker.needsUpload) ?? false
 
@@ -467,7 +467,7 @@ export function App() {
    * is still asked for from here at all.
    */
   const embed = useCallback(() => {
-    if (!profile) {
+    if (!model) {
       return
     }
     const signal = begin()
@@ -475,7 +475,7 @@ export function App() {
     setEmbedding(null)
 
     const body: CallRequest = {
-      profile: profile.name,
+      model: model.name,
       input: input.split('\n').filter((line) => line.trim().length > 0),
       repeat,
       includeVectors,
@@ -490,7 +490,7 @@ export function App() {
         const decoded = result.response.decoded
         setEmbedding(decoded?.kind === 'embedding' ? decoded : null)
         logger.info('call.done', {
-          profile: result.profile,
+          model: result.model,
           auth: result.auth,
           status: result.response.http.status,
         })
@@ -506,7 +506,7 @@ export function App() {
         }
       })
       .finally(settle)
-  }, [profile, token, input, repeat, includeVectors, begin, settle])
+  }, [model, token, input, repeat, includeVectors, begin, settle])
 
   /**
    * The turn about to be sent, appended to what came before.
@@ -516,9 +516,9 @@ export function App() {
    * asked is how a chat window feels broken. Sending the history as it stands is
    * **Retry**'s job, not an empty box's.
    *
-   * A profile that takes no prompt sends the history untouched, whatever this
+   * A model that takes no prompt sends the history untouched, whatever this
    * tab happens to be remembering: the box is hidden, and a sentence typed
-   * against another profile must not ride along invisibly on this one.
+   * against another model must not ride along invisibly on this one.
    */
   const ask = useCallback((): Message[] => {
     const text = prompt.trim()
@@ -533,12 +533,12 @@ export function App() {
   }, [hasPrompt, messages, prompt, setPrompt])
 
   /**
-   * Every send: a chat profile, run in a loop over the history it is handed.
+   * Every send: a chat model, run in a loop over the history it is handed.
    *
-   * This is what **Send** and **Retry** do, whether or not the profile declares a
-   * single tool and whatever `max turns` says. A profile with nothing to call
+   * This is what **Send** and **Retry** do, whether or not the model declares a
+   * single tool and whatever `max turns` says. A model with nothing to call
    * stops on turn one; a budget of one turn stops there too, and either way it is
-   * the same profile rendered into the same body — the count is the only thing
+   * the same model rendered into the same body — the count is the only thing
    * the composer changes.
    *
    * It takes the history rather than reading it, because **Retry** shortens the
@@ -547,7 +547,7 @@ export function App() {
    */
   const runLoop = useCallback(
     (sent: Message[]) => {
-      if (!profile) {
+      if (!model) {
         return
       }
       const signal = begin()
@@ -559,7 +559,7 @@ export function App() {
       setEmbedding(null)
 
       const body: AgentRequest = {
-        profile: profile.name,
+        model: model.name,
         messages: sent,
         maxIterations,
       }
@@ -573,7 +573,7 @@ export function App() {
       if (attachments.length > 0) {
         body.uploads = attachments.map((file) => file.id)
       }
-      // Left out while every server is on, for the same reason: `mcp.yaml`
+      // Left out while every server is on, for the same reason: `mcp/`
       // already says which ones, and a copy travelling alongside is a second
       // thing that can disagree with it. Sent the moment one is switched off —
       // including as an empty list, which is a run reaching none of them and not
@@ -676,7 +676,7 @@ export function App() {
         .finally(settle)
     },
     [
-      profile,
+      model,
       token,
       attachments,
       maxIterations,
@@ -783,16 +783,16 @@ export function App() {
   const exportRun = useCallback(() => {
     const at = new Date()
     const payload = runExport({
-      profile: profile?.name ?? null,
-      endpoint: profile?.url ?? null,
+      model: model?.name ?? null,
+      endpoint: model?.url ?? null,
       identity: provider?.name ?? null,
       messages,
       exchanges,
       at,
     })
-    download(exportFilename(profile?.name ?? null, at), JSON.stringify(payload, null, 2))
+    download(exportFilename(model?.name ?? null, at), JSON.stringify(payload, null, 2))
     logger.info('run.exported', { exchanges: exchanges.length, messages: messages.length })
-  }, [profile, provider, messages, exchanges])
+  }, [model, provider, messages, exchanges])
 
   const reset = useCallback(() => {
     setTimeline([])
@@ -815,7 +815,7 @@ export function App() {
     )
   }
 
-  if (!profiles || !auth || !mcp || !prompts) {
+  if (!models || !auth || !mcp || !prompts) {
     return (
       <main className="p-6">
         <Spinner label="Loading configuration…" />
@@ -825,7 +825,7 @@ export function App() {
 
   // Sending nothing and being refused is the route proving it is protected.
   const expectUnauthorized = provider?.kind === 'anonymous'
-  const chatting = profile !== undefined && profile.kind !== 'embedding'
+  const chatting = model !== undefined && model.kind !== 'embedding'
 
   return (
     <div className="mx-auto max-w-6xl space-y-4 p-3 sm:p-6">
@@ -850,7 +850,7 @@ export function App() {
             reaching the thing it configures, every single time.
           */}
           <Panel
-            title="Profiles"
+            title="Models"
             actions={
               wide ? undefined : (
                 <Button aria-expanded={picking} onClick={() => setPicking((open) => !open)}>
@@ -860,25 +860,25 @@ export function App() {
             }
           >
             {wide || picking ? (
-              <ProfileList
-                profiles={profiles.profiles}
-                issues={profiles.issues}
-                selected={selectedProfile}
+              <ModelList
+                models={models.models}
+                issues={models.issues}
+                selected={selectedModel}
                 onSelect={(name) => {
-                  setSelectedProfile(name)
+                  setSelectedModel(name)
                   setPicking(false)
                 }}
               />
             ) : (
-              <p className="truncate font-medium text-sm">{selectedProfile ?? 'None selected'}</p>
+              <p className="truncate font-medium text-sm">{selectedModel ?? 'None selected'}</p>
             )}
           </Panel>
         </div>
 
         <div className="min-w-0 space-y-4">
-          {profile === undefined ? (
+          {model === undefined ? (
             <Panel title="Request">
-              <p className="text-muted text-sm">Select a profile to get started.</p>
+              <p className="text-muted text-sm">Select a model to get started.</p>
             </Panel>
           ) : null}
 
@@ -902,7 +902,7 @@ export function App() {
               auth={auth}
               mcp={mcp}
               names={activeMcp}
-              profile={profile}
+              model={model}
               provider={provider}
               token={token}
               signingIn={signingIn}
@@ -952,7 +952,7 @@ export function App() {
             />
           ) : null}
 
-          {profile !== undefined && !chatting ? (
+          {model !== undefined && !chatting ? (
             <>
               <EmbeddingRequest
                 input={input}

@@ -70,7 +70,7 @@ services:
   # `/v1/audio/transcriptions`, which takes the audio as a form part and the
   # knobs as fields beside it.
   #
-  # Published on 9000 because that is where `profiles/whisper.yaml` looks. The
+  # Published on 9000 because that is where `config/models/whisper.yaml` looks. The
   # container's own port is 8000 and stays that way.
   whisper:
     image: ghcr.io/speaches-ai/speaches:0.8.3-cpu
@@ -114,7 +114,7 @@ services:
   # `faster-whisper-base` is ~145 MB and transcribes faster than real time on a
   # laptop CPU. `-tiny` is a third of that and noticeably worse; `-small` is
   # better and four times the download. Change it here and in
-  # `profiles/whisper.yaml`, which names the model in the form it sends.
+  # `config/models/whisper.yaml`, which names the model in the form it sends.
   whisper-pull:
     image: curlimages/curl:8.19.0
     depends_on:
@@ -161,7 +161,7 @@ services:
       retries: 10
 
   # The same server on an older revision, so the negotiation has something to
-  # negotiate *with*. Point a profile at both and watch `mire` settle on
+  # negotiate *with*. Point a model at both and watch `mire` settle on
   # `2026-07-28` for one and handshake its way to `2025-06-18` for the other.
   mcp-legacy:
     image: python:3.13-alpine

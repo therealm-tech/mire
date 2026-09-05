@@ -15,6 +15,17 @@ use tempfile::TempDir;
 use wiremock::matchers::{body_string_contains, header, header_exists, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
+/// Writes one entry into a configuration directory.
+///
+/// `name` is the path the real thing has — `models/chat.yaml`, `auth/me.yaml` —
+/// so a test says which kind of thing it is declaring exactly where the file
+/// says it.
+fn write_entry(dir: &std::path::Path, name: &str, body: &str) {
+    let path = dir.join(name);
+    std::fs::create_dir_all(path.parent().expect("a subdirectory")).expect("create dir");
+    std::fs::write(path, body).expect("write file");
+}
+
 /// A running `mire` with a throwaway configuration directory.
 struct Harness {
     /// Where the API lives, base path included.
@@ -49,7 +60,7 @@ impl Harness {
             .map(|files| {
                 let dir = TempDir::new().expect("temp dir");
                 for (name, body) in *files {
-                    std::fs::write(dir.path().join(name), body).expect("write file");
+                    write_entry(dir.path(), name, body);
                 }
                 dir
             })
@@ -62,7 +73,7 @@ impl Harness {
 
         // Its own directory, not a corner of the watched one: an upload landing
         // in the configuration directory would fire the file watcher and get read
-        // as a profile that failed to parse.
+        // as a model that failed to parse.
         let uploads = TempDir::new().expect("uploads dir");
 
         let state = AppState {
@@ -171,7 +182,7 @@ impl Harness {
 
     /// Writes a file into the `index`-th watched directory.
     fn write_in(&self, index: usize, name: &str, body: &str) {
-        std::fs::write(self.dirs[index].path().join(name), body).expect("write file");
+        write_entry(self.dirs[index].path(), name, body);
     }
 
     /// Polls `route` until `ready` accepts the response, or gives up.
@@ -263,8 +274,8 @@ fn events(text: &str) -> Vec<(String, Value)> {
     events
 }
 
-/// An OpenAI-shaped chat profile pointing at `url`.
-fn openai_profile(url: &str) -> String {
+/// An OpenAI-shaped chat model pointing at `url`.
+fn openai_model(url: &str) -> String {
     format!(
         r#"
 name: chat
@@ -284,11 +295,11 @@ decode:
     )
 }
 
-/// An embedding profile pointing at `url`.
+/// An embedding model pointing at `url`.
 ///
 /// Built by substitution rather than `format!`: a `MiniJinja` template inside a
 /// format string needs four braces to mean two, and that way lies madness.
-fn embedding_profile(url: &str, expect_dimensions: Option<usize>) -> String {
+fn embedding_model(url: &str, expect_dimensions: Option<usize>) -> String {
     const TEMPLATE: &str = r#"
 name: embed
 kind: embedding
@@ -302,12 +313,12 @@ decode:
   usage: ["$.usage"]
 "#;
 
-    let mut profile = TEMPLATE.replace("__URL__", url);
+    let mut model = TEMPLATE.replace("__URL__", url);
     if let Some(value) = expect_dimensions {
         use std::fmt::Write;
-        let _ = writeln!(profile, "expect:\n  dimensions: {value}");
+        let _ = writeln!(model, "expect:\n  dimensions: {value}");
     }
-    profile
+    model
 }
 
 /// An OpenAI-shaped embeddings response with `count` vectors of `width`.
@@ -344,13 +355,13 @@ async fn a_call_hands_back_the_request_it_sent_and_its_curl() {
         .await;
 
     let harness = Harness::start(&[(
-        "chat.yaml",
-        openai_profile(&format!("{}/v1/chat/completions", server.uri())),
+        "models/chat.yaml",
+        openai_model(&format!("{}/v1/chat/completions", server.uri())),
     )])
     .await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "chat", "prompt": "ping"}))
+        .call(json!({"model": "chat", "prompt": "ping"}))
         .await;
 
     assert_eq!(status, 200);
@@ -384,13 +395,13 @@ async fn an_expected_401_is_a_result_not_an_error() {
         .await;
 
     let harness = Harness::start(&[(
-        "chat.yaml",
-        openai_profile(&format!("{}/v1/chat/completions", server.uri())),
+        "models/chat.yaml",
+        openai_model(&format!("{}/v1/chat/completions", server.uri())),
     )])
     .await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "chat", "auth": "anonymous", "prompt": "ping"}))
+        .call(json!({"model": "chat", "auth": "anonymous", "prompt": "ping"}))
         .await;
 
     // The API call succeeded. Whether a 401 is good news is the caller's business.
@@ -411,19 +422,16 @@ async fn a_token_provider_authenticates_and_the_response_decodes() {
 
     let harness = Harness::start(&[
         (
-            "chat.yaml",
-            openai_profile(&format!("{}/v1/chat/completions", server.uri())),
+            "models/chat.yaml",
+            openai_model(&format!("{}/v1/chat/completions", server.uri())),
         ),
-        (
-            "auth.yaml",
-            "providers:\n  - name: pasted\n    kind: token\n".to_owned(),
-        ),
+        ("auth/pasted.yaml", "name: pasted\nkind: token\n".to_owned()),
     ])
     .await;
 
     let (status, text, body) = harness
         .call(json!({
-            "profile": "chat",
+            "model": "chat",
             "auth": "pasted",
             "prompt": "ping",
             "token": "s3cr3t-token-value"
@@ -457,19 +465,16 @@ async fn a_credential_never_appears_anywhere_in_the_response() {
 
     let harness = Harness::start(&[
         (
-            "chat.yaml",
-            openai_profile(&format!("{}/v1/chat/completions", server.uri())),
+            "models/chat.yaml",
+            openai_model(&format!("{}/v1/chat/completions", server.uri())),
         ),
-        (
-            "auth.yaml",
-            "providers:\n  - name: pasted\n    kind: token\n".to_owned(),
-        ),
+        ("auth/pasted.yaml", "name: pasted\nkind: token\n".to_owned()),
     ])
     .await;
 
     let (status, text, body) = harness
         .call(json!({
-            "profile": "chat",
+            "model": "chat",
             "auth": "pasted",
             "prompt": "ping",
             "token": TOKEN
@@ -510,19 +515,16 @@ async fn authorization_does_not_survive_a_cross_host_redirect() {
 
     let harness = Harness::start(&[
         (
-            "chat.yaml",
-            openai_profile(&format!("{}/v1/chat/completions", entry.uri())),
+            "models/chat.yaml",
+            openai_model(&format!("{}/v1/chat/completions", entry.uri())),
         ),
-        (
-            "auth.yaml",
-            "providers:\n  - name: pasted\n    kind: token\n".to_owned(),
-        ),
+        ("auth/pasted.yaml", "name: pasted\nkind: token\n".to_owned()),
     ])
     .await;
 
     let (status, text, _) = harness
         .call(json!({
-            "profile": "chat",
+            "model": "chat",
             "auth": "pasted",
             "prompt": "ping",
             "token": "s3cr3t-token-value"
@@ -540,7 +542,7 @@ async fn authorization_does_not_survive_a_cross_host_redirect() {
     let original: Vec<Request> = entry.received_requests().await.unwrap();
     assert!(
         original[0].headers.get("authorization").is_some(),
-        "the credential should still reach the profile's own host"
+        "the credential should still reach the model's own host"
     );
 }
 
@@ -552,12 +554,12 @@ async fn a_timeout_is_reported_as_a_gateway_timeout() {
         .mount(&server)
         .await;
 
-    let profile = openai_profile(&format!("{}/v1/chat/completions", server.uri()))
+    let model = openai_model(&format!("{}/v1/chat/completions", server.uri()))
         .replace("timeout_ms: 5000", "timeout_ms: 150");
-    let harness = Harness::start(&[("chat.yaml", profile)]).await;
+    let harness = Harness::start(&[("models/chat.yaml", model)]).await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "chat", "prompt": "ping"}))
+        .call(json!({"model": "chat", "prompt": "ping"}))
         .await;
 
     assert_eq!(status, 504);
@@ -574,13 +576,13 @@ async fn a_body_that_is_not_json_comes_back_raw_with_the_parse_error() {
         .await;
 
     let harness = Harness::start(&[(
-        "chat.yaml",
-        openai_profile(&format!("{}/v1/chat/completions", server.uri())),
+        "models/chat.yaml",
+        openai_model(&format!("{}/v1/chat/completions", server.uri())),
     )])
     .await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "chat", "prompt": "ping"}))
+        .call(json!({"model": "chat", "prompt": "ping"}))
         .await;
 
     assert_eq!(status, 200);
@@ -603,13 +605,13 @@ async fn an_empty_body_is_survivable() {
         .await;
 
     let harness = Harness::start(&[(
-        "chat.yaml",
-        openai_profile(&format!("{}/v1/chat/completions", server.uri())),
+        "models/chat.yaml",
+        openai_model(&format!("{}/v1/chat/completions", server.uri())),
     )])
     .await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "chat", "prompt": "ping"}))
+        .call(json!({"model": "chat", "prompt": "ping"}))
         .await;
 
     assert_eq!(status, 200);
@@ -627,19 +629,19 @@ async fn every_decode_path_missing_is_reported_rather_than_hidden() {
         .await;
 
     let harness = Harness::start(&[(
-        "chat.yaml",
-        openai_profile(&format!("{}/v1/chat/completions", server.uri())),
+        "models/chat.yaml",
+        openai_model(&format!("{}/v1/chat/completions", server.uri())),
     )])
     .await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "chat", "prompt": "ping"}))
+        .call(json!({"model": "chat", "prompt": "ping"}))
         .await;
 
     assert_eq!(status, 200);
     assert!(body["response"]["decoded"]["content"].is_null());
     // The raw JSON is still there, and so is the list of paths that were tried —
-    // which is exactly what you need to fix the profile.
+    // which is exactly what you need to fix the model.
     assert_eq!(body["response"]["raw"]["totally"]["other"], 1);
     assert_eq!(
         body["response"]["decode"]["missed"]["content"],
@@ -663,13 +665,13 @@ async fn a_refusal_comes_back_with_the_endpoints_own_sentence() {
         .await;
 
     let harness = Harness::start(&[(
-        "chat.yaml",
-        openai_profile(&format!("{}/v1/chat/completions", server.uri())),
+        "models/chat.yaml",
+        openai_model(&format!("{}/v1/chat/completions", server.uri())),
     )])
     .await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "chat", "prompt": "ping"}))
+        .call(json!({"model": "chat", "prompt": "ping"}))
         .await;
 
     // The call worked. The endpoint is the one that said no.
@@ -704,13 +706,13 @@ async fn an_error_reported_under_a_two_hundred_is_still_found() {
         .await;
 
     let harness = Harness::start(&[(
-        "chat.yaml",
-        openai_profile(&format!("{}/v1/chat/completions", server.uri())),
+        "models/chat.yaml",
+        openai_model(&format!("{}/v1/chat/completions", server.uri())),
     )])
     .await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "chat", "prompt": "ping"}))
+        .call(json!({"model": "chat", "prompt": "ping"}))
         .await;
 
     assert_eq!(status, 200);
@@ -730,13 +732,13 @@ async fn a_good_answer_reports_no_error_and_no_error_miss() {
         .await;
 
     let harness = Harness::start(&[(
-        "chat.yaml",
-        openai_profile(&format!("{}/v1/chat/completions", server.uri())),
+        "models/chat.yaml",
+        openai_model(&format!("{}/v1/chat/completions", server.uri())),
     )])
     .await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "chat", "prompt": "ping"}))
+        .call(json!({"model": "chat", "prompt": "ping"}))
         .await;
 
     assert_eq!(status, 200);
@@ -744,7 +746,7 @@ async fn a_good_answer_reports_no_error_and_no_error_miss() {
     assert!(body["response"]["decode"]["missed"]["error"].is_null());
 }
 
-/// A refusal no path reaches is a blind spot in the profile, and saying so is
+/// A refusal no path reaches is a blind spot in the model, and saying so is
 /// the whole point of the trace.
 #[tokio::test]
 async fn a_refusal_no_path_reaches_lists_what_was_tried() {
@@ -755,13 +757,13 @@ async fn a_refusal_no_path_reaches_lists_what_was_tried() {
         .await;
 
     let harness = Harness::start(&[(
-        "chat.yaml",
-        openai_profile(&format!("{}/v1/chat/completions", server.uri())),
+        "models/chat.yaml",
+        openai_model(&format!("{}/v1/chat/completions", server.uri())),
     )])
     .await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "chat", "prompt": "ping"}))
+        .call(json!({"model": "chat", "prompt": "ping"}))
         .await;
 
     assert_eq!(status, 200);
@@ -784,13 +786,13 @@ async fn a_non_openai_shape_decodes_through_the_fallback_cascade() {
         .await;
 
     let harness = Harness::start(&[(
-        "chat.yaml",
-        openai_profile(&format!("{}/v1/chat/completions", server.uri())),
+        "models/chat.yaml",
+        openai_model(&format!("{}/v1/chat/completions", server.uri())),
     )])
     .await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "chat", "prompt": "ping"}))
+        .call(json!({"model": "chat", "prompt": "ping"}))
         .await;
 
     assert_eq!(status, 200);
@@ -806,34 +808,35 @@ async fn a_non_openai_shape_decodes_through_the_fallback_cascade() {
 }
 
 #[tokio::test]
-async fn an_unknown_profile_is_a_404_and_an_unknown_provider_too() {
-    let harness =
-        Harness::start(&[("chat.yaml", openai_profile("https://models.internal/v1"))]).await;
+async fn an_unknown_model_is_a_404_and_an_unknown_provider_too() {
+    let harness = Harness::start(&[(
+        "models/chat.yaml",
+        openai_model("https://models.internal/v1"),
+    )])
+    .await;
 
-    let (status, _, body) = harness.call(json!({"profile": "nope"})).await;
+    let (status, _, body) = harness.call(json!({"model": "nope"})).await;
     assert_eq!(status, 404);
-    assert_eq!(body["code"], "unknown_profile");
+    assert_eq!(body["code"], "unknown_model");
 
-    let (status, _, body) = harness
-        .call(json!({"profile": "chat", "auth": "nope"}))
-        .await;
+    let (status, _, body) = harness.call(json!({"model": "chat", "auth": "nope"})).await;
     assert_eq!(status, 404);
     assert_eq!(body["code"], "unknown_auth_provider");
 }
 
 #[tokio::test]
 async fn a_template_that_renders_broken_json_says_what_it_produced() {
-    let profile = r#"
+    let model = r#"
 name: broken
 kind: chat
 url: https://models.internal/v1
 request:
   template: '{"a": 1,{% if tools %}"tools": [],{% endif %}}'
 "#;
-    let harness = Harness::start(&[("broken.yaml", profile.to_owned())]).await;
+    let harness = Harness::start(&[("models/broken.yaml", model.to_owned())]).await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "broken", "prompt": "ping"}))
+        .call(json!({"model": "broken", "prompt": "ping"}))
         .await;
 
     assert_eq!(status, 422);
@@ -844,20 +847,26 @@ request:
 /// The point of listing several directories: a base somebody else maintains,
 /// and yours on top, without copying theirs to change one line.
 #[tokio::test]
-async fn a_later_directory_overrides_a_profile_the_earlier_one_declared() {
+async fn a_later_directory_overrides_a_model_the_earlier_one_declared() {
     let harness = Harness::start_layered(
         &[
-            &[("chat.yaml", openai_profile("https://models.internal/v1"))],
-            &[("chat.yaml", openai_profile("https://staging.internal/v1"))],
+            &[(
+                "models/chat.yaml",
+                openai_model("https://models.internal/v1"),
+            )],
+            &[(
+                "models/chat.yaml",
+                openai_model("https://staging.internal/v1"),
+            )],
         ],
         "",
     )
     .await;
 
-    let body = harness.get("/api/profiles").await;
+    let body = harness.get("/api/models").await;
 
-    assert_eq!(body["profiles"].as_array().unwrap().len(), 1);
-    assert_eq!(body["profiles"][0]["url"], "https://staging.internal/v1");
+    assert_eq!(body["models"].as_array().unwrap().len(), 1);
+    assert_eq!(body["models"][0]["url"], "https://staging.internal/v1");
     // An override is not a load failure, so it belongs in the log and not here.
     assert!(body["issues"].as_array().unwrap().is_empty());
 }
@@ -868,7 +877,10 @@ async fn a_later_directory_overrides_a_profile_the_earlier_one_declared() {
 async fn editing_the_second_directory_reloads_too() {
     let harness = Harness::start_layered(
         &[
-            &[("chat.yaml", openai_profile("https://models.internal/v1"))],
+            &[(
+                "models/chat.yaml",
+                openai_model("https://models.internal/v1"),
+            )],
             &[],
         ],
         "",
@@ -877,49 +889,65 @@ async fn editing_the_second_directory_reloads_too() {
 
     harness.write_in(
         1,
-        "chat.yaml",
-        &openai_profile("https://staging.internal/v1"),
+        "models/chat.yaml",
+        &openai_model("https://staging.internal/v1"),
     );
 
     let body = harness
-        .wait_for("/api/profiles", |body| {
-            body["profiles"][0]["url"] == "https://staging.internal/v1"
+        .wait_for("/api/models", |body| {
+            body["models"][0]["url"] == "https://staging.internal/v1"
         })
         .await;
-    assert_eq!(body["profiles"].as_array().unwrap().len(), 1);
+    assert_eq!(body["models"].as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]
-async fn the_profile_listing_reports_broken_files_without_hiding_the_good_ones() {
+async fn the_model_listing_reports_broken_files_without_hiding_the_good_ones() {
     let harness = Harness::start(&[
-        ("chat.yaml", openai_profile("https://models.internal/v1")),
-        ("broken.yaml", "name: broken\nkind: not-a-kind\n".to_owned()),
+        (
+            "models/chat.yaml",
+            openai_model("https://models.internal/v1"),
+        ),
+        (
+            "models/broken.yaml",
+            "name: broken\nkind: not-a-kind\n".to_owned(),
+        ),
     ])
     .await;
 
-    let body = harness.get("/api/profiles").await;
-    assert_eq!(body["profiles"].as_array().unwrap().len(), 1);
-    assert_eq!(body["profiles"][0]["name"], "chat");
-    assert_eq!(body["profiles"][0]["hasDecode"], true);
+    let body = harness.get("/api/models").await;
+    assert_eq!(body["models"].as_array().unwrap().len(), 1);
+    assert_eq!(body["models"][0]["name"], "chat");
+    assert_eq!(body["models"][0]["hasDecode"], true);
     assert_eq!(body["issues"].as_array().unwrap().len(), 1);
     assert!(
         body["issues"][0]["file"]
             .as_str()
             .unwrap()
-            .ends_with("broken.yaml")
+            .ends_with("models/broken.yaml")
     );
 }
 
 #[tokio::test]
-async fn the_prompt_listing_keeps_the_file_order_and_names_the_entry_it_dropped() {
+async fn the_prompt_listing_keeps_the_listing_order_and_names_the_entry_it_dropped() {
     let harness = Harness::start(&[
-        ("chat.yaml", openai_profile("https://models.internal/v1")),
         (
-            "prompts.yaml",
-            // Second one has no text, so it puts nothing in the box and is not a
-            // prompt. The other two still are, in the order written.
-            "prompts:\n  - name: zebra\n    text: ping\n  - name: hollow\n    text: ''\n  - name: alpha\n    text: |\n      one\n      two\n"
-                .to_owned(),
+            "models/chat.yaml",
+            openai_model("https://models.internal/v1"),
+        ),
+        (
+            "prompts/01-zebra.yaml",
+            "name: zebra\ntext: ping\n".to_owned(),
+        ),
+        // No text, so it puts nothing in the box and is not a prompt. The other
+        // two still are, in the order their file names put them in.
+        (
+            "prompts/02-hollow.yaml",
+            "name: hollow\ntext: ''\n".to_owned(),
+        ),
+        (
+            "prompts/03-alpha.yaml",
+            "name: alpha\ntext: |\n  one\n  two\n".to_owned(),
         ),
     ])
     .await;
@@ -927,7 +955,10 @@ async fn the_prompt_listing_keeps_the_file_order_and_names_the_entry_it_dropped(
     let body = harness.get("/api/prompts").await;
     let prompts = body["prompts"].as_array().unwrap();
     assert_eq!(prompts.len(), 2);
-    assert_eq!(prompts[0]["name"], "zebra", "the file's order, not sorted");
+    assert_eq!(
+        prompts[0]["name"], "zebra",
+        "the listing's order, not sorted"
+    );
     assert_eq!(prompts[1]["text"], "one\ntwo\n");
     assert!(
         body["issues"][0]["message"]
@@ -936,17 +967,20 @@ async fn the_prompt_listing_keeps_the_file_order_and_names_the_entry_it_dropped(
             .contains("hollow")
     );
 
-    // And the library is not a profile, however much it looks like one from the
-    // outside: it lives in the same directory and ends in `.yaml`.
-    let profiles = harness.get("/api/profiles").await;
-    assert_eq!(profiles["profiles"].as_array().unwrap().len(), 1);
-    assert!(profiles["issues"].as_array().unwrap().is_empty());
+    // And the library is not a model, however much it looks like one from the
+    // outside: same configuration directory, same `.yaml`, one subdirectory over.
+    let models = harness.get("/api/models").await;
+    assert_eq!(models["models"].as_array().unwrap().len(), 1);
+    assert!(models["issues"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn editing_the_prompt_library_takes_effect_without_a_restart() {
-    let harness =
-        Harness::start(&[("chat.yaml", openai_profile("https://models.internal/v1"))]).await;
+    let harness = Harness::start(&[(
+        "models/chat.yaml",
+        openai_model("https://models.internal/v1"),
+    )])
+    .await;
 
     let body = harness.get("/api/prompts").await;
     assert!(
@@ -955,7 +989,7 @@ async fn editing_the_prompt_library_takes_effect_without_a_restart() {
     );
     assert!(body["issues"].as_array().unwrap().is_empty());
 
-    harness.write("prompts.yaml", "prompts:\n  - name: ping\n    text: ping\n");
+    harness.write("prompts/ping.yaml", "name: ping\ntext: ping\n");
 
     let body = harness
         .wait_for("/api/prompts", |body| {
@@ -968,8 +1002,8 @@ async fn editing_the_prompt_library_takes_effect_without_a_restart() {
 #[tokio::test]
 async fn the_auth_listing_always_offers_anonymous() {
     let harness = Harness::start(&[(
-        "auth.yaml",
-        "providers:\n  - name: gateway\n    kind: token\n    value:\n      env: MODEL_TOKEN\n    allowed_hosts:\n      - models.internal\n"
+        "auth/gateway.yaml",
+        "name: gateway\nkind: token\nvalue:\n  env: MODEL_TOKEN\nallowed_hosts:\n  - models.internal\n"
             .to_owned(),
     )])
     .await;
@@ -981,13 +1015,13 @@ async fn the_auth_listing_always_offers_anonymous() {
     assert_eq!(providers[1]["name"], "gateway");
     assert_eq!(providers[1]["needsValue"], false);
     // Where the credential may go, said on the wire: the UI stops offering it
-    // against a profile pointing anywhere else.
+    // against a model pointing anywhere else.
     assert_eq!(providers[1]["allowedHosts"][0], "models.internal");
     assert_eq!(providers[0]["allowedHosts"].as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]
-async fn a_profile_whose_provider_has_no_credential_fails_clearly() {
+async fn a_model_whose_provider_has_no_credential_fails_clearly() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(header_exists("authorization"))
@@ -997,18 +1031,15 @@ async fn a_profile_whose_provider_has_no_credential_fails_clearly() {
 
     let harness = Harness::start(&[
         (
-            "chat.yaml",
-            openai_profile(&format!("{}/v1/chat/completions", server.uri())),
+            "models/chat.yaml",
+            openai_model(&format!("{}/v1/chat/completions", server.uri())),
         ),
-        (
-            "auth.yaml",
-            "providers:\n  - name: pasted\n    kind: token\n".to_owned(),
-        ),
+        ("auth/pasted.yaml", "name: pasted\nkind: token\n".to_owned()),
     ])
     .await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "chat", "auth": "pasted", "prompt": "ping"}))
+        .call(json!({"model": "chat", "auth": "pasted", "prompt": "ping"}))
         .await;
 
     assert_eq!(status, 400);
@@ -1023,15 +1054,18 @@ async fn the_openapi_document_is_served_and_describes_the_call_endpoint() {
     let spec = harness.get("/openapi.json").await;
     assert_eq!(spec["info"]["title"], "mire");
     assert!(spec["paths"]["/api/call"]["post"].is_object());
-    assert!(spec["paths"]["/api/profiles/{name}"]["get"].is_object());
+    assert!(spec["paths"]["/api/models/{name}"]["get"].is_object());
     // Ops plumbing stays out of the product surface.
     assert!(spec["paths"]["/healthz"].is_null());
 }
 
 #[tokio::test]
 async fn editing_the_auth_registry_takes_effect_without_a_restart() {
-    let harness =
-        Harness::start(&[("chat.yaml", openai_profile("https://models.internal/v1"))]).await;
+    let harness = Harness::start(&[(
+        "models/chat.yaml",
+        openai_model("https://models.internal/v1"),
+    )])
+    .await;
 
     let body = harness.get("/api/auth").await;
     assert_eq!(
@@ -1041,8 +1075,8 @@ async fn editing_the_auth_registry_takes_effect_without_a_restart() {
     );
 
     harness.write(
-        "auth.yaml",
-        "providers:\n  - name: gateway\n    kind: token\n    value:\n      env: MODEL_TOKEN\n",
+        "auth/gateway.yaml",
+        "name: gateway\nkind: token\nvalue:\n  env: MODEL_TOKEN\n",
     );
 
     let body = harness
@@ -1064,22 +1098,19 @@ async fn a_reloaded_provider_is_immediately_usable_on_a_call() {
         .await;
 
     let harness = Harness::start(&[(
-        "chat.yaml",
-        openai_profile(&format!("{}/v1/chat/completions", server.uri())),
+        "models/chat.yaml",
+        openai_model(&format!("{}/v1/chat/completions", server.uri())),
     )])
     .await;
 
     // Before the edit, the provider does not exist.
     let (status, _, body) = harness
-        .call(json!({"profile": "chat", "auth": "pasted"}))
+        .call(json!({"model": "chat", "auth": "pasted"}))
         .await;
     assert_eq!(status, 404);
     assert_eq!(body["code"], "unknown_auth_provider");
 
-    harness.write(
-        "auth.yaml",
-        "providers:\n  - name: pasted\n    kind: token\n",
-    );
+    harness.write("auth/pasted.yaml", "name: pasted\nkind: token\n");
     harness
         .wait_for("/api/auth", |body| {
             body["providers"].as_array().unwrap().len() == 2
@@ -1088,7 +1119,7 @@ async fn a_reloaded_provider_is_immediately_usable_on_a_call() {
 
     let (status, text, body) = harness
         .call(json!({
-            "profile": "chat",
+            "model": "chat",
             "auth": "pasted",
             "prompt": "ping",
             "token": "reloaded-token-value"
@@ -1108,10 +1139,10 @@ async fn a_broken_auth_registry_is_reported_and_leaves_anonymous_working() {
 
     let harness = Harness::start(&[
         (
-            "chat.yaml",
-            openai_profile(&format!("{}/v1/chat/completions", server.uri())),
+            "models/chat.yaml",
+            openai_model(&format!("{}/v1/chat/completions", server.uri())),
         ),
-        ("auth.yaml", "providers: [unclosed\n".to_owned()),
+        ("auth/broken.yaml", "name: [unclosed\n".to_owned()),
     ])
     .await;
 
@@ -1122,7 +1153,7 @@ async fn a_broken_auth_registry_is_reported_and_leaves_anonymous_working() {
 
     // mire came up anyway, and the one thing that never needs configuring works.
     let (status, _, body) = harness
-        .call(json!({"profile": "chat", "auth": "anonymous", "prompt": "ping"}))
+        .call(json!({"model": "chat", "auth": "anonymous", "prompt": "ping"}))
         .await;
     assert_eq!(status, 200);
     assert_eq!(body["response"]["http"]["status"], 401);
@@ -1130,20 +1161,16 @@ async fn a_broken_auth_registry_is_reported_and_leaves_anonymous_working() {
 
 #[tokio::test]
 async fn one_bad_provider_does_not_take_the_others_down() {
-    let harness = Harness::start(&[(
-        "auth.yaml",
-        r#"
-providers:
-  - name: bad
-    kind: token
-    header: "not a header"
-  - name: good
-    kind: token
-    value:
-      env: MODEL_TOKEN
-"#
-        .to_owned(),
-    )])
+    let harness = Harness::start(&[
+        (
+            "auth/bad.yaml",
+            "name: bad\nkind: token\nheader: \"not a header\"\n".to_owned(),
+        ),
+        (
+            "auth/good.yaml",
+            "name: good\nkind: token\nvalue:\n  env: MODEL_TOKEN\n".to_owned(),
+        ),
+    ])
     .await;
 
     let body = harness.get("/api/auth").await;
@@ -1166,13 +1193,13 @@ async fn an_embedding_response_is_summarised_and_checked() {
         .await;
 
     let harness = Harness::start(&[(
-        "embed.yaml",
-        embedding_profile(&format!("{}/v1/embeddings", server.uri()), Some(1024)),
+        "models/embed.yaml",
+        embedding_model(&format!("{}/v1/embeddings", server.uri()), Some(1024)),
     )])
     .await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "embed", "input": ["one", "two"]}))
+        .call(json!({"model": "embed", "input": ["one", "two"]}))
         .await;
     assert_eq!(status, 200);
 
@@ -1210,13 +1237,13 @@ async fn a_vector_is_never_rendered_whole_unless_asked_for() {
         .await;
 
     let harness = Harness::start(&[(
-        "embed.yaml",
-        embedding_profile(&format!("{}/v1/embeddings", server.uri()), None),
+        "models/embed.yaml",
+        embedding_model(&format!("{}/v1/embeddings", server.uri()), None),
     )])
     .await;
 
     let (_, text, body) = harness
-        .call(json!({"profile": "embed", "input": "one"}))
+        .call(json!({"model": "embed", "input": "one"}))
         .await;
 
     // A 1024-float payload would dwarf everything else in the response.
@@ -1249,7 +1276,7 @@ async fn a_vector_is_never_rendered_whole_unless_asked_for() {
 
     // Explicitly asking is the only way to get the payload.
     let (_, text, body) = harness
-        .call(json!({"profile": "embed", "input": "one", "includeVectors": true}))
+        .call(json!({"model": "embed", "input": "one", "includeVectors": true}))
         .await;
     assert!(text.len() > 4000);
     assert_eq!(body["response"]["elided"], false);
@@ -1278,13 +1305,13 @@ async fn base64_vectors_decode_to_the_same_shape() {
         .await;
 
     let harness = Harness::start(&[(
-        "embed.yaml",
-        embedding_profile(&format!("{}/v1/embeddings", server.uri()), Some(4)),
+        "models/embed.yaml",
+        embedding_model(&format!("{}/v1/embeddings", server.uri()), Some(4)),
     )])
     .await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "embed", "input": "one", "includeVectors": true}))
+        .call(json!({"model": "embed", "input": "one", "includeVectors": true}))
         .await;
 
     assert_eq!(status, 200);
@@ -1307,13 +1334,13 @@ async fn a_deterministic_endpoint_passes_the_repeat_check() {
         .await;
 
     let harness = Harness::start(&[(
-        "embed.yaml",
-        embedding_profile(&format!("{}/v1/embeddings", server.uri()), None),
+        "models/embed.yaml",
+        embedding_model(&format!("{}/v1/embeddings", server.uri()), None),
     )])
     .await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "embed", "input": "one", "repeat": 2}))
+        .call(json!({"model": "embed", "input": "one", "repeat": 2}))
         .await;
 
     assert_eq!(status, 200);
@@ -1344,13 +1371,13 @@ async fn a_replica_serving_something_else_fails_the_repeat_check() {
         .await;
 
     let harness = Harness::start(&[(
-        "embed.yaml",
-        embedding_profile(&format!("{}/v1/embeddings", server.uri()), None),
+        "models/embed.yaml",
+        embedding_model(&format!("{}/v1/embeddings", server.uri()), None),
     )])
     .await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "embed", "input": "one", "repeat": 2}))
+        .call(json!({"model": "embed", "input": "one", "repeat": 2}))
         .await;
 
     assert_eq!(status, 200);
@@ -1366,7 +1393,7 @@ async fn a_replica_serving_something_else_fails_the_repeat_check() {
 }
 
 #[tokio::test]
-async fn a_width_that_does_not_match_the_profile_is_reported() {
+async fn a_width_that_does_not_match_the_model_is_reported() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(embedding_response(1, 384)))
@@ -1374,13 +1401,13 @@ async fn a_width_that_does_not_match_the_profile_is_reported() {
         .await;
 
     let harness = Harness::start(&[(
-        "embed.yaml",
-        embedding_profile(&format!("{}/v1/embeddings", server.uri()), Some(1024)),
+        "models/embed.yaml",
+        embedding_model(&format!("{}/v1/embeddings", server.uri()), Some(1024)),
     )])
     .await;
 
     let (_, _, body) = harness
-        .call(json!({"profile": "embed", "input": ["one", "two"]}))
+        .call(json!({"model": "embed", "input": ["one", "two"]}))
         .await;
 
     let checks = &body["response"]["decoded"]["checks"];
@@ -1415,13 +1442,13 @@ async fn a_hole_in_a_vector_fails_the_finiteness_check() {
         .await;
 
     let harness = Harness::start(&[(
-        "embed.yaml",
-        embedding_profile(&format!("{}/v1/embeddings", server.uri()), None),
+        "models/embed.yaml",
+        embedding_model(&format!("{}/v1/embeddings", server.uri()), None),
     )])
     .await;
 
     let (_, _, body) = harness
-        .call(json!({"profile": "embed", "input": ["one", "two"]}))
+        .call(json!({"model": "embed", "input": ["one", "two"]}))
         .await;
 
     let checks = &body["response"]["decoded"]["checks"];
@@ -1452,13 +1479,13 @@ async fn a_multi_vector_endpoint_answers_one_item_per_input() {
         .await;
 
     let harness = Harness::start(&[(
-        "embed.yaml",
-        embedding_profile(&format!("{}/v1/embeddings", server.uri()), Some(2)),
+        "models/embed.yaml",
+        embedding_model(&format!("{}/v1/embeddings", server.uri()), Some(2)),
     )])
     .await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "embed", "input": ["one", "two"]}))
+        .call(json!({"model": "embed", "input": ["one", "two"]}))
         .await;
     assert_eq!(status, 200);
 
@@ -1490,13 +1517,13 @@ async fn one_input_worth_of_token_vectors_is_not_read_as_a_batch() {
         .await;
 
     let harness = Harness::start(&[(
-        "embed.yaml",
-        embedding_profile(&format!("{}/v1/embeddings", server.uri()), None),
+        "models/embed.yaml",
+        embedding_model(&format!("{}/v1/embeddings", server.uri()), None),
     )])
     .await;
 
     let (_, _, body) = harness
-        .call(json!({"profile": "embed", "input": "one"}))
+        .call(json!({"model": "embed", "input": "one"}))
         .await;
 
     let decoded = &body["response"]["decoded"];
@@ -1514,13 +1541,13 @@ async fn a_single_string_input_is_accepted_and_rendered_as_a_list() {
         .await;
 
     let harness = Harness::start(&[(
-        "embed.yaml",
-        embedding_profile(&format!("{}/v1/embeddings", server.uri()), None),
+        "models/embed.yaml",
+        embedding_model(&format!("{}/v1/embeddings", server.uri()), None),
     )])
     .await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "embed", "input": "just one"}))
+        .call(json!({"model": "embed", "input": "just one"}))
         .await;
 
     assert_eq!(status, 200);
@@ -1576,12 +1603,11 @@ fn client_secret_file() -> std::path::PathBuf {
 fn oidc_registry(idp_uri: &str, extra: &str) -> String {
     let secret = client_secret_file();
     format!(
-        "providers:\n  \
-         - name: workload\n    \
-         kind: oidc\n    \
-         issuer: {idp_uri}/realms/models\n    \
-         client_id: mire\n    \
-         client_secret:\n      \
+        "name: workload\n\
+         kind: oidc\n\
+         issuer: {idp_uri}/realms/models\n\
+         client_id: mire\n\
+         client_secret:\n  \
          file: {}\n{extra}",
         secret.display()
     )
@@ -1600,24 +1626,24 @@ async fn exchanges(idp: &MockServer) -> usize {
 #[tokio::test]
 async fn oidc_discovers_the_token_endpoint_and_authenticates() {
     let idp = idp(&["access-token-1"], 300).await;
-    let model = MockServer::start().await;
+    let endpoint = MockServer::start().await;
     Mock::given(method("POST"))
         .and(header("authorization", "Bearer access-token-1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(openai_response()))
-        .mount(&model)
+        .mount(&endpoint)
         .await;
 
     let harness = Harness::start(&[
         (
-            "chat.yaml",
-            openai_profile(&format!("{}/v1/chat/completions", model.uri())),
+            "models/chat.yaml",
+            openai_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
-        ("auth.yaml", oidc_registry(&idp.uri(), "")),
+        ("auth/workload.yaml", oidc_registry(&idp.uri(), "")),
     ])
     .await;
 
     let (status, text, body) = harness
-        .call(json!({"profile": "chat", "auth": "workload", "prompt": "ping"}))
+        .call(json!({"model": "chat", "auth": "workload", "prompt": "ping"}))
         .await;
 
     assert_eq!(status, 200, "{text}");
@@ -1637,24 +1663,24 @@ async fn oidc_discovers_the_token_endpoint_and_authenticates() {
 async fn oidc_caches_the_token_across_calls_and_refetches_once_it_expires() {
     // A long-lived token: the second call must reuse it.
     let long = idp(&["cached-token", "second-token"], 3600).await;
-    let model = MockServer::start().await;
+    let endpoint = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(openai_response()))
-        .mount(&model)
+        .mount(&endpoint)
         .await;
 
     let harness = Harness::start(&[
         (
-            "chat.yaml",
-            openai_profile(&format!("{}/v1/chat/completions", model.uri())),
+            "models/chat.yaml",
+            openai_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
-        ("auth.yaml", oidc_registry(&long.uri(), "")),
+        ("auth/workload.yaml", oidc_registry(&long.uri(), "")),
     ])
     .await;
 
     for _ in 0..3 {
         let (status, _, _) = harness
-            .call(json!({"profile": "chat", "auth": "workload", "prompt": "ping"}))
+            .call(json!({"model": "chat", "auth": "workload", "prompt": "ping"}))
             .await;
         assert_eq!(status, 200);
     }
@@ -1668,16 +1694,16 @@ async fn oidc_caches_the_token_across_calls_and_refetches_once_it_expires() {
     let short = idp(&["one", "two"], 0).await;
     let harness = Harness::start(&[
         (
-            "chat.yaml",
-            openai_profile(&format!("{}/v1/chat/completions", model.uri())),
+            "models/chat.yaml",
+            openai_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
-        ("auth.yaml", oidc_registry(&short.uri(), "")),
+        ("auth/workload.yaml", oidc_registry(&short.uri(), "")),
     ])
     .await;
 
     for _ in 0..2 {
         harness
-            .call(json!({"profile": "chat", "auth": "workload", "prompt": "ping"}))
+            .call(json!({"model": "chat", "auth": "workload", "prompt": "ping"}))
             .await;
     }
     assert_eq!(
@@ -1690,32 +1716,32 @@ async fn oidc_caches_the_token_across_calls_and_refetches_once_it_expires() {
 #[tokio::test]
 async fn a_rejected_cached_token_is_refreshed_and_replayed_exactly_once() {
     let idp = idp(&["stale-token", "fresh-token"], 3600).await;
-    let model = MockServer::start().await;
+    let endpoint = MockServer::start().await;
     // The endpoint has decided `stale-token` is no good; `fresh-token` is fine.
     Mock::given(method("POST"))
         .and(header("authorization", "Bearer stale-token"))
         .respond_with(ResponseTemplate::new(401))
-        .mount(&model)
+        .mount(&endpoint)
         .await;
     Mock::given(method("POST"))
         .and(header("authorization", "Bearer fresh-token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(openai_response()))
-        .mount(&model)
+        .mount(&endpoint)
         .await;
 
     let harness = Harness::start(&[
         (
-            "chat.yaml",
-            openai_profile(&format!("{}/v1/chat/completions", model.uri())),
+            "models/chat.yaml",
+            openai_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
-        ("auth.yaml", oidc_registry(&idp.uri(), "")),
+        ("auth/workload.yaml", oidc_registry(&idp.uri(), "")),
     ])
     .await;
 
     // First call mints the token. A 401 on a token we just minted is the
     // endpoint's answer, not a stale credential — so no replay.
     let (_, _, body) = harness
-        .call(json!({"profile": "chat", "auth": "workload", "prompt": "ping"}))
+        .call(json!({"model": "chat", "auth": "workload", "prompt": "ping"}))
         .await;
     assert_eq!(body["response"]["http"]["status"], 401);
     assert_eq!(body["retriedAfterUnauthorized"], false);
@@ -1723,7 +1749,7 @@ async fn a_rejected_cached_token_is_refreshed_and_replayed_exactly_once() {
 
     // Second call reuses the cached token, is rejected, refreshes once, and wins.
     let (_, _, body) = harness
-        .call(json!({"profile": "chat", "auth": "workload", "prompt": "ping"}))
+        .call(json!({"model": "chat", "auth": "workload", "prompt": "ping"}))
         .await;
     assert_eq!(body["retriedAfterUnauthorized"], true);
     assert_eq!(body["response"]["http"]["status"], 200);
@@ -1733,61 +1759,61 @@ async fn a_rejected_cached_token_is_refreshed_and_replayed_exactly_once() {
 #[tokio::test]
 async fn a_persistent_401_gives_up_after_one_replay() {
     let idp = idp(&["t1", "t2", "t3", "t4"], 3600).await;
-    let model = MockServer::start().await;
+    let endpoint = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(401).set_body_json(json!({"error": "nope"})))
-        .mount(&model)
+        .mount(&endpoint)
         .await;
 
     let harness = Harness::start(&[
         (
-            "chat.yaml",
-            openai_profile(&format!("{}/v1/chat/completions", model.uri())),
+            "models/chat.yaml",
+            openai_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
-        ("auth.yaml", oidc_registry(&idp.uri(), "")),
+        ("auth/workload.yaml", oidc_registry(&idp.uri(), "")),
     ])
     .await;
 
     harness
-        .call(json!({"profile": "chat", "auth": "workload", "prompt": "ping"}))
+        .call(json!({"model": "chat", "auth": "workload", "prompt": "ping"}))
         .await;
     let (status, _, body) = harness
-        .call(json!({"profile": "chat", "auth": "workload", "prompt": "ping"}))
+        .call(json!({"model": "chat", "auth": "workload", "prompt": "ping"}))
         .await;
 
     // The reported result is the 401, not an error, and it stopped after one replay.
     assert_eq!(status, 200);
     assert_eq!(body["response"]["http"]["status"], 401);
     assert_eq!(body["retriedAfterUnauthorized"], true);
-    assert_eq!(model.received_requests().await.unwrap().len(), 3);
+    assert_eq!(endpoint.received_requests().await.unwrap().len(), 3);
 }
 
 #[tokio::test]
 async fn scope_and_audience_reach_the_token_endpoint() {
     let idp = idp(&["scoped-token"], 3600).await;
-    let model = MockServer::start().await;
+    let endpoint = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(openai_response()))
-        .mount(&model)
+        .mount(&endpoint)
         .await;
 
     let harness = Harness::start(&[
         (
-            "chat.yaml",
-            openai_profile(&format!("{}/v1/chat/completions", model.uri())),
+            "models/chat.yaml",
+            openai_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
         (
-            "auth.yaml",
+            "auth/workload.yaml",
             oidc_registry(
                 &idp.uri(),
-                "    scope: [openid, models:read]\n    audience: https://models.internal\n",
+                "scope: [openid, models:read]\naudience: https://models.internal\n",
             ),
         ),
     ])
     .await;
 
     harness
-        .call(json!({"profile": "chat", "auth": "workload", "prompt": "ping"}))
+        .call(json!({"model": "chat", "auth": "workload", "prompt": "ping"}))
         .await;
 
     let requests = idp.received_requests().await.unwrap();
@@ -1812,26 +1838,25 @@ async fn a_projected_service_account_token_is_reread_on_every_exchange() {
     std::fs::write(&assertion, "first-projected-token\n").unwrap();
 
     let idp = idp(&["a", "b"], 0).await;
-    let model = MockServer::start().await;
+    let endpoint = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(openai_response()))
-        .mount(&model)
+        .mount(&endpoint)
         .await;
 
     let harness = Harness::start(&[
         (
-            "chat.yaml",
-            openai_profile(&format!("{}/v1/chat/completions", model.uri())),
+            "models/chat.yaml",
+            openai_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
         (
-            "auth.yaml",
+            "auth/workload.yaml",
             format!(
-                "providers:\n  \
-                 - name: workload\n    \
-                 kind: oidc\n    \
-                 issuer: {}/realms/models\n    \
-                 client_id: mire\n    \
-                 client_assertion:\n      \
+                "name: workload\n\
+                 kind: oidc\n\
+                 issuer: {}/realms/models\n\
+                 client_id: mire\n\
+                 client_assertion:\n  \
                  file: {}\n",
                 idp.uri(),
                 assertion.display()
@@ -1841,13 +1866,13 @@ async fn a_projected_service_account_token_is_reread_on_every_exchange() {
     .await;
 
     harness
-        .call(json!({"profile": "chat", "auth": "workload", "prompt": "ping"}))
+        .call(json!({"model": "chat", "auth": "workload", "prompt": "ping"}))
         .await;
 
     // The token is rotated under us, as a projected volume does.
     std::fs::write(&assertion, "rotated-projected-token\n").unwrap();
     harness
-        .call(json!({"profile": "chat", "auth": "workload", "prompt": "ping"}))
+        .call(json!({"model": "chat", "auth": "workload", "prompt": "ping"}))
         .await;
 
     let requests = idp.received_requests().await.unwrap();
@@ -1901,15 +1926,15 @@ async fn a_failed_token_exchange_explains_itself_without_leaking_the_secret() {
 
     let harness = Harness::start(&[
         (
-            "chat.yaml",
-            openai_profile("https://models.internal/v1/chat/completions"),
+            "models/chat.yaml",
+            openai_model("https://models.internal/v1/chat/completions"),
         ),
-        ("auth.yaml", oidc_registry(&idp.uri(), "")),
+        ("auth/workload.yaml", oidc_registry(&idp.uri(), "")),
     ])
     .await;
 
     let (status, text, body) = harness
-        .call(json!({"profile": "chat", "auth": "workload", "prompt": "ping"}))
+        .call(json!({"model": "chat", "auth": "workload", "prompt": "ping"}))
         .await;
 
     assert_eq!(status, 502);
@@ -1931,15 +1956,15 @@ async fn an_unreachable_issuer_is_a_clear_discovery_error() {
 
     let harness = Harness::start(&[
         (
-            "chat.yaml",
-            openai_profile("https://models.internal/v1/chat/completions"),
+            "models/chat.yaml",
+            openai_model("https://models.internal/v1/chat/completions"),
         ),
-        ("auth.yaml", oidc_registry(&idp.uri(), "")),
+        ("auth/workload.yaml", oidc_registry(&idp.uri(), "")),
     ])
     .await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "chat", "auth": "workload", "prompt": "ping"}))
+        .call(json!({"model": "chat", "auth": "workload", "prompt": "ping"}))
         .await;
 
     assert_eq!(status, 502);
@@ -1964,30 +1989,30 @@ async fn an_explicit_token_endpoint_skips_discovery() {
         .mount(&idp)
         .await;
 
-    let model = MockServer::start().await;
+    let endpoint = MockServer::start().await;
     Mock::given(method("POST"))
         .and(header("authorization", "Bearer direct-token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(openai_response()))
-        .mount(&model)
+        .mount(&endpoint)
         .await;
 
     let harness = Harness::start(&[
         (
-            "chat.yaml",
-            openai_profile(&format!("{}/v1/chat/completions", model.uri())),
+            "models/chat.yaml",
+            openai_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
         (
-            "auth.yaml",
+            "auth/workload.yaml",
             oidc_registry(
                 &idp.uri(),
-                &format!("    token_endpoint: {}/realms/models/token\n", idp.uri()),
+                &format!("token_endpoint: {}/realms/models/token\n", idp.uri()),
             ),
         ),
     ])
     .await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "chat", "auth": "workload", "prompt": "ping"}))
+        .call(json!({"model": "chat", "auth": "workload", "prompt": "ping"}))
         .await;
 
     assert_eq!(status, 200);
@@ -2060,17 +2085,20 @@ async fn a_base_path_moves_the_api_the_docs_and_the_ui_together() {
     const PREFIX: &str = "/notebook/team/gleroy/proxy/8787";
 
     let harness = Harness::start_at(
-        &[("chat.yaml", openai_profile("https://models.internal/v1"))],
+        &[(
+            "models/chat.yaml",
+            openai_model("https://models.internal/v1"),
+        )],
         PREFIX,
     )
     .await;
 
     // The API answers under the prefix...
-    let body = harness.get("/api/profiles").await;
-    assert_eq!(body["profiles"][0]["name"], "chat");
+    let body = harness.get("/api/models").await;
+    assert_eq!(body["models"][0]["name"], "chat");
 
     // ...and nowhere else. Outside the prefix, nothing exists.
-    assert_eq!(harness.raw("/api/profiles").await.status(), 404);
+    assert_eq!(harness.raw("/api/models").await.status(), 404);
 
     // Except at the root, which points you at the prefix rather than 404-ing at
     // you — the mistake everyone makes once after setting `--base-path`.
@@ -2136,12 +2164,12 @@ async fn healthz_answers_under_the_base_path() {
 // Rhai scripts
 // ---------------------------------------------------------------------------
 
-/// A profile that builds its body and reads its answer with scripts.
+/// A model that builds its body and reads its answer with scripts.
 ///
 /// The response shape is one no cascade reaches: the answer is split across
 /// segments that have to be filtered and joined, and the stop reason is a
 /// boolean.
-fn scripted_profile(url: &str) -> String {
+fn scripted_model(url: &str) -> String {
     const TEMPLATE: &str = r#"
 name: scripted
 kind: chat
@@ -2180,10 +2208,10 @@ async fn a_request_script_builds_the_body() {
         .mount(&server)
         .await;
 
-    let harness = Harness::start(&[("scripted.yaml", scripted_profile(&server.uri()))]).await;
+    let harness = Harness::start(&[("models/scripted.yaml", scripted_model(&server.uri()))]).await;
 
     let (status, text, body) = harness
-        .call(json!({"profile": "scripted", "prompt": "ping"}))
+        .call(json!({"model": "scripted", "prompt": "ping"}))
         .await;
 
     assert_eq!(status, 200, "{text}");
@@ -2210,13 +2238,13 @@ async fn a_decode_script_reads_a_shape_no_cascade_could() {
         .await;
 
     let harness = Harness::start(&[(
-        "scripted.yaml",
-        scripted_profile(&format!("{}/v1", server.uri())),
+        "models/scripted.yaml",
+        scripted_model(&format!("{}/v1", server.uri())),
     )])
     .await;
 
     let (status, text, body) = harness
-        .call(json!({"profile": "scripted", "prompt": "ping"}))
+        .call(json!({"model": "scripted", "prompt": "ping"}))
         .await;
 
     assert_eq!(status, 200, "{text}");
@@ -2236,7 +2264,7 @@ async fn a_runaway_decode_script_is_traced_rather_than_fatal() {
         .mount(&server)
         .await;
 
-    let profile = format!(
+    let model = format!(
         r"
 name: runaway
 kind: chat
@@ -2250,10 +2278,10 @@ decode:
 ",
         server.uri()
     );
-    let harness = Harness::start(&[("runaway.yaml", profile)]).await;
+    let harness = Harness::start(&[("models/runaway.yaml", model)]).await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "runaway", "prompt": "ping"}))
+        .call(json!({"model": "runaway", "prompt": "ping"}))
         .await;
 
     // The call succeeded; the script did not, and says so next to the raw body.
@@ -2274,7 +2302,7 @@ decode:
 
 #[tokio::test]
 async fn a_failing_request_script_is_a_422_naming_the_script() {
-    let profile = r"
+    let model = r"
 name: broken-script
 kind: chat
 url: https://models.internal/v1
@@ -2282,10 +2310,10 @@ request:
   script: |
     messages.no_such_method()
 ";
-    let harness = Harness::start(&[("broken.yaml", profile.to_owned())]).await;
+    let harness = Harness::start(&[("models/broken.yaml", model.to_owned())]).await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "broken-script", "prompt": "ping"}))
+        .call(json!({"model": "broken-script", "prompt": "ping"}))
         .await;
 
     assert_eq!(status, 422);
@@ -2320,14 +2348,14 @@ request: {}
 ";
 
     let harness = Harness::start(&[
-        ("a.yaml", both_request.to_owned()),
-        ("b.yaml", both_decode.to_owned()),
-        ("c.yaml", no_source.to_owned()),
+        ("models/a.yaml", both_request.to_owned()),
+        ("models/b.yaml", both_decode.to_owned()),
+        ("models/c.yaml", no_source.to_owned()),
     ])
     .await;
 
-    let body = harness.get("/api/profiles").await;
-    assert!(body["profiles"].as_array().unwrap().is_empty());
+    let body = harness.get("/api/models").await;
+    assert!(body["models"].as_array().unwrap().is_empty());
 
     let messages: Vec<String> = body["issues"]
         .as_array()
@@ -2346,7 +2374,7 @@ request: {}
 
 #[tokio::test]
 async fn a_script_that_does_not_compile_names_the_file_at_startup() {
-    let profile = r"
+    let model = r"
 name: broken
 kind: chat
 url: https://models.internal/v1
@@ -2354,15 +2382,15 @@ request:
   script: |
     let x = ;
 ";
-    let harness = Harness::start(&[("broken.yaml", profile.to_owned())]).await;
+    let harness = Harness::start(&[("models/broken.yaml", model.to_owned())]).await;
 
-    let body = harness.get("/api/profiles").await;
-    assert!(body["profiles"].as_array().unwrap().is_empty());
+    let body = harness.get("/api/models").await;
+    assert!(body["models"].as_array().unwrap().is_empty());
     assert!(
         body["issues"][0]["file"]
             .as_str()
             .unwrap()
-            .ends_with("broken.yaml"),
+            .ends_with("models/broken.yaml"),
         "{body}"
     );
     assert!(
@@ -2378,8 +2406,8 @@ request:
 // Agent mode
 // ---------------------------------------------------------------------------
 
-/// A chat profile with one simulated tool.
-fn agent_profile(url: &str, extra: &str) -> String {
+/// A chat model with one simulated tool.
+fn agent_model(url: &str, extra: &str) -> String {
     const TEMPLATE: &str = r#"
 name: agent
 kind: chat
@@ -2451,13 +2479,13 @@ async fn an_agent_answers_a_tool_call_and_stops_when_the_model_is_done() {
         .await;
 
     let harness = Harness::start(&[(
-        "agent.yaml",
-        agent_profile(&format!("{}/v1", server.uri()), ""),
+        "models/agent.yaml",
+        agent_model(&format!("{}/v1", server.uri()), ""),
     )])
     .await;
 
     let (status, events) = harness
-        .agent(json!({"profile": "agent", "prompt": "weather in Paris?"}))
+        .agent(json!({"model": "agent", "prompt": "weather in Paris?"}))
         .await;
 
     assert_eq!(status, 200);
@@ -2508,7 +2536,7 @@ async fn an_agent_answers_a_tool_call_and_stops_when_the_model_is_done() {
 }
 
 #[tokio::test]
-async fn a_model_asking_for_the_same_thing_twice_is_stopped_when_the_profile_asks() {
+async fn a_model_asking_for_the_same_thing_twice_is_stopped_when_the_model_asks() {
     let server = MockServer::start().await;
     // Always the same call: a loop, not progress.
     Mock::given(method("POST"))
@@ -2517,8 +2545,8 @@ async fn a_model_asking_for_the_same_thing_twice_is_stopped_when_the_profile_ask
         .await;
 
     let harness = Harness::start(&[(
-        "agent.yaml",
-        agent_profile(
+        "models/agent.yaml",
+        agent_model(
             &format!("{}/v1", server.uri()),
             "agent:\n  stop_when:\n    repeated_call: true\n",
         ),
@@ -2526,7 +2554,7 @@ async fn a_model_asking_for_the_same_thing_twice_is_stopped_when_the_profile_ask
     .await;
 
     let (_, events) = harness
-        .agent(json!({"profile": "agent", "prompt": "weather?"}))
+        .agent(json!({"model": "agent", "prompt": "weather?"}))
         .await;
 
     let (_, done) = events.last().unwrap();
@@ -2546,8 +2574,8 @@ async fn the_same_call_twice_is_not_watched_for_unless_asked() {
         .await;
 
     let harness = Harness::start(&[(
-        "agent.yaml",
-        agent_profile(
+        "models/agent.yaml",
+        agent_model(
             &format!("{}/v1", server.uri()),
             "agent:\n  max_iterations: 3\n",
         ),
@@ -2555,7 +2583,7 @@ async fn the_same_call_twice_is_not_watched_for_unless_asked() {
     .await;
 
     let (_, events) = harness
-        .agent(json!({"profile": "agent", "prompt": "weather?"}))
+        .agent(json!({"model": "agent", "prompt": "weather?"}))
         .await;
 
     // The default lets it keep going; only the turn budget ends the run.
@@ -2590,13 +2618,13 @@ async fn arguments_that_do_not_match_the_schema_are_reported_and_still_answered(
         .await;
 
     let harness = Harness::start(&[(
-        "agent.yaml",
-        agent_profile(&format!("{}/v1", server.uri()), ""),
+        "models/agent.yaml",
+        agent_model(&format!("{}/v1", server.uri()), ""),
     )])
     .await;
 
     let (_, events) = harness
-        .agent(json!({"profile": "agent", "prompt": "weather?"}))
+        .agent(json!({"model": "agent", "prompt": "weather?"}))
         .await;
 
     let tool = &events[0].1["tools"][0];
@@ -2611,7 +2639,7 @@ async fn arguments_that_do_not_match_the_schema_are_reported_and_still_answered(
 }
 
 #[tokio::test]
-async fn a_tool_the_profile_never_declared_is_answered_with_an_error() {
+async fn a_tool_the_model_never_declared_is_answered_with_an_error() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -2632,13 +2660,13 @@ async fn a_tool_the_profile_never_declared_is_answered_with_an_error() {
         .await;
 
     let harness = Harness::start(&[(
-        "agent.yaml",
-        agent_profile(&format!("{}/v1", server.uri()), ""),
+        "models/agent.yaml",
+        agent_model(&format!("{}/v1", server.uri()), ""),
     )])
     .await;
 
     let (_, events) = harness
-        .agent(json!({"profile": "agent", "prompt": "go"}))
+        .agent(json!({"model": "agent", "prompt": "go"}))
         .await;
 
     let tool = &events[0].1["tools"][0];
@@ -2658,14 +2686,14 @@ async fn a_backend_that_never_reports_a_finish_reason_is_called_out_rather_than_
         .await;
 
     // Stop only on `finish_reason`, which this endpoint never sends.
-    let profile = agent_profile(
+    let model = agent_model(
         &format!("{}/v1", server.uri()),
         "agent:\n  max_iterations: 3\n  stop_when:\n    no_tool_calls: false\n    finish_reason_in: [stop, end_turn]\n",
     );
-    let harness = Harness::start(&[("agent.yaml", profile)]).await;
+    let harness = Harness::start(&[("models/agent.yaml", model)]).await;
 
     let (_, events) = harness
-        .agent(json!({"profile": "agent", "prompt": "hello"}))
+        .agent(json!({"model": "agent", "prompt": "hello"}))
         .await;
 
     let (_, done) = events.last().unwrap();
@@ -2688,8 +2716,8 @@ async fn the_turn_budget_is_honoured_and_overridable_per_run() {
     }
 
     let harness = Harness::start(&[(
-        "agent.yaml",
-        agent_profile(
+        "models/agent.yaml",
+        agent_model(
             &format!("{}/v1", server.uri()),
             "agent:\n  max_iterations: 6\n",
         ),
@@ -2697,7 +2725,7 @@ async fn the_turn_budget_is_honoured_and_overridable_per_run() {
     .await;
 
     let (_, events) = harness
-        .agent(json!({"profile": "agent", "prompt": "tour de France", "maxIterations": 3}))
+        .agent(json!({"model": "agent", "prompt": "tour de France", "maxIterations": 3}))
         .await;
 
     let (_, done) = events.last().unwrap();
@@ -2719,14 +2747,14 @@ async fn a_tool_can_answer_from_a_script_that_reads_its_arguments() {
         .mount(&server)
         .await;
 
-    let profile = agent_profile(&format!("{}/v1", server.uri()), "").replace(
+    let model = agent_model(&format!("{}/v1", server.uri()), "").replace(
         r#"    response: '{"temp": 21, "conditions": "clear"}'"#,
         "    script: '`{\"city\": \"${arguments.city}\", \"turn\": ${turn}}`'",
     );
-    let harness = Harness::start(&[("agent.yaml", profile)]).await;
+    let harness = Harness::start(&[("models/agent.yaml", model)]).await;
 
     let (_, events) = harness
-        .agent(json!({"profile": "agent", "prompt": "weather in Lyon?"}))
+        .agent(json!({"model": "agent", "prompt": "weather in Lyon?"}))
         .await;
 
     assert_eq!(
@@ -2736,17 +2764,17 @@ async fn a_tool_can_answer_from_a_script_that_reads_its_arguments() {
 }
 
 #[tokio::test]
-async fn agent_mode_refuses_an_embedding_profile_before_streaming_anything() {
+async fn agent_mode_refuses_an_embedding_model_before_streaming_anything() {
     let harness = Harness::start(&[(
-        "embed.yaml",
-        embedding_profile("https://models.internal/v1/embeddings", None),
+        "models/embed.yaml",
+        embedding_model("https://models.internal/v1/embeddings", None),
     )])
     .await;
 
     let response = harness
         .client
         .post(format!("{}/api/agent", harness.base))
-        .json(&json!({"profile": "embed", "prompt": "ping"}))
+        .json(&json!({"model": "embed", "prompt": "ping"}))
         .send()
         .await
         .expect("call mire");
@@ -2754,7 +2782,7 @@ async fn agent_mode_refuses_an_embedding_profile_before_streaming_anything() {
     // A 422 is more use than a stream whose first event is a failure.
     assert_eq!(response.status(), 422);
     let body: Value = response.json().await.unwrap();
-    assert_eq!(body["code"], "not_a_chat_profile");
+    assert_eq!(body["code"], "not_a_chat_model");
 }
 
 #[tokio::test]
@@ -2774,13 +2802,10 @@ async fn a_credential_never_appears_in_an_agent_trace() {
 
     let harness = Harness::start(&[
         (
-            "agent.yaml",
-            agent_profile(&format!("{}/v1", server.uri()), ""),
+            "models/agent.yaml",
+            agent_model(&format!("{}/v1", server.uri()), ""),
         ),
-        (
-            "auth.yaml",
-            "providers:\n  - name: pasted\n    kind: token\n".to_owned(),
-        ),
+        ("auth/pasted.yaml", "name: pasted\nkind: token\n".to_owned()),
     ])
     .await;
 
@@ -2788,7 +2813,7 @@ async fn a_credential_never_appears_in_an_agent_trace() {
         .client
         .post(format!("{}/api/agent", harness.base))
         .json(&json!({
-            "profile": "agent",
+            "model": "agent",
             "auth": "pasted",
             "prompt": "ping",
             "token": TOKEN
@@ -2858,12 +2883,11 @@ async fn token_answer(idp: &MockServer, grant: &str, access: &str, expires_in: u
 
 fn browser_registry(idp_uri: &str) -> String {
     format!(
-        "providers:\n  \
-         - name: me\n    \
-         kind: oidc_browser\n    \
-         issuer: {idp_uri}/realms/mire\n    \
-         client_id: mire-ui\n    \
-         scope:\n      \
+        "name: me\n\
+         kind: oidc_browser\n\
+         issuer: {idp_uri}/realms/mire\n\
+         client_id: mire-ui\n\
+         scope:\n  \
          - profile\n"
     )
 }
@@ -2887,7 +2911,7 @@ async fn signed_in(harness: &Harness, redirect_uri: &str) -> Value {
 #[tokio::test]
 async fn a_browser_login_hands_back_a_pkce_authorization_url() {
     let idp = browser_idp().await;
-    let harness = Harness::start(&[("auth.yaml", browser_registry(&idp.uri()))]).await;
+    let harness = Harness::start(&[("auth/me.yaml", browser_registry(&idp.uri()))]).await;
 
     let (status, body) = harness
         .post(
@@ -2903,7 +2927,7 @@ async fn a_browser_login_hands_back_a_pkce_authorization_url() {
     assert_eq!(query["response_type"], "code");
     assert_eq!(query["client_id"], "mire-ui");
     assert_eq!(query["code_challenge_method"], "S256");
-    // `openid` is added even though the profile only asked for `profile`.
+    // `openid` is added even though the model only asked for `model`.
     assert_eq!(query["scope"], "openid profile");
     assert_eq!(query["state"], body["state"].as_str().unwrap());
     // The challenge is a hash, so the verifier itself never leaves the process.
@@ -2913,7 +2937,7 @@ async fn a_browser_login_hands_back_a_pkce_authorization_url() {
 #[tokio::test]
 async fn the_callback_follows_the_browser_rather_than_the_socket() {
     let idp = browser_idp().await;
-    let harness = Harness::start(&[("auth.yaml", browser_registry(&idp.uri()))]).await;
+    let harness = Harness::start(&[("auth/me.yaml", browser_registry(&idp.uri()))]).await;
 
     // What a Kubeflow notebook looks like: the process binds an ephemeral
     // loopback port, the browser is somewhere else entirely.
@@ -2933,7 +2957,7 @@ async fn the_callback_follows_the_browser_rather_than_the_socket() {
 #[tokio::test]
 async fn without_a_supplied_callback_the_request_headers_are_used() {
     let idp = browser_idp().await;
-    let harness = Harness::start(&[("auth.yaml", browser_registry(&idp.uri()))]).await;
+    let harness = Harness::start(&[("auth/me.yaml", browser_registry(&idp.uri()))]).await;
 
     let (status, body) = harness.post("/api/auth/me/login", json!({})).await;
 
@@ -2946,7 +2970,7 @@ async fn without_a_supplied_callback_the_request_headers_are_used() {
 #[tokio::test]
 async fn a_callback_that_is_not_a_callback_is_refused() {
     let idp = browser_idp().await;
-    let harness = Harness::start(&[("auth.yaml", browser_registry(&idp.uri()))]).await;
+    let harness = Harness::start(&[("auth/me.yaml", browser_registry(&idp.uri()))]).await;
 
     for bad in [
         "javascript:alert(1)/auth/callback",
@@ -2965,7 +2989,7 @@ async fn a_callback_that_is_not_a_callback_is_refused() {
 async fn the_callback_trades_the_code_with_the_verifier_it_started_with() {
     let idp = browser_idp().await;
     token_answer(&idp, "authorization_code", "the-access-token", 300, true).await;
-    let harness = Harness::start(&[("auth.yaml", browser_registry(&idp.uri()))]).await;
+    let harness = Harness::start(&[("auth/me.yaml", browser_registry(&idp.uri()))]).await;
 
     let public = "https://kubeflow.example/notebook/team/gleroy/proxy/8787/auth/callback";
     signed_in(&harness, public).await;
@@ -3005,7 +3029,7 @@ async fn the_callback_trades_the_code_with_the_verifier_it_started_with() {
 async fn a_state_cannot_be_replayed() {
     let idp = browser_idp().await;
     token_answer(&idp, "authorization_code", "the-access-token", 300, true).await;
-    let harness = Harness::start(&[("auth.yaml", browser_registry(&idp.uri()))]).await;
+    let harness = Harness::start(&[("auth/me.yaml", browser_registry(&idp.uri()))]).await;
 
     let login = signed_in(&harness, "http://127.0.0.1:8787/auth/callback").await;
     let state = login["state"].as_str().unwrap();
@@ -3021,7 +3045,7 @@ async fn a_state_cannot_be_replayed() {
 #[tokio::test]
 async fn a_callback_with_no_matching_login_is_refused() {
     let idp = browser_idp().await;
-    let harness = Harness::start(&[("auth.yaml", browser_registry(&idp.uri()))]).await;
+    let harness = Harness::start(&[("auth/me.yaml", browser_registry(&idp.uri()))]).await;
 
     let (status, page) = harness
         .get_text("/auth/callback?code=c&state=never-issued")
@@ -3036,7 +3060,7 @@ async fn a_callback_with_no_matching_login_is_refused() {
 #[tokio::test]
 async fn a_refusal_from_the_identity_provider_is_reported_in_its_own_words() {
     let idp = browser_idp().await;
-    let harness = Harness::start(&[("auth.yaml", browser_registry(&idp.uri()))]).await;
+    let harness = Harness::start(&[("auth/me.yaml", browser_registry(&idp.uri()))]).await;
 
     let (_, login) = harness
         .post(
@@ -3062,16 +3086,16 @@ async fn a_refusal_from_the_identity_provider_is_reported_in_its_own_words() {
 async fn calling_before_signing_in_says_so_rather_than_failing_obscurely() {
     let idp = browser_idp().await;
     let harness = Harness::start(&[
-        ("auth.yaml", browser_registry(&idp.uri())),
+        ("auth/me.yaml", browser_registry(&idp.uri())),
         (
-            "chat.yaml",
-            openai_profile("https://models.internal/v1/chat/completions"),
+            "models/chat.yaml",
+            openai_model("https://models.internal/v1/chat/completions"),
         ),
     ])
     .await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "chat", "auth": "me", "prompt": "ping"}))
+        .call(json!({"model": "chat", "auth": "me", "prompt": "ping"}))
         .await;
 
     assert_eq!(status, 409);
@@ -3095,10 +3119,10 @@ async fn the_session_token_is_what_authenticates_the_call() {
     token_answer(&idp, "authorization_code", "the-access-token", 300, true).await;
 
     let harness = Harness::start(&[
-        ("auth.yaml", browser_registry(&idp.uri())),
+        ("auth/me.yaml", browser_registry(&idp.uri())),
         (
-            "chat.yaml",
-            openai_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            openai_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
@@ -3106,7 +3130,7 @@ async fn the_session_token_is_what_authenticates_the_call() {
     signed_in(&harness, "http://127.0.0.1:8787/auth/callback").await;
 
     let (status, text, body) = harness
-        .call(json!({"profile": "chat", "auth": "me", "prompt": "ping"}))
+        .call(json!({"model": "chat", "auth": "me", "prompt": "ping"}))
         .await;
 
     assert_eq!(status, 200);
@@ -3137,10 +3161,10 @@ async fn an_expired_session_refreshes_without_another_trip_through_the_browser()
     token_answer(&idp, "refresh_token", "the-second-token", 300, true).await;
 
     let harness = Harness::start(&[
-        ("auth.yaml", browser_registry(&idp.uri())),
+        ("auth/me.yaml", browser_registry(&idp.uri())),
         (
-            "chat.yaml",
-            openai_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            openai_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
@@ -3148,7 +3172,7 @@ async fn an_expired_session_refreshes_without_another_trip_through_the_browser()
     signed_in(&harness, "http://127.0.0.1:8787/auth/callback").await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "chat", "auth": "me", "prompt": "ping"}))
+        .call(json!({"model": "chat", "auth": "me", "prompt": "ping"}))
         .await;
 
     assert_eq!(status, 200, "{body}");
@@ -3181,10 +3205,10 @@ async fn a_dead_refresh_token_ends_the_session_instead_of_failing_forever() {
         .await;
 
     let harness = Harness::start(&[
-        ("auth.yaml", browser_registry(&idp.uri())),
+        ("auth/me.yaml", browser_registry(&idp.uri())),
         (
-            "chat.yaml",
-            openai_profile("https://models.internal/v1/chat/completions"),
+            "models/chat.yaml",
+            openai_model("https://models.internal/v1/chat/completions"),
         ),
     ])
     .await;
@@ -3192,7 +3216,7 @@ async fn a_dead_refresh_token_ends_the_session_instead_of_failing_forever() {
     signed_in(&harness, "http://127.0.0.1:8787/auth/callback").await;
 
     let (status, _, body) = harness
-        .call(json!({"profile": "chat", "auth": "me", "prompt": "ping"}))
+        .call(json!({"model": "chat", "auth": "me", "prompt": "ping"}))
         .await;
     assert_eq!(status, 502);
     assert!(body["message"].as_str().unwrap().contains("invalid_grant"));
@@ -3212,7 +3236,7 @@ async fn a_dead_refresh_token_ends_the_session_instead_of_failing_forever() {
 async fn signing_out_forgets_the_session_and_says_whether_there_was_one() {
     let idp = browser_idp().await;
     token_answer(&idp, "authorization_code", "the-access-token", 300, true).await;
-    let harness = Harness::start(&[("auth.yaml", browser_registry(&idp.uri()))]).await;
+    let harness = Harness::start(&[("auth/me.yaml", browser_registry(&idp.uri()))]).await;
 
     signed_in(&harness, "http://127.0.0.1:8787/auth/callback").await;
 
@@ -3228,11 +3252,14 @@ async fn signing_out_forgets_the_session_and_says_whether_there_was_one() {
 #[tokio::test]
 async fn signing_in_is_only_offered_where_it_means_something() {
     let idp = browser_idp().await;
-    let registry = format!(
-        "{}  - name: static\n    kind: token\n    value:\n      env: MODEL_TOKEN\n",
-        browser_registry(&idp.uri())
-    );
-    let harness = Harness::start(&[("auth.yaml", registry)]).await;
+    let harness = Harness::start(&[
+        ("auth/me.yaml", browser_registry(&idp.uri())),
+        (
+            "auth/static.yaml",
+            "name: static\nkind: token\nvalue:\n  env: MODEL_TOKEN\n".to_owned(),
+        ),
+    ])
+    .await;
 
     let (status, body) = harness.post("/api/auth/static/login", json!({})).await;
     assert_eq!(status, 422);
@@ -3247,7 +3274,7 @@ async fn signing_in_is_only_offered_where_it_means_something() {
 async fn no_token_reaches_the_api_or_the_page_the_browser_lands_on() {
     let idp = browser_idp().await;
     token_answer(&idp, "authorization_code", "SUPERSECRETACCESS", 300, true).await;
-    let harness = Harness::start(&[("auth.yaml", browser_registry(&idp.uri()))]).await;
+    let harness = Harness::start(&[("auth/me.yaml", browser_registry(&idp.uri()))]).await;
 
     let (_, login) = harness
         .post(
@@ -3285,7 +3312,7 @@ async fn an_identity_provider_without_a_browser_flow_says_so() {
         .mount(&server)
         .await;
 
-    let harness = Harness::start(&[("auth.yaml", browser_registry(&server.uri()))]).await;
+    let harness = Harness::start(&[("auth/me.yaml", browser_registry(&server.uri()))]).await;
 
     let (status, body) = harness.post("/api/auth/me/login", json!({})).await;
 
@@ -3314,7 +3341,7 @@ async fn a_failed_login_leaves_its_reason_where_the_panel_can_find_it() {
         .mount(&idp)
         .await;
 
-    let harness = Harness::start(&[("auth.yaml", browser_registry(&idp.uri()))]).await;
+    let harness = Harness::start(&[("auth/me.yaml", browser_registry(&idp.uri()))]).await;
 
     let (_, login) = harness
         .post(
@@ -3363,7 +3390,7 @@ async fn a_new_attempt_clears_the_previous_complaint() {
         .await;
     token_answer(&idp, "authorization_code", "the-access-token", 300, true).await;
 
-    let harness = Harness::start(&[("auth.yaml", browser_registry(&idp.uri()))]).await;
+    let harness = Harness::start(&[("auth/me.yaml", browser_registry(&idp.uri()))]).await;
     let callback = "http://127.0.0.1:8787/auth/callback";
 
     let (_, first) = harness
@@ -3484,11 +3511,11 @@ fn weather_tool() -> Value {
     }])
 }
 
-/// A chat profile whose tools come from an MCP server rather than its own YAML.
+/// A chat model whose tools come from an MCP server rather than its own YAML.
 ///
-/// It says nothing about MCP, and does not have to: every server `mcp.yaml`
-/// declares is offered to every `kind: chat` profile.
-fn mcp_profile(url: &str) -> String {
+/// It says nothing about MCP, and does not have to: every server `mcp/`
+/// declares is offered to every `kind: chat` model.
+fn mcp_model(url: &str) -> String {
     format!(
         r#"
 name: chat
@@ -3555,18 +3582,18 @@ async fn the_agent_really_calls_an_mcp_tool_and_feeds_the_result_back() {
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
-            format!("servers:\n  - name: weather\n    url: {}/mcp\n", mcp.uri()),
+            "mcp/weather.yaml",
+            format!("name: weather\nurl: {}/mcp\n", mcp.uri()),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (status, events) = harness
-        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .agent(json!({"model": "chat", "prompt": "weather in Paris?"}))
         .await;
     assert_eq!(status, 200);
 
@@ -3599,12 +3626,12 @@ async fn the_agent_really_calls_an_mcp_tool_and_feeds_the_result_back() {
     );
 }
 
-/// One turn sets nothing up, whatever `mcp.yaml` declares.
+/// One turn sets nothing up, whatever `mcp/` declares.
 ///
 /// The loop is what discovers a server, lists its tools and calls them; a single
 /// call has no second turn to feed a result into, so it opens no connection at
 /// all. A server is declared here and both single-turn endpoints are asked to run
-/// the profile — a spent credential, a session prompt, or a line in somebody's
+/// the model — a spent credential, a session prompt, or a line in somebody's
 /// audit log for a tool that was never going to be called is a side effect nobody
 /// asked this endpoint for.
 #[tokio::test]
@@ -3621,18 +3648,18 @@ async fn a_single_turn_never_speaks_to_an_mcp_server() {
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
-            format!("servers:\n  - name: weather\n    url: {}/mcp\n", mcp.uri()),
+            "mcp/weather.yaml",
+            format!("name: weather\nurl: {}/mcp\n", mcp.uri()),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (status, text, body) = harness
-        .call(json!({"profile": "chat", "prompt": "ping"}))
+        .call(json!({"model": "chat", "prompt": "ping"}))
         .await;
     assert_eq!(status, 200, "{text}");
 
@@ -3642,7 +3669,7 @@ async fn a_single_turn_never_speaks_to_an_mcp_server() {
     assert_eq!(sent["tools"], json!([]));
 
     let (status, events) = harness
-        .stream(json!({"profile": "chat", "prompt": "ping"}))
+        .stream(json!({"model": "chat", "prompt": "ping"}))
         .await;
     assert_eq!(status, 200);
     assert!(events.iter().any(|(name, _)| name == "done"), "{events:?}");
@@ -3690,7 +3717,7 @@ fn tools_offered(turn: &Value) -> Vec<String> {
         .collect()
 }
 
-/// One run reaching fewer servers than `mcp.yaml` declares.
+/// One run reaching fewer servers than `mcp/` declares.
 ///
 /// The file still declares both — declaring a server is the opt-in, and no
 /// request edits it. What a run gets to say is which of them this one reaches, so
@@ -3709,22 +3736,22 @@ async fn a_run_reaches_only_the_servers_it_names() {
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
-            format!(
-                "servers:\n  - name: weather\n    url: {}/mcp\n  - name: stocks\n    url: {}/mcp\n",
-                weather.uri(),
-                stocks.uri()
-            ),
+            "mcp/weather.yaml",
+            format!("name: weather\nurl: {}/mcp\n", weather.uri()),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "mcp/stocks.yaml",
+            format!("name: stocks\nurl: {}/mcp\n", stocks.uri()),
+        ),
+        (
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (status, events) = harness
-        .agent(json!({"profile": "chat", "prompt": "ping", "mcpServers": ["stocks"]}))
+        .agent(json!({"model": "chat", "prompt": "ping", "mcpServers": ["stocks"]}))
         .await;
     assert_eq!(status, 200, "{events:?}");
 
@@ -3752,7 +3779,7 @@ async fn a_run_reaches_only_the_servers_it_names() {
 /// Every server off, which is a list of none rather than a silence.
 ///
 /// The loop still runs — this is the question "what does it do when the tool is
-/// not there?", and the answer is the model's, on the profile's own simulated
+/// not there?", and the answer is the model's, on the model's own simulated
 /// `tools:` and nothing else.
 #[tokio::test]
 async fn a_run_can_name_no_server_at_all() {
@@ -3762,18 +3789,18 @@ async fn a_run_can_name_no_server_at_all() {
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
-            format!("servers:\n  - name: weather\n    url: {}/mcp\n", mcp.uri()),
+            "mcp/weather.yaml",
+            format!("name: weather\nurl: {}/mcp\n", mcp.uri()),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (status, events) = harness
-        .agent(json!({"profile": "chat", "prompt": "ping", "mcpServers": []}))
+        .agent(json!({"model": "chat", "prompt": "ping", "mcpServers": []}))
         .await;
     assert_eq!(status, 200, "{events:?}");
 
@@ -3791,10 +3818,10 @@ async fn a_run_can_name_no_server_at_all() {
     );
 }
 
-/// Saying nothing reaches every declared server, on a profile that mentions none.
+/// Saying nothing reaches every declared server, on a model that mentions none.
 ///
-/// `mcp.yaml` is the opt-in and the only one: a server declared there is offered
-/// to every `kind: chat` profile, so a profile that says nothing about MCP still
+/// `mcp/` is the opt-in and the only one: a server declared there is offered
+/// to every `kind: chat` model, so a model that says nothing about MCP still
 /// gets the lot. This is the default the two tests above narrow away from.
 #[tokio::test]
 async fn a_run_that_names_no_server_reaches_every_declared_one() {
@@ -3805,22 +3832,22 @@ async fn a_run_that_names_no_server_reaches_every_declared_one() {
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
-            format!(
-                "servers:\n  - name: weather\n    url: {}/mcp\n  - name: stocks\n    url: {}/mcp\n",
-                weather.uri(),
-                stocks.uri()
-            ),
+            "mcp/weather.yaml",
+            format!("name: weather\nurl: {}/mcp\n", weather.uri()),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "mcp/stocks.yaml",
+            format!("name: stocks\nurl: {}/mcp\n", stocks.uri()),
+        ),
+        (
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (status, events) = harness
-        .agent(json!({"profile": "chat", "prompt": "ping"}))
+        .agent(json!({"model": "chat", "prompt": "ping"}))
         .await;
     assert_eq!(status, 200, "{events:?}");
 
@@ -3829,13 +3856,13 @@ async fn a_run_that_names_no_server_reaches_every_declared_one() {
     assert_eq!(
         tools_offered(&turns[0].1),
         vec!["get_stock".to_owned(), "get_weather".to_owned()],
-        "a profile naming no server should still be offered both"
+        "a model naming no server should still be offered both"
     );
 }
 
-/// A name `mcp.yaml` does not declare is a typo, and gets a status code.
+/// A name `mcp/` does not declare is a typo, and gets a status code.
 ///
-/// The request no longer has a per-profile list to overstep, so the only way to
+/// The request no longer has a per-model list to overstep, so the only way to
 /// get this wrong is to name something that does not exist — which is a `404`
 /// before anything is sent, rather than a stream that opens and fails.
 #[tokio::test]
@@ -3846,12 +3873,12 @@ async fn a_run_cannot_reach_a_server_nobody_declared() {
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
-            format!("servers:\n  - name: weather\n    url: {}/mcp\n", mcp.uri()),
+            "mcp/weather.yaml",
+            format!("name: weather\nurl: {}/mcp\n", mcp.uri()),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
@@ -3859,7 +3886,7 @@ async fn a_run_cannot_reach_a_server_nobody_declared() {
     let (status, body) = harness
         .post(
             "/api/agent",
-            json!({"profile": "chat", "prompt": "ping", "mcpServers": ["stocks"]}),
+            json!({"model": "chat", "prompt": "ping", "mcpServers": ["stocks"]}),
         )
         .await;
     assert_eq!(status, 404, "{body}");
@@ -3884,18 +3911,18 @@ async fn the_required_headers_are_mirrored_from_the_body() {
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
-            format!("servers:\n  - name: weather\n    url: {}/mcp\n", mcp.uri()),
+            "mcp/weather.yaml",
+            format!("name: weather\nurl: {}/mcp\n", mcp.uri()),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     harness
-        .agent(json!({"profile": "chat", "prompt": "go"}))
+        .agent(json!({"model": "chat", "prompt": "go"}))
         .await;
 
     let call = mcp
@@ -3949,18 +3976,18 @@ async fn every_word_said_to_an_mcp_server_is_reported_not_just_the_tool_calls() 
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
-            format!("servers:\n  - name: weather\n    url: {}/mcp\n", mcp.uri()),
+            "mcp/weather.yaml",
+            format!("name: weather\nurl: {}/mcp\n", mcp.uri()),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (status, events) = harness
-        .agent(json!({"profile": "chat", "prompt": "go"}))
+        .agent(json!({"model": "chat", "prompt": "go"}))
         .await;
     assert_eq!(status, 200);
 
@@ -4022,22 +4049,22 @@ async fn a_credential_sent_to_an_mcp_server_never_comes_back_in_the_journal() {
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
+            "mcp/weather.yaml",
             format!(
-                "servers:\n  - name: weather\n    url: {}/mcp\n    headers:\n      \
+                "name: weather\nurl: {}/mcp\nheaders:\n  \
                  x-api-key: 'k-{{{{ env.PATH }}}}'\n",
                 mcp.uri()
             ),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (status, events) = harness
-        .agent(json!({"profile": "chat", "prompt": "go"}))
+        .agent(json!({"model": "chat", "prompt": "go"}))
         .await;
     assert_eq!(status, 200);
 
@@ -4069,7 +4096,7 @@ async fn hook_endpoint(status: u16, body: &str) -> MockServer {
     server
 }
 
-/// `mcp.yaml` for a server whose tool call is wrapped in one hook.
+/// A server file for a server whose tool call is wrapped in one hook.
 ///
 /// `hook_extra` lands among the hook's own fields — `tools:`, `on_error:` — and
 /// `action_extra` among its single action's, so a test adds a `json:` document
@@ -4083,11 +4110,11 @@ fn mcp_with_hook(
 ) -> String {
     let on: String = phases
         .iter()
-        .map(|phase| ["          - ", phase, "\n"].concat())
+        .map(|phase| ["      - ", phase, "\n"].concat())
         .collect();
     format!(
-        "servers:\n  - name: weather\n    url: {}/mcp\n    hooks:\n      - name: audit\n        \
-         on:\n{on}{hook_extra}        actions:\n          - http:\n              url: {hook}/hook\n{action_extra}",
+        "name: weather\nurl: {}/mcp\nhooks:\n  - name: audit\n    \
+         on:\n{on}{hook_extra}    actions:\n      - http:\n          url: {hook}/hook\n{action_extra}",
         mcp.uri()
     )
 }
@@ -4109,7 +4136,7 @@ async fn a_hook_fires_on_both_sides_of_a_tool_call_and_says_what_it_sent() {
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
+            "mcp/weather.yaml",
             mcp_with_hook(
                 &mcp,
                 &hook.uri(),
@@ -4117,18 +4144,18 @@ async fn a_hook_fires_on_both_sides_of_a_tool_call_and_says_what_it_sent() {
                 "",
                 // The call itself, which is now something a file asks for by
                 // name rather than something every hook sends by default.
-                "              json: '{{ call }}'\n",
+                "          json: '{{ call }}'\n",
             ),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (status, events) = harness
-        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .agent(json!({"model": "chat", "prompt": "weather in Paris?"}))
         .await;
     assert_eq!(status, 200);
 
@@ -4166,9 +4193,9 @@ async fn a_hook_fires_on_both_sides_of_a_tool_call_and_says_what_it_sent() {
     assert!(after["result"]["latencyMs"].is_number());
 }
 
-/// A chat profile that reaches a server. It says nothing about capturing —
+/// A chat model that reaches a server. It says nothing about capturing —
 /// that is the server's to declare.
-fn capturing_profile(url: &str) -> String {
+fn capturing_model(url: &str) -> String {
     format!(
         r#"
 name: chat
@@ -4216,25 +4243,25 @@ async fn a_hook_url_is_addressed_with_what_the_tool_call_captured() {
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
+            "mcp/weather.yaml",
             format!(
-                "servers:\n  - name: weather\n    url: {}/mcp\n    capture:\n      - tools: \
-                 [get_weather]\n        vars:\n          session: [$.sessionId]\n    hooks:\n      \
-                 - name: audit\n        on:\n          - after\n        actions:\n          \
-                 - http:\n              url: {}/sessions/{{{{ vars.session }}}}/audit\n",
+                "name: weather\nurl: {}/mcp\ncapture:\n  - tools: \
+                 [get_weather]\n    vars:\n      session: [$.sessionId]\nhooks:\n  \
+                 - name: audit\n    on:\n      - after\n    actions:\n      \
+                 - http:\n          url: {}/sessions/{{{{ vars.session }}}}/audit\n",
                 mcp.uri(),
                 hook.uri()
             ),
         ),
         (
-            "chat.yaml",
-            capturing_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            capturing_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (status, events) = harness
-        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .agent(json!({"model": "chat", "prompt": "weather in Paris?"}))
         .await;
     assert_eq!(status, 200);
 
@@ -4265,9 +4292,9 @@ async fn a_hook_url_is_addressed_with_what_the_tool_call_captured() {
     assert_eq!(sent[0].url.path(), "/sessions/abc-123/audit");
 }
 
-/// A second chat profile pointed at its own endpoint, capturing nothing of its
-/// own — like every profile now.
-fn plain_chat_profile(name: &str, url: &str) -> String {
+/// A second chat model pointed at its own endpoint, capturing nothing of its
+/// own — like every model now.
+fn plain_chat_model(name: &str, url: &str) -> String {
     format!(
         r#"
 name: {name}
@@ -4293,7 +4320,7 @@ agent:
 /// once, and comparing two models is not comparing two copies of it that have
 /// to stay identical by hand.
 #[tokio::test]
-async fn two_profiles_reaching_one_server_both_capture_what_it_declares() {
+async fn two_models_reaching_one_server_both_capture_what_it_declares() {
     let answer = json!({
         "resultType": "complete",
         "content": [{"type": "text", "text": "{\"sessionId\": \"abc-123\", \"temp\": 21}"}],
@@ -4310,48 +4337,54 @@ async fn two_profiles_reaching_one_server_both_capture_what_it_declares() {
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
+            "mcp/weather.yaml",
             format!(
-                "servers:\n  - name: weather\n    url: {}/mcp\n    capture:\n      - tools: \
-                 [get_weather]\n        vars:\n          session: [$.sessionId]\n",
+                "name: weather\nurl: {}/mcp\ncapture:\n  - tools: \
+                 [get_weather]\n    vars:\n      session: [$.sessionId]\n",
                 mcp.uri()
             ),
         ),
         (
-            "one.yaml",
-            plain_chat_profile("one", &format!("{}/v1/chat/completions", first.uri())),
+            "models/one.yaml",
+            plain_chat_model("one", &format!("{}/v1/chat/completions", first.uri())),
         ),
         (
-            "two.yaml",
-            plain_chat_profile("two", &format!("{}/v1/chat/completions", second.uri())),
+            "models/two.yaml",
+            plain_chat_model("two", &format!("{}/v1/chat/completions", second.uri())),
         ),
     ])
     .await;
 
-    for profile in ["one", "two"] {
+    for model in ["one", "two"] {
         let (status, events) = harness
-            .agent(json!({"profile": profile, "prompt": "weather in Paris?"}))
+            .agent(json!({"model": model, "prompt": "weather in Paris?"}))
             .await;
-        assert_eq!(status, 200, "{profile}: {events:?}");
+        assert_eq!(status, 200, "{model}: {events:?}");
 
         let turn = &events.iter().find(|(name, _)| name == "turn").unwrap().1;
         assert_eq!(
             turn["tools"][0]["captured"]["session"], "abc-123",
-            "{profile} captured nothing: {turn:#?}"
+            "{model} captured nothing: {turn:#?}"
         );
     }
 }
 
 /// A rule naming a variable no template could write is refused where it was
-/// written, with the rest of `mcp.yaml` still loading around it.
+/// written, with the rest of `mcp/` still loading around it.
 #[tokio::test]
 async fn a_broken_capture_rule_is_reported_with_the_server_that_declared_it() {
-    let harness = Harness::start(&[(
-        "mcp.yaml",
-        "servers:\n  - name: broken\n    url: https://mcp.internal/mcp\n    capture:\n      \
-         - vars:\n          'my id': [$.id]\n  - name: fine\n    url: https://other.internal/mcp\n"
-            .to_owned(),
-    )])
+    let harness = Harness::start(&[
+        (
+            "mcp/broken.yaml",
+            "name: broken\nurl: https://mcp.internal/mcp\ncapture:\n  \
+             - vars:\n      'my id': [$.id]\n"
+                .to_owned(),
+        ),
+        (
+            "mcp/fine.yaml",
+            "name: fine\nurl: https://other.internal/mcp\n".to_owned(),
+        ),
+    ])
     .await;
 
     let body = harness.get("/api/mcp").await;
@@ -4362,14 +4395,14 @@ async fn a_broken_capture_rule_is_reported_with_the_server_that_declared_it() {
         issues[0]["file"]
             .as_str()
             .expect("the file")
-            .ends_with("mcp.yaml"),
+            .ends_with("broken.yaml"),
         "{issues:#?}"
     );
     let message = issues[0]["message"].as_str().expect("the reason");
     assert!(message.contains("my id"), "{message}");
     assert!(message.contains("broken"), "{message}");
     // The sentence, without validator's `__all__:` in front of it — that is the
-    // internal name for "not about one field", and nobody wrote it in mcp.yaml.
+    // internal name for "not about one field", and nobody wrote it in the file.
     assert!(!message.contains("__all__"), "{message}");
 
     // Only that server was dropped.
@@ -4385,9 +4418,9 @@ async fn a_broken_capture_rule_is_reported_with_the_server_that_declared_it() {
 #[tokio::test]
 async fn a_server_lists_what_it_captures_without_listing_a_single_value() {
     let harness = Harness::start(&[(
-        "mcp.yaml",
-        "servers:\n  - name: weather\n    url: https://mcp.internal/mcp\n    capture:\n      \
-         - tools: [get_weather]\n        vars:\n          session: [$.sessionId, $.session.id]\n"
+        "mcp/weather.yaml",
+        "name: weather\nurl: https://mcp.internal/mcp\ncapture:\n  \
+         - tools: [get_weather]\n    vars:\n      session: [$.sessionId, $.session.id]\n"
             .to_owned(),
     )])
     .await;
@@ -4420,25 +4453,25 @@ async fn a_hook_url_naming_a_variable_nobody_captured_fails_the_call_rather_than
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
+            "mcp/weather.yaml",
             format!(
-                "servers:\n  - name: weather\n    url: {}/mcp\n    capture:\n      - tools: \
-                 [get_weather]\n        vars:\n          session: [$.sessionId]\n    hooks:\n      \
-                 - name: audit\n        on:\n          - after\n        actions:\n          \
-                 - http:\n              url: {}/sessions/{{{{ vars.session }}}}/audit\n",
+                "name: weather\nurl: {}/mcp\ncapture:\n  - tools: \
+                 [get_weather]\n    vars:\n      session: [$.sessionId]\nhooks:\n  \
+                 - name: audit\n    on:\n      - after\n    actions:\n      \
+                 - http:\n          url: {}/sessions/{{{{ vars.session }}}}/audit\n",
                 mcp.uri(),
                 hook.uri()
             ),
         ),
         (
-            "chat.yaml",
-            capturing_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            capturing_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (status, events) = harness
-        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .agent(json!({"model": "chat", "prompt": "weather in Paris?"}))
         .await;
     assert_eq!(status, 200);
 
@@ -4480,26 +4513,26 @@ async fn a_hook_header_carries_what_the_tool_call_captured() {
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
+            "mcp/weather.yaml",
             format!(
-                "servers:\n  - name: weather\n    url: {}/mcp\n    capture:\n      - tools: \
-                 [get_weather]\n        vars:\n          session: [$.sessionId]\n    hooks:\n      \
-                 - name: audit\n        on:\n          - after\n        actions:\n          \
-                 - http:\n              url: {}/hook\n              headers:\n                \
+                "name: weather\nurl: {}/mcp\ncapture:\n  - tools: \
+                 [get_weather]\n    vars:\n      session: [$.sessionId]\nhooks:\n  \
+                 - name: audit\n    on:\n      - after\n    actions:\n      \
+                 - http:\n          url: {}/hook\n          headers:\n            \
                  x-session: '{{{{ vars.session }}}}'\n",
                 mcp.uri(),
                 hook.uri()
             ),
         ),
         (
-            "chat.yaml",
-            capturing_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            capturing_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (status, events) = harness
-        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .agent(json!({"model": "chat", "prompt": "weather in Paris?"}))
         .await;
     assert_eq!(status, 200);
 
@@ -4571,23 +4604,23 @@ async fn a_server_header_picks_up_a_session_a_tool_opened_on_an_earlier_turn() {
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
+            "mcp/weather.yaml",
             format!(
-                "servers:\n  - name: weather\n    url: {}/mcp\n    capture:\n      - tools: \
-                 [get_weather]\n        vars:\n          session: [$.sessionId]\n    headers:\n      \
+                "name: weather\nurl: {}/mcp\ncapture:\n  - tools: \
+                 [get_weather]\n    vars:\n      session: [$.sessionId]\nheaders:\n  \
                  x-session: \"{{{{ vars.session | default('') }}}}\"\n",
                 mcp.uri()
             ),
         ),
         (
-            "chat.yaml",
-            capturing_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            capturing_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (status, _) = harness
-        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .agent(json!({"model": "chat", "prompt": "weather in Paris?"}))
         .await;
     assert_eq!(status, 200);
 
@@ -4648,26 +4681,26 @@ async fn a_hook_sits_out_the_calls_its_condition_refuses_then_fires_once_it_hold
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
+            "mcp/weather.yaml",
             format!(
-                "servers:\n  - name: weather\n    url: {}/mcp\n    capture:\n      - tools: \
-                 [get_weather]\n        vars:\n          session: [$.sessionId]\n    hooks:\n      \
-                 - name: audit\n        on:\n          - after\n        if: '{{{{ vars.session is \
-                 defined }}}}'\n        actions:\n          - http:\n              \
+                "name: weather\nurl: {}/mcp\ncapture:\n  - tools: \
+                 [get_weather]\n    vars:\n      session: [$.sessionId]\nhooks:\n  \
+                 - name: audit\n    on:\n      - after\n    if: '{{{{ vars.session is \
+                 defined }}}}'\n    actions:\n      - http:\n          \
                  url: {}/sessions/{{{{ vars.session }}}}/audit\n",
                 mcp.uri(),
                 hook.uri()
             ),
         ),
         (
-            "chat.yaml",
-            capturing_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            capturing_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (status, events) = harness
-        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .agent(json!({"model": "chat", "prompt": "weather in Paris?"}))
         .await;
     assert_eq!(status, 200);
 
@@ -4721,18 +4754,18 @@ async fn a_before_hook_that_says_no_stops_the_call_from_happening_at_all() {
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
+            "mcp/weather.yaml",
             mcp_with_hook(&mcp, &hook.uri(), &["before"], "", ""),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (status, events) = harness
-        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .agent(json!({"model": "chat", "prompt": "weather in Paris?"}))
         .await;
     assert_eq!(status, 200);
 
@@ -4781,24 +4814,24 @@ async fn a_hook_told_to_step_aside_records_its_failure_and_lets_the_tool_answer(
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
+            "mcp/weather.yaml",
             mcp_with_hook(
                 &mcp,
                 &hook.uri(),
                 &["before"],
-                "        on_error: continue\n",
+                "    on_error: continue\n",
                 "",
             ),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (status, events) = harness
-        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .agent(json!({"model": "chat", "prompt": "weather in Paris?"}))
         .await;
     assert_eq!(status, 200);
 
@@ -4834,30 +4867,29 @@ async fn a_hook_authenticates_with_the_registry_and_never_echoes_the_credential(
 
     let harness = Harness::start(&[
         (
-            "auth.yaml",
-            "providers:\n  - name: workload\n    kind: token\n    value:\n      env: PATH\n"
-                .to_owned(),
+            "auth/workload.yaml",
+            "name: workload\nkind: token\nvalue:\n  env: PATH\n".to_owned(),
         ),
         (
-            "mcp.yaml",
+            "mcp/weather.yaml",
             mcp_with_hook(
                 &mcp,
                 &hook.uri(),
                 &["before"],
                 "",
-                "              auth: workload\n              headers:\n                \
+                "          auth: workload\n          headers:\n            \
                  x-api-key: 'k-{{ auth[\"workload\"] }}'\n",
             ),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (status, events) = harness
-        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .agent(json!({"model": "chat", "prompt": "weather in Paris?"}))
         .await;
     assert_eq!(status, 200);
 
@@ -4895,25 +4927,25 @@ async fn a_hook_sends_the_json_document_the_file_wrote() {
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
+            "mcp/weather.yaml",
             mcp_with_hook(
                 &mcp,
                 &hook.uri(),
                 &["before"],
                 "",
-                "              json:\n                text: '{{ tool }} wants {{ arguments.city }}'\n                \
-                 arguments: '{{ arguments }}'\n                attempt: 1\n",
+                "          json:\n            text: '{{ tool }} wants {{ arguments.city }}'\n            \
+                 arguments: '{{ arguments }}'\n            attempt: 1\n",
             ),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (status, _) = harness
-        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .agent(json!({"model": "chat", "prompt": "weather in Paris?"}))
         .await;
     assert_eq!(status, 200);
 
@@ -4947,18 +4979,18 @@ async fn a_hook_sends_the_uploads_a_field_names_as_multipart_parts() {
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
+            "mcp/weather.yaml",
             mcp_with_hook(
                 &mcp,
                 &hook.uri(),
                 &["before"],
                 "",
-                "              multipart:\n                file: notes.txt\n",
+                "          multipart:\n            file: notes.txt\n",
             ),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
@@ -4970,7 +5002,7 @@ async fn a_hook_sends_the_uploads_a_field_names_as_multipart_parts() {
 
     let (status, events) = harness
         .agent(json!({
-            "profile": "chat",
+            "model": "chat",
             "prompt": "weather in Paris?",
             "uploads": [
                 attached["id"].as_str().expect("id"),
@@ -5037,24 +5069,24 @@ async fn a_multipart_field_that_names_no_upload_fails_the_hook() {
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
+            "mcp/weather.yaml",
             mcp_with_hook(
                 &mcp,
                 &hook.uri(),
                 &["before"],
-                "        on_error: continue\n",
-                "              multipart:\n                file: '{{ uploads }}'\n",
+                "    on_error: continue\n",
+                "          multipart:\n            file: '{{ uploads }}'\n",
             ),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (status, events) = harness
-        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .agent(json!({"model": "chat", "prompt": "weather in Paris?"}))
         .await;
     assert_eq!(status, 200);
 
@@ -5094,24 +5126,24 @@ async fn a_tool_pattern_covers_what_it_matches_and_not_what_it_merely_contains()
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
+            "mcp/weather.yaml",
             mcp_with_hook(
                 &mcp,
                 &hook.uri(),
                 &["before"],
-                "        tools:\n          - get_.*\n          - weather\n",
+                "    tools:\n      - get_.*\n      - weather\n",
                 "",
             ),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (status, events) = harness
-        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .agent(json!({"model": "chat", "prompt": "weather in Paris?"}))
         .await;
     assert_eq!(status, 200);
 
@@ -5137,24 +5169,24 @@ async fn a_hook_scoped_to_one_tool_leaves_the_others_alone() {
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
+            "mcp/weather.yaml",
             mcp_with_hook(
                 &mcp,
                 &hook.uri(),
                 &["before", "after"],
-                "        tools:\n          - delete_everything\n",
+                "    tools:\n      - delete_everything\n",
                 "",
             ),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (status, events) = harness
-        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .agent(json!({"model": "chat", "prompt": "weather in Paris?"}))
         .await;
     assert_eq!(status, 200);
 
@@ -5201,18 +5233,18 @@ async fn a_server_that_answers_a_stream_is_read_the_same_way() {
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
-            format!("servers:\n  - name: weather\n    url: {}/mcp\n", mcp.uri()),
+            "mcp/weather.yaml",
+            format!("name: weather\nurl: {}/mcp\n", mcp.uri()),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (_, events) = harness
-        .agent(json!({"profile": "chat", "prompt": "go"}))
+        .agent(json!({"model": "chat", "prompt": "go"}))
         .await;
     let turn = events.iter().find(|(name, _)| name == "turn").unwrap();
     assert_eq!(turn.1["tools"][0]["result"], "streamed 21");
@@ -5234,18 +5266,18 @@ async fn a_tool_that_reports_a_problem_is_a_result_the_model_gets_to_see() {
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
-            format!("servers:\n  - name: weather\n    url: {}/mcp\n", mcp.uri()),
+            "mcp/weather.yaml",
+            format!("name: weather\nurl: {}/mcp\n", mcp.uri()),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (status, events) = harness
-        .agent(json!({"profile": "chat", "prompt": "go"}))
+        .agent(json!({"model": "chat", "prompt": "go"}))
         .await;
 
     assert_eq!(status, 200, "a failing tool is not a failing run");
@@ -5275,18 +5307,18 @@ async fn a_tool_call_the_server_refused_reports_the_status_it_was_refused_with()
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
-            format!("servers:\n  - name: weather\n    url: {}/mcp\n", mcp.uri()),
+            "mcp/weather.yaml",
+            format!("name: weather\nurl: {}/mcp\n", mcp.uri()),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (status, events) = harness
-        .agent(json!({"profile": "chat", "prompt": "go"}))
+        .agent(json!({"model": "chat", "prompt": "go"}))
         .await;
     assert_eq!(status, 200);
 
@@ -5318,18 +5350,18 @@ async fn a_server_asking_for_interactive_input_says_so_instead_of_answering_noth
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
-            format!("servers:\n  - name: weather\n    url: {}/mcp\n", mcp.uri()),
+            "mcp/weather.yaml",
+            format!("name: weather\nurl: {}/mcp\n", mcp.uri()),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (_, events) = harness
-        .agent(json!({"profile": "chat", "prompt": "go"}))
+        .agent(json!({"model": "chat", "prompt": "go"}))
         .await;
 
     let tool = &events.iter().find(|(n, _)| n == "turn").unwrap().1["tools"][0];
@@ -5344,22 +5376,22 @@ async fn a_simulated_tool_shadows_a_live_one_of_the_same_name() {
     let endpoint = MockServer::start().await;
     model_using_a_tool(&endpoint).await;
 
-    let profile = format!(
+    let model = format!(
         "{}tools:\n  - name: get_weather\n    schema:\n      type: object\n    response: 'stubbed'\n",
-        mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri()))
+        mcp_model(&format!("{}/v1/chat/completions", endpoint.uri()))
     );
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
-            format!("servers:\n  - name: weather\n    url: {}/mcp\n", mcp.uri()),
+            "mcp/weather.yaml",
+            format!("name: weather\nurl: {}/mcp\n", mcp.uri()),
         ),
-        ("chat.yaml", profile),
+        ("models/chat.yaml", model),
     ])
     .await;
 
     let (_, events) = harness
-        .agent(json!({"profile": "chat", "prompt": "go"}))
+        .agent(json!({"model": "chat", "prompt": "go"}))
         .await;
 
     let turn = &events.iter().find(|(n, _)| n == "turn").unwrap().1;
@@ -5398,26 +5430,23 @@ async fn an_unreachable_server_fails_the_run_before_a_prompt_is_spent() {
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
-            "servers:\n  - name: weather\n    url: http://127.0.0.1:1/mcp\n    timeout_ms: 500\n"
-                .to_owned(),
+            "mcp/weather.yaml",
+            "name: weather\nurl: http://127.0.0.1:1/mcp\ntimeout_ms: 500\n".to_owned(),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     // A plain call does not need the MCP server at all.
-    let (status, _, _) = harness
-        .call(json!({"profile": "chat", "prompt": "go"}))
-        .await;
+    let (status, _, _) = harness.call(json!({"model": "chat", "prompt": "go"})).await;
     assert_eq!(status, 200);
     let before = endpoint.received_requests().await.unwrap().len();
 
     let (_, events) = harness
-        .agent(json!({"profile": "chat", "prompt": "go"}))
+        .agent(json!({"model": "chat", "prompt": "go"}))
         .await;
 
     // Reachability is a runtime matter, so it arrives as a `failed` event — but
@@ -5435,9 +5464,9 @@ async fn an_unreachable_server_fails_the_run_before_a_prompt_is_spent() {
 async fn the_api_lists_servers_and_asks_one_what_it_offers() {
     let mcp = mcp_server(weather_tool(), vec![]).await;
     let harness = Harness::start(&[(
-        "mcp.yaml",
+        "mcp/weather.yaml",
         format!(
-            "servers:\n  - name: weather\n    url: {}/mcp\n    tools:\n      - get_weather\n",
+            "name: weather\nurl: {}/mcp\ntools:\n  - get_weather\n",
             mcp.uri()
         ),
     )])
@@ -5547,8 +5576,8 @@ async fn an_older_server_is_reached_by_falling_back_to_the_handshake() {
     // handed, `initialize` is the older revisions' own negotiation.
     let mcp = legacy_mcp_server("2025-06-18").await;
     let harness = Harness::start(&[(
-        "mcp.yaml",
-        format!("servers:\n  - name: files\n    url: {}/mcp\n", mcp.uri()),
+        "mcp/files.yaml",
+        format!("name: files\nurl: {}/mcp\n", mcp.uri()),
     )])
     .await;
 
@@ -5591,8 +5620,8 @@ async fn a_server_on_the_last_handshaking_revision_is_reached_without_a_downgrad
     // reached on the first try rather than refused for sharing nothing.
     let mcp = legacy_mcp_server("2025-11-25").await;
     let harness = Harness::start(&[(
-        "mcp.yaml",
-        format!("servers:\n  - name: files\n    url: {}/mcp\n", mcp.uri()),
+        "mcp/files.yaml",
+        format!("name: files\nurl: {}/mcp\n", mcp.uri()),
     )])
     .await;
 
@@ -5631,8 +5660,8 @@ async fn a_server_on_the_last_handshaking_revision_is_reached_without_a_downgrad
 async fn the_oldest_revision_is_not_sent_a_header_it_predates() {
     let mcp = legacy_mcp_server("2025-03-26").await;
     let harness = Harness::start(&[(
-        "mcp.yaml",
-        format!("servers:\n  - name: files\n    url: {}/mcp\n", mcp.uri()),
+        "mcp/files.yaml",
+        format!("name: files\nurl: {}/mcp\n", mcp.uri()),
     )])
     .await;
 
@@ -5666,8 +5695,8 @@ async fn a_server_sharing_no_revision_says_which_rather_than_answering_400() {
         .await;
 
     let harness = Harness::start(&[(
-        "mcp.yaml",
-        format!("servers:\n  - name: files\n    url: {}/mcp\n", mcp.uri()),
+        "mcp/files.yaml",
+        format!("name: files\nurl: {}/mcp\n", mcp.uri()),
     )])
     .await;
 
@@ -5683,9 +5712,9 @@ async fn a_server_sharing_no_revision_says_which_rather_than_answering_400() {
 async fn a_pinned_revision_is_used_without_asking_anybody() {
     let mcp = mcp_server(weather_tool(), vec![]).await;
     let harness = Harness::start(&[(
-        "mcp.yaml",
+        "mcp/files.yaml",
         format!(
-            "servers:\n  - name: files\n    url: {}/mcp\n    protocol_version: 2026-07-28\n",
+            "name: files\nurl: {}/mcp\nprotocol_version: 2026-07-28\n",
             mcp.uri()
         ),
     )])
@@ -5719,22 +5748,22 @@ async fn a_run_can_state_its_revision_and_it_beats_both_the_file_and_the_probe()
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
+            "mcp/weather.yaml",
             format!(
-                "servers:\n  - name: weather\n    url: {}/mcp\n    protocol_version: 2026-07-28\n",
+                "name: weather\nurl: {}/mcp\nprotocol_version: 2026-07-28\n",
                 mcp.uri()
             ),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (status, events) = harness
         .agent(json!({
-            "profile": "chat",
+            "model": "chat",
             "prompt": "weather in Paris?",
             "mcpProtocol": "2025-06-18",
         }))
@@ -5796,18 +5825,18 @@ async fn a_revision_chosen_for_one_run_is_not_chosen_for_the_next() {
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
-            format!("servers:\n  - name: weather\n    url: {}/mcp\n", mcp.uri()),
+            "mcp/weather.yaml",
+            format!("name: weather\nurl: {}/mcp\n", mcp.uri()),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (status, _) = harness
-        .agent(json!({"profile": "chat", "prompt": "go", "mcpProtocol": "2025-06-18"}))
+        .agent(json!({"model": "chat", "prompt": "go", "mcpProtocol": "2025-06-18"}))
         .await;
     assert_eq!(status, 200);
 
@@ -5824,18 +5853,18 @@ async fn a_revision_this_build_never_heard_of_is_refused_before_anything_is_sent
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
-            format!("servers:\n  - name: weather\n    url: {}/mcp\n", mcp.uri()),
+            "mcp/weather.yaml",
+            format!("name: weather\nurl: {}/mcp\n", mcp.uri()),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (status, events) = harness
-        .agent(json!({"profile": "chat", "prompt": "go", "mcpProtocol": "1999-01-01"}))
+        .agent(json!({"model": "chat", "prompt": "go", "mcpProtocol": "1999-01-01"}))
         .await;
 
     assert_eq!(status, 422);
@@ -5864,8 +5893,8 @@ async fn a_server_that_answers_no_probe_at_all_still_gets_its_listing() {
         .await;
 
     let harness = Harness::start(&[(
-        "mcp.yaml",
-        format!("servers:\n  - name: files\n    url: {}/mcp\n", mcp.uri()),
+        "mcp/files.yaml",
+        format!("name: files\nurl: {}/mcp\n", mcp.uri()),
     )])
     .await;
 
@@ -5888,18 +5917,18 @@ async fn a_tool_call_on_an_older_revision_carries_the_session_and_mirrors_nothin
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
-            format!("servers:\n  - name: weather\n    url: {}/mcp\n", mcp.uri()),
+            "mcp/weather.yaml",
+            format!("name: weather\nurl: {}/mcp\n", mcp.uri()),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (status, events) = harness
-        .agent(json!({"profile": "chat", "prompt": "weather in Paris?"}))
+        .agent(json!({"model": "chat", "prompt": "weather in Paris?"}))
         .await;
     assert_eq!(status, 200);
 
@@ -5997,8 +6026,8 @@ async fn a_session_the_server_has_forgotten_is_re_established_and_the_call_repla
         .await;
 
     let harness = Harness::start(&[(
-        "mcp.yaml",
-        format!("servers:\n  - name: files\n    url: {}/mcp\n", mcp.uri()),
+        "mcp/files.yaml",
+        format!("name: files\nurl: {}/mcp\n", mcp.uri()),
     )])
     .await;
 
@@ -6023,8 +6052,8 @@ async fn a_session_the_server_has_forgotten_is_re_established_and_the_call_repla
 #[tokio::test]
 async fn an_unknown_pinned_revision_is_a_load_issue_naming_what_we_speak() {
     let harness = Harness::start(&[(
-        "mcp.yaml",
-        "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    \
+        "mcp/files.yaml",
+        "name: files\nurl: https://mcp.internal/mcp\n\
          protocol_version: 1999-01-01\n"
             .to_owned(),
     )])
@@ -6055,11 +6084,8 @@ async fn a_gateway_answering_instead_of_the_server_says_so_with_its_status_and_b
         .await;
 
     let harness = Harness::start(&[(
-        "mcp.yaml",
-        format!(
-            "servers:\n  - name: weather\n    url: {}/mcp\n",
-            front.uri()
-        ),
+        "mcp/weather.yaml",
+        format!("name: weather\nurl: {}/mcp\n", front.uri()),
     )])
     .await;
 
@@ -6086,17 +6112,17 @@ async fn templated_headers_reach_the_mcp_server_and_never_come_back_out() {
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
+            "mcp/weather.yaml",
             format!(
-                "servers:\n  - name: weather\n    url: {}/mcp\n    headers:\n      \
-                 x-api-key: 'k-{{{{ env.PATH }}}}'\n      \
+                "name: weather\nurl: {}/mcp\nheaders:\n  \
+                 x-api-key: 'k-{{{{ env.PATH }}}}'\n  \
                  x-tenant: '{{{{ env.MIRE_TENANT_UNSET | default(\"dev\") }}}}'\n",
                 mcp.uri()
             ),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
@@ -6107,7 +6133,7 @@ async fn templated_headers_reach_the_mcp_server_and_never_come_back_out() {
     assert!(!listing.contains(&secret), "a value must never be listed");
 
     let (_, events) = harness
-        .agent(json!({"profile": "chat", "prompt": "go"}))
+        .agent(json!({"model": "chat", "prompt": "go"}))
         .await;
 
     let call = mcp
@@ -6139,22 +6165,22 @@ async fn a_header_whose_variable_is_missing_fails_loudly_rather_than_sending_an_
 
     let harness = Harness::start(&[
         (
-            "mcp.yaml",
+            "mcp/weather.yaml",
             format!(
-                "servers:\n  - name: weather\n    url: {}/mcp\n    headers:\n      \
+                "name: weather\nurl: {}/mcp\nheaders:\n  \
                  authorization: 'Bearer {{{{ env.MIRE_TOKEN_THAT_IS_NOT_SET }}}}'\n",
                 mcp.uri()
             ),
         ),
         (
-            "chat.yaml",
-            mcp_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
         ),
     ])
     .await;
 
     let (_, events) = harness
-        .agent(json!({"profile": "chat", "prompt": "go"}))
+        .agent(json!({"model": "chat", "prompt": "go"}))
         .await;
 
     let failed = events
@@ -6174,8 +6200,8 @@ async fn a_header_whose_variable_is_missing_fails_loudly_rather_than_sending_an_
 #[tokio::test]
 async fn a_broken_header_template_is_a_load_issue_rather_than_a_surprise_later() {
     let harness = Harness::start(&[(
-        "mcp.yaml",
-        "servers:\n  - name: weather\n    url: https://mcp.internal/mcp\n    headers:\n      \
+        "mcp/weather.yaml",
+        "name: weather\nurl: https://mcp.internal/mcp\nheaders:\n  \
          authorization: '{{ unclosed'\n"
             .to_owned(),
     )])
@@ -6192,11 +6218,11 @@ async fn a_broken_header_template_is_a_load_issue_rather_than_a_surprise_later()
 // Streaming
 // ---------------------------------------------------------------------------
 
-/// A profile that asks to stream and knows where the text sits in a chunk.
+/// A model that asks to stream and knows where the text sits in a chunk.
 ///
 /// `"stream": {{ stream }}` is the load-bearing line: nothing `mire` does makes
 /// an endpoint chunk its answer, so the template has to pass the flag on.
-fn streaming_profile(url: &str) -> String {
+fn streaming_model(url: &str) -> String {
     format!(
         r#"
 name: chat
@@ -6244,13 +6270,13 @@ async fn a_streamed_call_arrives_in_pieces_and_adds_up_to_the_answer() {
         .await;
 
     let harness = Harness::start(&[(
-        "chat.yaml",
-        streaming_profile(&format!("{}/v1/chat/completions", endpoint.uri())),
+        "models/chat.yaml",
+        streaming_model(&format!("{}/v1/chat/completions", endpoint.uri())),
     )])
     .await;
 
     let (status, events) = harness
-        .stream(json!({"profile": "chat", "prompt": "hi"}))
+        .stream(json!({"model": "chat", "prompt": "hi"}))
         .await;
     assert_eq!(status, 200);
 
@@ -6288,10 +6314,10 @@ async fn a_stream_refused_before_it_started_still_reports_why() {
         .mount(&endpoint)
         .await;
 
-    let harness = Harness::start(&[("chat.yaml", streaming_profile(&endpoint.uri()))]).await;
+    let harness = Harness::start(&[("models/chat.yaml", streaming_model(&endpoint.uri()))]).await;
 
     let (status, events) = harness
-        .stream(json!({"profile": "chat", "prompt": "hi"}))
+        .stream(json!({"model": "chat", "prompt": "hi"}))
         .await;
 
     assert_eq!(status, 200);
@@ -6322,10 +6348,10 @@ async fn time_to_first_token_is_measured_from_the_first_chunk_that_had_one() {
         .mount(&endpoint)
         .await;
 
-    let harness = Harness::start(&[("chat.yaml", streaming_profile(&endpoint.uri()))]).await;
+    let harness = Harness::start(&[("models/chat.yaml", streaming_model(&endpoint.uri()))]).await;
 
     let (_, events) = harness
-        .stream(json!({"profile": "chat", "prompt": "hi"}))
+        .stream(json!({"model": "chat", "prompt": "hi"}))
         .await;
     let http = &events.last().expect("done").1["response"]["http"];
 
@@ -6356,10 +6382,10 @@ async fn an_ndjson_stream_is_read_without_being_told() {
         .mount(&endpoint)
         .await;
 
-    let harness = Harness::start(&[("chat.yaml", streaming_profile(&endpoint.uri()))]).await;
+    let harness = Harness::start(&[("models/chat.yaml", streaming_model(&endpoint.uri()))]).await;
 
     let (_, events) = harness
-        .stream(json!({"profile": "chat", "prompt": "hi"}))
+        .stream(json!({"model": "chat", "prompt": "hi"}))
         .await;
 
     let done = &events.last().expect("done").1;
@@ -6383,10 +6409,10 @@ async fn a_stream_that_simply_stops_is_reported_as_unterminated() {
         .mount(&endpoint)
         .await;
 
-    let harness = Harness::start(&[("chat.yaml", streaming_profile(&endpoint.uri()))]).await;
+    let harness = Harness::start(&[("models/chat.yaml", streaming_model(&endpoint.uri()))]).await;
 
     let (_, events) = harness
-        .stream(json!({"profile": "chat", "prompt": "hi"}))
+        .stream(json!({"model": "chat", "prompt": "hi"}))
         .await;
 
     let response = &events.last().expect("done").1["response"];
@@ -6407,10 +6433,10 @@ async fn a_frame_that_is_not_json_is_counted_rather_than_swallowed() {
         .mount(&endpoint)
         .await;
 
-    let harness = Harness::start(&[("chat.yaml", streaming_profile(&endpoint.uri()))]).await;
+    let harness = Harness::start(&[("models/chat.yaml", streaming_model(&endpoint.uri()))]).await;
 
     let (_, events) = harness
-        .stream(json!({"profile": "chat", "prompt": "hi"}))
+        .stream(json!({"model": "chat", "prompt": "hi"}))
         .await;
 
     let response = &events.last().expect("done").1["response"];
@@ -6428,10 +6454,10 @@ async fn a_rejected_streamed_call_says_so_in_its_first_event() {
         .mount(&endpoint)
         .await;
 
-    let harness = Harness::start(&[("chat.yaml", streaming_profile(&endpoint.uri()))]).await;
+    let harness = Harness::start(&[("models/chat.yaml", streaming_model(&endpoint.uri()))]).await;
 
     let (status, events) = harness
-        .stream(json!({"profile": "chat", "prompt": "hi"}))
+        .stream(json!({"model": "chat", "prompt": "hi"}))
         .await;
 
     // A 401 from the endpoint under test is a successful call, streamed or not.
@@ -6458,11 +6484,8 @@ async fn a_credential_never_appears_in_a_delta() {
         .await;
 
     let harness = Harness::start(&[
-        (
-            "auth.yaml",
-            "providers:\n  - name: typed\n    kind: token\n".to_owned(),
-        ),
-        ("chat.yaml", streaming_profile(&endpoint.uri())),
+        ("auth/typed.yaml", "name: typed\nkind: token\n".to_owned()),
+        ("models/chat.yaml", streaming_model(&endpoint.uri())),
     ])
     .await;
 
@@ -6471,7 +6494,7 @@ async fn a_credential_never_appears_in_a_delta() {
             .client
             .post(format!("{}/api/call/stream", harness.base))
             .json(&json!({
-                "profile": "chat",
+                "model": "chat",
                 "auth": "typed",
                 "token": "hunter2",
                 "prompt": "hi",
@@ -6493,11 +6516,11 @@ async fn a_credential_never_appears_in_a_delta() {
 async fn streaming_something_that_cannot_stream_is_refused_before_anything_is_sent() {
     let harness = Harness::start(&[
         (
-            "chat.yaml",
-            streaming_profile("https://models.internal/v1/chat/completions"),
+            "models/chat.yaml",
+            streaming_model("https://models.internal/v1/chat/completions"),
         ),
         (
-            "embed.yaml",
+            "models/embed.yaml",
             r#"
 name: embed
 kind: embedding
@@ -6515,17 +6538,17 @@ request:
     let (status, body) = harness
         .post(
             "/api/call/stream",
-            json!({"profile": "embed", "input": ["x"]}),
+            json!({"model": "embed", "input": ["x"]}),
         )
         .await;
     assert_eq!(status, 422);
-    assert_eq!(body["code"], "not_a_chat_profile");
+    assert_eq!(body["code"], "not_a_chat_model");
 
     let (status, body) = harness
-        .post("/api/call/stream", json!({"profile": "nope"}))
+        .post("/api/call/stream", json!({"model": "nope"}))
         .await;
     assert_eq!(status, 404);
-    assert_eq!(body["code"], "unknown_profile");
+    assert_eq!(body["code"], "unknown_model");
 }
 
 /// A token file outside the watched directory, so writing it does not trip the
@@ -6558,16 +6581,16 @@ async fn an_mcp_server_can_take_its_token_from_the_auth_registry() {
 
     let harness = Harness::start(&[
         (
-            "auth.yaml",
+            "auth/workload.yaml",
             format!(
-                "providers:\n  - name: workload\n    kind: token\n    value:\n      file: {}\n",
+                "name: workload\nkind: token\nvalue:\n  file: {}\n",
                 secret.display()
             ),
         ),
         (
-            "mcp.yaml",
+            "mcp/files.yaml",
             format!(
-                "servers:\n  - name: files\n    url: {}/mcp\n    headers:\n      \
+                "name: files\nurl: {}/mcp\nheaders:\n  \
                  x-api-key: 'key-{{{{ auth[\"workload\"] }}}}'\n",
                 mcp.uri()
             ),
@@ -6605,16 +6628,16 @@ async fn a_rotated_token_reaches_the_next_mcp_call_without_a_restart() {
 
     let harness = Harness::start(&[
         (
-            "auth.yaml",
+            "auth/workload.yaml",
             format!(
-                "providers:\n  - name: workload\n    kind: token\n    value:\n      file: {}\n",
+                "name: workload\nkind: token\nvalue:\n  file: {}\n",
                 secret.display()
             ),
         ),
         (
-            "mcp.yaml",
+            "mcp/files.yaml",
             format!(
-                "servers:\n  - name: files\n    url: {}/mcp\n    headers:\n      \
+                "name: files\nurl: {}/mcp\nheaders:\n  \
                  x-api-key: '{{{{ auth[\"workload\"] }}}}'\n",
                 mcp.uri()
             ),
@@ -6668,14 +6691,14 @@ async fn a_server_whose_token_needs_a_login_says_so_rather_than_calling() {
 
     let harness = Harness::start(&[
         (
-            "auth.yaml",
-            "providers:\n  - name: me\n    kind: oidc_browser\n    issuer: https://idp.internal/realms/x\n    client_id: mire-ui\n"
+            "auth/me.yaml",
+            "name: me\nkind: oidc_browser\nissuer: https://idp.internal/realms/x\nclient_id: mire-ui\n"
                 .to_owned(),
         ),
         (
-            "mcp.yaml",
+            "mcp/files.yaml",
             format!(
-                "servers:\n  - name: files\n    url: {}/mcp\n    headers:\n      \
+                "name: files\nurl: {}/mcp\nheaders:\n  \
                  x-api-key: '{{{{ auth[\"me\"] }}}}'\n",
                 mcp.uri()
             ),
@@ -6722,12 +6745,12 @@ async fn a_replayed_tool_call_goes_back_in_the_shape_endpoints_accept() {
         .await;
 
     let harness = Harness::start(&[(
-        "agent.yaml",
-        agent_profile(&format!("{}/v1", server.uri()), ""),
+        "models/agent.yaml",
+        agent_model(&format!("{}/v1", server.uri()), ""),
     )])
     .await;
     harness
-        .agent(json!({"profile": "agent", "prompt": "weather in Paris?"}))
+        .agent(json!({"model": "agent", "prompt": "weather in Paris?"}))
         .await;
 
     let requests = server.received_requests().await.expect("requests");
@@ -6789,12 +6812,12 @@ async fn arguments_that_arrived_as_an_object_are_replayed_as_one() {
         .await;
 
     let harness = Harness::start(&[(
-        "agent.yaml",
-        agent_profile(&format!("{}/v1", server.uri()), ""),
+        "models/agent.yaml",
+        agent_model(&format!("{}/v1", server.uri()), ""),
     )])
     .await;
     harness
-        .agent(json!({"profile": "agent", "prompt": "weather in Lyon?"}))
+        .agent(json!({"model": "agent", "prompt": "weather in Lyon?"}))
         .await;
 
     let requests = server.received_requests().await.expect("requests");
@@ -6807,13 +6830,13 @@ async fn arguments_that_arrived_as_an_object_are_replayed_as_one() {
 
 // --- a loop that streams ------------------------------------------------------
 
-/// An agent profile that passes `stream` on and knows where a chunk keeps its
+/// An agent model that passes `stream` on and knows where a chunk keeps its
 /// text.
 ///
-/// Same shape as [`agent_profile`] with the two streaming lines added, because
+/// Same shape as [`agent_model`] with the two streaming lines added, because
 /// that is the whole difference: streaming is a flag on the run, not a second
-/// kind of profile.
-fn streaming_agent_profile(url: &str) -> String {
+/// kind of model.
+fn streaming_agent_model(url: &str) -> String {
     format!(
         r#"
 name: agent
@@ -6846,10 +6869,11 @@ async fn a_loop_does_not_stream_unless_the_run_asks_for_it() {
         .mount(&server)
         .await;
 
-    let harness = Harness::start(&[("agent.yaml", streaming_agent_profile(&server.uri()))]).await;
+    let harness =
+        Harness::start(&[("models/agent.yaml", streaming_agent_model(&server.uri()))]).await;
 
     let (status, events) = harness
-        .agent(json!({"profile": "agent", "prompt": "hi"}))
+        .agent(json!({"model": "agent", "prompt": "hi"}))
         .await;
     assert_eq!(status, 200);
 
@@ -6894,15 +6918,15 @@ async fn a_streamed_loop_reports_deltas_per_turn() {
         .mount(&server)
         .await;
 
-    let mut profile = streaming_agent_profile(&server.uri());
-    profile.push_str(
+    let mut model = streaming_agent_model(&server.uri());
+    model.push_str(
         "tools:\n  - name: get_weather\n    schema:\n      type: object\n    \
          response: '{\"temp\": 21}'\n",
     );
-    let harness = Harness::start(&[("agent.yaml", profile)]).await;
+    let harness = Harness::start(&[("models/agent.yaml", model)]).await;
 
     let (status, events) = harness
-        .agent(json!({"profile": "agent", "prompt": "weather in Lyon?", "stream": true}))
+        .agent(json!({"model": "agent", "prompt": "weather in Lyon?", "stream": true}))
         .await;
     assert_eq!(status, 200);
 
@@ -7051,10 +7075,10 @@ async fn uploads_are_reachable_under_a_base_path() {
     assert_eq!(mire.stored().len(), 1);
 }
 
-/// A profile that turns every attachment into the content-part shape a vision
+/// A model that turns every attachment into the content-part shape a vision
 /// endpoint reads. What an upload becomes is the template's decision, so the
 /// test states it in a template rather than asserting on something built in Rust.
-fn vision_profile(url: &str) -> String {
+fn vision_model(url: &str) -> String {
     format!(
         r#"
 name: vision
@@ -7080,8 +7104,8 @@ async fn an_uploaded_file_reaches_the_endpoint_through_the_template() {
         .await;
 
     let mire = Harness::start(&[(
-        "vision.yaml",
-        vision_profile(&format!("{}/v1/chat/completions", server.uri())),
+        "models/vision.yaml",
+        vision_model(&format!("{}/v1/chat/completions", server.uri())),
     )])
     .await;
 
@@ -7090,7 +7114,7 @@ async fn an_uploaded_file_reaches_the_endpoint_through_the_template() {
     let id = stored["id"].as_str().expect("id");
 
     let (status, _, body) = mire
-        .call(json!({"profile": "vision", "prompt": "what is this", "uploads": [id]}))
+        .call(json!({"model": "vision", "prompt": "what is this", "uploads": [id]}))
         .await;
 
     assert_eq!(status, 200);
@@ -7113,7 +7137,7 @@ async fn an_uploaded_file_reaches_the_endpoint_through_the_template() {
 /// The same rule `stream` follows: it reaches the template, and a template that
 /// says nothing about it sends what it always sent.
 #[tokio::test]
-async fn a_profile_that_ignores_uploads_sends_what_it_always_sent() {
+async fn a_model_that_ignores_uploads_sends_what_it_always_sent() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -7122,8 +7146,8 @@ async fn a_profile_that_ignores_uploads_sends_what_it_always_sent() {
         .await;
 
     let mire = Harness::start(&[(
-        "chat.yaml",
-        openai_profile(&format!("{}/v1/chat/completions", server.uri())),
+        "models/chat.yaml",
+        openai_model(&format!("{}/v1/chat/completions", server.uri())),
     )])
     .await;
 
@@ -7131,7 +7155,7 @@ async fn a_profile_that_ignores_uploads_sends_what_it_always_sent() {
 
     let (status, _, body) = mire
         .call(json!({
-            "profile": "chat",
+            "model": "chat",
             "prompt": "ping",
             "uploads": [stored["id"].as_str().expect("id")],
         }))
@@ -7156,13 +7180,13 @@ async fn a_call_naming_an_upload_that_is_gone_is_refused_before_anything_is_sent
         .await;
 
     let mire = Harness::start(&[(
-        "vision.yaml",
-        vision_profile(&format!("{}/v1/chat/completions", server.uri())),
+        "models/vision.yaml",
+        vision_model(&format!("{}/v1/chat/completions", server.uri())),
     )])
     .await;
 
     let (status, _, body) = mire
-        .call(json!({"profile": "vision", "prompt": "ping", "uploads": ["aaaaaaaaaaaa"]}))
+        .call(json!({"model": "vision", "prompt": "ping", "uploads": ["aaaaaaaaaaaa"]}))
         .await;
 
     assert_eq!(status, 404);
@@ -7174,22 +7198,25 @@ async fn a_call_naming_an_upload_that_is_gone_is_refused_before_anything_is_sent
 /// upload directory, so a path never gets that far.
 #[tokio::test]
 async fn a_call_cannot_name_a_file_outside_the_upload_directory() {
-    let mire =
-        Harness::start(&[("vision.yaml", vision_profile("https://models.internal/v1"))]).await;
+    let mire = Harness::start(&[(
+        "models/vision.yaml",
+        vision_model("https://models.internal/v1"),
+    )])
+    .await;
 
     let (status, _, body) = mire
-        .call(json!({"profile": "vision", "prompt": "ping", "uploads": ["../../etc/passwd"]}))
+        .call(json!({"model": "vision", "prompt": "ping", "uploads": ["../../etc/passwd"]}))
         .await;
 
     assert_eq!(status, 400);
     assert_eq!(body["code"], "invalid_upload_id");
 }
 
-/// A profile whose request is built around the file, and says so.
+/// A model whose request is built around the file, and says so.
 ///
 /// A `template:` rather than a `multipart:`, deliberately: the rule is about
 /// whether there is a call to make, and it holds for every request source.
-fn requires_upload_profile(url: &str) -> String {
+fn requires_upload_model(url: &str) -> String {
     format!(
         r#"
 name: transcribe
@@ -7207,9 +7234,9 @@ decode:
 }
 
 /// The refusal is the point: an endpoint asked to read a form with no file in it
-/// answers about a field of its own, and this one answers about the profile.
+/// answers about a field of its own, and this one answers about the model.
 #[tokio::test]
-async fn a_profile_that_requires_a_file_refuses_a_call_carrying_none() {
+async fn a_model_that_requires_a_file_refuses_a_call_carrying_none() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -7218,13 +7245,13 @@ async fn a_profile_that_requires_a_file_refuses_a_call_carrying_none() {
         .await;
 
     let mire = Harness::start(&[(
-        "transcribe.yaml",
-        requires_upload_profile(&format!("{}/v1/chat/completions", server.uri())),
+        "models/transcribe.yaml",
+        requires_upload_model(&format!("{}/v1/chat/completions", server.uri())),
     )])
     .await;
 
     let (status, _, body) = mire
-        .call(json!({"profile": "transcribe", "prompt": "transcribe this"}))
+        .call(json!({"model": "transcribe", "prompt": "transcribe this"}))
         .await;
 
     assert_eq!(status, 422);
@@ -7239,7 +7266,7 @@ async fn a_profile_that_requires_a_file_refuses_a_call_carrying_none() {
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
-/// Any file clears it. The profile asked for one, not for a particular one —
+/// Any file clears it. The model asked for one, not for a particular one —
 /// which of them the template reads is still the template's decision.
 #[tokio::test]
 async fn a_required_file_is_satisfied_by_attaching_one() {
@@ -7251,8 +7278,8 @@ async fn a_required_file_is_satisfied_by_attaching_one() {
         .await;
 
     let mire = Harness::start(&[(
-        "transcribe.yaml",
-        requires_upload_profile(&format!("{}/v1/chat/completions", server.uri())),
+        "models/transcribe.yaml",
+        requires_upload_model(&format!("{}/v1/chat/completions", server.uri())),
     )])
     .await;
 
@@ -7260,7 +7287,7 @@ async fn a_required_file_is_satisfied_by_attaching_one() {
 
     let (status, _, body) = mire
         .call(json!({
-            "profile": "transcribe",
+            "model": "transcribe",
             "prompt": "transcribe this",
             "uploads": [stored["id"].as_str().expect("id")],
         }))
@@ -7278,19 +7305,19 @@ async fn a_required_file_is_satisfied_by_attaching_one() {
 #[tokio::test]
 async fn a_required_file_is_a_status_code_rather_than_a_stream_that_fails() {
     let mire = Harness::start(&[(
-        "transcribe.yaml",
-        requires_upload_profile("https://models.internal/v1/chat/completions"),
+        "models/transcribe.yaml",
+        requires_upload_model("https://models.internal/v1/chat/completions"),
     )])
     .await;
 
     let (status, events) = mire
-        .stream(json!({"profile": "transcribe", "prompt": "ping"}))
+        .stream(json!({"model": "transcribe", "prompt": "ping"}))
         .await;
     assert_eq!(status, 422);
     assert!(events.is_empty());
 
     let (status, events) = mire
-        .agent(json!({"profile": "transcribe", "prompt": "ping"}))
+        .agent(json!({"model": "transcribe", "prompt": "ping"}))
         .await;
     assert_eq!(status, 422);
     assert!(events.is_empty());
@@ -7299,23 +7326,26 @@ async fn a_required_file_is_a_status_code_rather_than_a_stream_that_fails() {
 /// The composer greys **Send** rather than letting it produce a `422`, and this
 /// is the field it reads to know.
 #[tokio::test]
-async fn the_profile_listing_says_which_profiles_need_a_file() {
+async fn the_model_listing_says_which_models_need_a_file() {
     let mire = Harness::start(&[
         (
-            "transcribe.yaml",
-            requires_upload_profile("https://models.internal/v1/chat/completions"),
+            "models/transcribe.yaml",
+            requires_upload_model("https://models.internal/v1/chat/completions"),
         ),
-        ("chat.yaml", openai_profile("https://models.internal/v1")),
+        (
+            "models/chat.yaml",
+            openai_model("https://models.internal/v1"),
+        ),
     ])
     .await;
 
-    let listed = mire.get("/api/profiles").await;
-    let profiles = listed["profiles"].as_array().expect("profiles");
+    let listed = mire.get("/api/models").await;
+    let models = listed["models"].as_array().expect("models");
     let of = |name: &str| {
-        profiles
+        models
             .iter()
-            .find(|profile| profile["name"] == name)
-            .expect("profile")["requiresUpload"]
+            .find(|model| model["name"] == name)
+            .expect("model")["requiresUpload"]
             .clone()
     };
 
@@ -7336,8 +7366,8 @@ async fn an_attachment_is_carried_on_every_turn_of_a_loop() {
         .await;
 
     let mire = Harness::start(&[(
-        "vision.yaml",
-        vision_profile(&format!("{}/v1/chat/completions", server.uri())),
+        "models/vision.yaml",
+        vision_model(&format!("{}/v1/chat/completions", server.uri())),
     )])
     .await;
 
@@ -7345,7 +7375,7 @@ async fn an_attachment_is_carried_on_every_turn_of_a_loop() {
 
     let (status, events) = mire
         .agent(json!({
-            "profile": "vision",
+            "model": "vision",
             "prompt": "what is this",
             "uploads": [stored["id"].as_str().expect("id")],
         }))
@@ -7364,10 +7394,10 @@ async fn an_attachment_is_carried_on_every_turn_of_a_loop() {
 
 // --- multipart requests ------------------------------------------------------
 
-/// A transcription profile: the audio as bytes, the knobs as form fields beside
+/// A transcription model: the audio as bytes, the knobs as form fields beside
 /// it. This is the shape a whisper-style endpoint actually reads, and none of it
-/// is built in Rust — the profile says what the form carries.
-fn transcription_profile(url: &str) -> String {
+/// is built in Rust — the model says what the form carries.
+fn transcription_model(url: &str) -> String {
     format!(
         r#"
 name: whisper
@@ -7392,7 +7422,7 @@ decode:
 /// The whole point of the feature, end to end: attach an audio file, and what
 /// leaves is a `multipart/form-data` a transcriber will accept.
 #[tokio::test]
-async fn a_multipart_profile_sends_the_file_and_its_knobs_as_form_parts() {
+async fn a_multipart_model_sends_the_file_and_its_knobs_as_form_parts() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/audio/transcriptions"))
@@ -7401,8 +7431,8 @@ async fn a_multipart_profile_sends_the_file_and_its_knobs_as_form_parts() {
         .await;
 
     let mire = Harness::start(&[(
-        "whisper.yaml",
-        transcription_profile(&format!("{}/v1/audio/transcriptions", server.uri())),
+        "models/whisper.yaml",
+        transcription_model(&format!("{}/v1/audio/transcriptions", server.uri())),
     )])
     .await;
 
@@ -7410,7 +7440,7 @@ async fn a_multipart_profile_sends_the_file_and_its_knobs_as_form_parts() {
 
     let (status, _, body) = mire
         .call(json!({
-            "profile": "whisper",
+            "model": "whisper",
             "prompt": "the speakers are French",
             "uploads": [stored["id"].as_str().expect("id")],
         }))
@@ -7452,7 +7482,7 @@ async fn a_multipart_profile_sends_the_file_and_its_knobs_as_form_parts() {
     assert!(form.contains(r#"name="prompt""#), "{form}");
     assert!(form.contains("the speakers are French"), "{form}");
 
-    // Order is the profile's, not the alphabet's.
+    // Order is the model's, not the alphabet's.
     let file_at = form.find(r#"name="file""#).expect("file part");
     let model_at = form.find(r#"name="model""#).expect("model part");
     assert!(file_at < model_at, "{form}");
@@ -7460,12 +7490,12 @@ async fn a_multipart_profile_sends_the_file_and_its_knobs_as_form_parts() {
 
 /// The other half of a transcriber: there is nothing to type.
 ///
-/// `has_prompt: false` is the profile saying so, and both ends of that have to
+/// `has_prompt: false` is the model saying so, and both ends of that have to
 /// hold — the listing carries it, so the composer knows to drop its box, and a
 /// call arriving with no message at all is a call like any other rather than an
 /// empty request nobody meant to send.
 #[tokio::test]
-async fn a_profile_declaring_no_prompt_is_called_with_nothing_typed() {
+async fn a_model_declaring_no_prompt_is_called_with_nothing_typed() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/audio/transcriptions"))
@@ -7473,7 +7503,7 @@ async fn a_profile_declaring_no_prompt_is_called_with_nothing_typed() {
         .mount(&server)
         .await;
 
-    let profile = transcription_profile(&format!("{}/v1/audio/transcriptions", server.uri()))
+    let model = transcription_model(&format!("{}/v1/audio/transcriptions", server.uri()))
         .replace("kind: chat", "kind: chat\nhas_prompt: false")
         // The vocabulary hint is a knob rather than a sentence once the box is
         // gone, which is exactly what `params` is for.
@@ -7481,17 +7511,17 @@ async fn a_profile_declaring_no_prompt_is_called_with_nothing_typed() {
             r"prompt: '{{ messages[-1].content }}'",
             r#"prompt: '{{ params.prompt | default("") }}'"#,
         );
-    let mire = Harness::start(&[("whisper.yaml", profile)]).await;
+    let mire = Harness::start(&[("models/whisper.yaml", model)]).await;
 
-    let listed = mire.get("/api/profiles").await;
-    assert_eq!(listed["profiles"][0]["hasPrompt"], false);
+    let listed = mire.get("/api/models").await;
+    assert_eq!(listed["models"][0]["hasPrompt"], false);
 
     let (_, stored) = mire.upload("meeting.mp3", b"ID3\x04audio").await;
 
     // No `prompt`, no `messages`: the file is the whole of the signal going in.
     let (status, _, body) = mire
         .call(json!({
-            "profile": "whisper",
+            "model": "whisper",
             "uploads": [stored["id"].as_str().expect("id")],
         }))
         .await;
@@ -7501,23 +7531,23 @@ async fn a_profile_declaring_no_prompt_is_called_with_nothing_typed() {
     let sent = server.received_requests().await.unwrap();
     let form = String::from_utf8_lossy(&sent[0].body);
     assert!(form.contains(r#"filename="meeting.mp3""#), "{form}");
-    // The hint field still goes out, empty, because the profile still declares
+    // The hint field still goes out, empty, because the model still declares
     // it — a field nobody set is not a field that disappears.
     assert!(form.contains(r#"name="prompt""#), "{form}");
 }
 
-/// Nothing declared is a profile with a question to ask, which is every profile
+/// Nothing declared is a model with a question to ask, which is every model
 /// written before the field existed.
 #[tokio::test]
-async fn a_profile_takes_a_prompt_unless_it_says_otherwise() {
+async fn a_model_takes_a_prompt_unless_it_says_otherwise() {
     let harness = Harness::start(&[(
-        "chat.yaml",
-        openai_profile("https://models.internal/v1/chat/completions"),
+        "models/chat.yaml",
+        openai_model("https://models.internal/v1/chat/completions"),
     )])
     .await;
 
-    let body = harness.get("/api/profiles").await;
-    assert_eq!(body["profiles"][0]["hasPrompt"], true);
+    let body = harness.get("/api/models").await;
+    assert_eq!(body["models"][0]["hasPrompt"], true);
 }
 
 /// The trace has to say what went out, and for a form that is the parts — not a
@@ -7532,15 +7562,15 @@ async fn the_trace_of_a_form_names_its_parts_and_carries_none_of_the_bytes() {
         .await;
 
     let mire = Harness::start(&[(
-        "whisper.yaml",
-        transcription_profile(&format!("{}/v1/audio/transcriptions", server.uri())),
+        "models/whisper.yaml",
+        transcription_model(&format!("{}/v1/audio/transcriptions", server.uri())),
     )])
     .await;
 
     let (_, stored) = mire.upload("meeting.mp3", b"ID3\x04audio").await;
     let (status, _, body) = mire
         .call(json!({
-            "profile": "whisper",
+            "model": "whisper",
             "prompt": "ping",
             "uploads": [stored["id"].as_str().expect("id")],
         }))
@@ -7561,10 +7591,10 @@ async fn the_trace_of_a_form_names_its_parts_and_carries_none_of_the_bytes() {
     // everything and tell the reader nothing.
     assert!(file.get("value").is_none(), "{file}");
 
-    let model = &parts[1];
-    assert_eq!(model["field"], "model");
-    assert_eq!(model["value"], "whisper-1");
-    assert!(model.get("filename").is_none(), "{model}");
+    let name = &parts[1];
+    assert_eq!(name["field"], "model");
+    assert_eq!(name["value"], "whisper-1");
+    assert!(name.get("filename").is_none(), "{name}");
 
     // The `curl` is one somebody can run: `-F` flags, and the file by the path
     // `--uploads` put it at.
@@ -7577,7 +7607,7 @@ async fn the_trace_of_a_form_names_its_parts_and_carries_none_of_the_bytes() {
 
 /// A form field naming a file nobody attached is refused before anything leaves,
 /// the same way a hook's is. A `422` from the endpoint about a field nobody in
-/// the profile ever mentioned is exactly the afternoon this avoids.
+/// the model ever mentioned is exactly the afternoon this avoids.
 #[tokio::test]
 async fn a_form_with_nothing_attached_is_refused_before_anything_is_sent() {
     let server = MockServer::start().await;
@@ -7588,13 +7618,13 @@ async fn a_form_with_nothing_attached_is_refused_before_anything_is_sent() {
         .await;
 
     let mire = Harness::start(&[(
-        "whisper.yaml",
-        transcription_profile(&format!("{}/v1/audio/transcriptions", server.uri())),
+        "models/whisper.yaml",
+        transcription_model(&format!("{}/v1/audio/transcriptions", server.uri())),
     )])
     .await;
 
     let (status, _, body) = mire
-        .call(json!({"profile": "whisper", "prompt": "transcribe this"}))
+        .call(json!({"model": "whisper", "prompt": "transcribe this"}))
         .await;
 
     assert_eq!(status, 422);
@@ -7603,12 +7633,12 @@ async fn a_form_with_nothing_attached_is_refused_before_anything_is_sent() {
     assert!(message.contains("nothing was attached"), "{message}");
     assert!(message.contains("`file`"), "{message}");
 
-    // And nothing left: the endpoint was never asked to explain our own profile
+    // And nothing left: the endpoint was never asked to explain our own model
     // back to us.
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
-/// A diarisation-shaped profile: the audio, plus a JSON blob beside it. The
+/// A diarisation-shaped model: the audio, plus a JSON blob beside it. The
 /// second is what `type:` on a text field exists for, and the overrides on the
 /// file part are for a store that could not classify the extension.
 #[tokio::test]
@@ -7620,7 +7650,7 @@ async fn a_text_part_can_declare_its_own_content_type() {
         .mount(&server)
         .await;
 
-    let profile = format!(
+    let model = format!(
         r#"
 name: pyannote
 kind: chat
@@ -7641,12 +7671,12 @@ decode:
         server.uri()
     );
 
-    let mire = Harness::start(&[("pyannote.yaml", profile)]).await;
+    let mire = Harness::start(&[("models/pyannote.yaml", model)]).await;
     let (_, stored) = mire.upload("recording", b"RIFF").await;
 
     let (status, _, _) = mire
         .call(json!({
-            "profile": "pyannote",
+            "model": "pyannote",
             "prompt": "who spoke",
             "uploads": [stored["id"].as_str().expect("id")],
             "params": {"config": {"num_speakers": 2}},
@@ -7675,13 +7705,10 @@ async fn a_form_is_authenticated_and_redacted_like_any_other_request() {
         .await;
 
     let mire = Harness::start(&[
+        ("auth/pasted.yaml", "name: pasted\nkind: token\n".to_owned()),
         (
-            "auth.yaml",
-            "providers:\n  - name: pasted\n    kind: token\n".to_owned(),
-        ),
-        (
-            "whisper.yaml",
-            transcription_profile(&format!("{}/v1/audio/transcriptions", server.uri())),
+            "models/whisper.yaml",
+            transcription_model(&format!("{}/v1/audio/transcriptions", server.uri())),
         ),
     ])
     .await;
@@ -7689,7 +7716,7 @@ async fn a_form_is_authenticated_and_redacted_like_any_other_request() {
     let (_, stored) = mire.upload("meeting.mp3", b"ID3").await;
     let (status, _, body) = mire
         .call(json!({
-            "profile": "whisper",
+            "model": "whisper",
             "auth": "pasted",
             "prompt": "ping",
             "token": "s3cr3t-token",

@@ -21,7 +21,7 @@ use crate::transport::TransportError;
 /// `detail` carrying whatever the UI needs to be useful about it.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ErrorBody {
-    /// Stable identifier, e.g. `unknown_profile`.
+    /// Stable identifier, e.g. `unknown_model`.
     pub code: &'static str,
     /// What went wrong, in one sentence.
     pub message: String,
@@ -83,7 +83,7 @@ impl From<crate::agent::AgentError> for ApiError {
         match error {
             crate::agent::AgentError::NotChat { .. } => Self::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
-                "not_a_chat_profile",
+                "not_a_chat_model",
                 error.to_string(),
             ),
             crate::agent::AgentError::Turn(exec) => Self::from(exec),
@@ -184,9 +184,9 @@ impl From<ExecError> for ApiError {
     fn from(error: ExecError) -> Self {
         let message = error.to_string();
         match error {
-            ExecError::UnknownProfile(_) => Self::not_found("unknown_profile", message),
-            // The request is well formed and names a profile that exists; what it
-            // is missing is an ingredient that profile requires, which is what
+            ExecError::UnknownModel(_) => Self::not_found("unknown_model", message),
+            // The request is well formed and names a model that exists; what it
+            // is missing is an ingredient that model requires, which is what
             // `422` is for.
             ExecError::UploadRequired { .. } => {
                 Self::new(StatusCode::UNPROCESSABLE_ENTITY, "upload_required", message)
@@ -266,7 +266,7 @@ impl From<RenderError> for ApiError {
                 "no_request_source",
                 message,
             ),
-            // The profile is fine and the call is not: a form field naming a
+            // The model is fine and the call is not: a form field naming a
             // file that was never attached is something the caller can fix by
             // attaching it, which is what makes this a `422` and not a `500`.
             RenderError::Multipart { .. } => {
@@ -301,7 +301,7 @@ impl From<TransportError> for ApiError {
             TransportError::Send { .. } => {
                 Self::new(StatusCode::BAD_GATEWAY, "endpoint_unreachable", message)
             }
-            // A `type:` in the profile that is not a media type. Nothing left
+            // A `type:` in the model that is not a media type. Nothing left
             // the process, and the fix is in the file.
             TransportError::Multipart { .. } => {
                 Self::new(StatusCode::UNPROCESSABLE_ENTITY, "multipart_error", message)

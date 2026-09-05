@@ -1,9 +1,9 @@
-//! Authentication modes, orthogonal to the profile.
+//! Authentication modes, orthogonal to the model.
 //!
 //! The same model must be testable anonymously, with a static token and with a
-//! workload identity, without duplicating its profile — so auth lives in its own
-//! registry ([`auth.yaml`](crate::profile::loader::AUTH_REGISTRY_FILE)) and a
-//! profile only refers to it by name.
+//! workload identity, without duplicating its file — so auth lives in its own
+//! registry ([`auth/`](crate::config::layout::AUTH)) and a model only refers to
+//! it by name.
 //!
 //! Anonymous is a first-class mode, not the absence of one: hitting a protected
 //! route with no credential and getting a `401` is a *passing* check.
@@ -149,7 +149,7 @@ impl AuthProvider for Auth {
 /// No variant ever carries the credential itself.
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
-    /// The profile refers to an auth entry that is not declared.
+    /// The model refers to an auth entry that is not declared.
     #[error("unknown auth provider `{0}`")]
     UnknownProvider(String),
 
@@ -175,7 +175,7 @@ pub enum AuthError {
 
     /// Nothing to send: no `env`, no `file`, and nothing supplied with the request.
     #[error(
-        "auth `{provider}`: no credential available; set `value.env` or `value.file` in auth.yaml, or supply one with the request"
+        "auth `{provider}`: no credential available; set `value.env` or `value.file` on the provider, or supply one with the request"
     )]
     NoCredential {
         /// Registry name of the provider.

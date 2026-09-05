@@ -1,8 +1,8 @@
-//! Agent mode: a `kind: chat` profile, run in a loop.
+//! Agent mode: a `kind: chat` model, run in a loop.
 //!
 //! Render, call, decode; if the stop condition is not met, answer the tool calls
 //! with their simulated results, feed them back, and go round again. There is no
-//! third payload format and no second profile — `POST /api/call` runs one turn of
+//! third payload format and no second model — `POST /api/call` runs one turn of
 //! exactly the same thing.
 //!
 //! # What is being checked
@@ -16,7 +16,7 @@
 //!
 //! Every way out is named. The one worth spelling out is
 //! [`StopOutcome::PredicateNeverEvaluable`]: a backend that never emits a
-//! `finish_reason` would let a profile stopping on `finish_reason_in` run to
+//! `finish_reason` would let a model stopping on `finish_reason_in` run to
 //! `max_iterations` and look like a slow agent. It is not — the configured
 //! predicate could never be evaluated even once, and that is what gets reported.
 
@@ -39,15 +39,15 @@ use crate::mcp::{
     McpRegistry, McpTool, Revision,
 };
 use crate::message::{Message, Role, ToolCall};
-use crate::profile::{AgentSpec, Profile, ProfileKind, StopWhen, ToolResponse, ToolSpec};
+use crate::model::{AgentSpec, Model, ModelKind, StopWhen, ToolResponse, ToolSpec};
 use crate::script::ScriptError;
 use crate::uploads::UploadRef;
 use crate::vars::Vars;
 
-/// Turns allowed when the profile says nothing.
+/// Turns allowed when the model says nothing.
 const DEFAULT_MAX_ITERATIONS: u32 = 10;
 
-/// Wall-clock ceiling when the profile says nothing. Generous: a small model on
+/// Wall-clock ceiling when the model says nothing. Generous: a small model on
 /// a CPU is slow, and a timeout that fires on a working agent is worse than one
 /// that fires late.
 const DEFAULT_MAX_DURATION: Duration = Duration::from_secs(300);
@@ -78,7 +78,7 @@ pub enum StopOutcome {
         after_ms: u64,
     },
     /// The model asked for the same thing twice — a loop, not progress. Only
-    /// ever reported by a profile that set `stop_when.repeated_call`.
+    /// ever reported by a model that set `stop_when.repeated_call`.
     RepeatedCall {
         /// Tool that was called again with identical arguments.
         tool: String,
@@ -185,7 +185,7 @@ pub struct ToolInvocation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum ToolSource {
-    /// Declared in the profile. Nothing is executed.
+    /// Declared in the model. Nothing is executed.
     Simulated,
     /// Declared by an MCP server, and really called.
     Mcp,
@@ -224,8 +224,8 @@ pub struct Turn {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Trace {
-    /// Profile that ran.
-    pub profile: String,
+    /// Model that ran.
+    pub model: String,
     /// Auth provider that ran.
     pub auth: String,
     /// What was said to the MCP servers before the first prompt was spent:
@@ -249,19 +249,19 @@ pub struct Trace {
 pub struct AgentInput {
     /// The single-turn input.
     pub call: CallInput,
-    /// Turn budget, overriding the profile's.
+    /// Turn budget, overriding the model's.
     pub max_iterations: Option<u32>,
     /// Which of the declared MCP servers this run may reach.
     ///
-    /// `None` is all of them: a server is declared once, in `mcp.yaml`, and every
-    /// `kind: chat` profile is offered the lot. A list narrows that to the ones
+    /// `None` is all of them: a server is declared once, in `mcp/`, and every
+    /// `kind: chat` model is offered the lot. A list narrows that to the ones
     /// named — down to none at all, which is how you ask what the model does when
-    /// the tool it wants is not there. A name `mcp.yaml` does not declare is
+    /// the tool it wants is not there. A name `mcp/` does not declare is
     /// [`McpError::UnknownServer`], because it is a typo rather than a server
     /// this run gets to invent.
     pub mcp_servers: Option<Vec<String>>,
     /// Revision to speak to every MCP server this run touches, overriding both
-    /// the negotiation and any `protocol_version:` in `mcp.yaml`.
+    /// the negotiation and any `protocol_version:` in `mcp/`.
     ///
     /// `None` is the negotiation as it stands. Set it when the revision is what
     /// you are testing and you would rather not edit a file between two runs —
@@ -273,11 +273,11 @@ pub struct AgentInput {
 /// Why an agent run could not be performed at all.
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
-    /// Agent mode is a way of running a chat profile, and only a chat profile.
-    #[error("profile `{profile}` is `kind: embedding`; agent mode runs a `kind: chat` profile")]
+    /// Agent mode is a way of running a chat model, and only a chat model.
+    #[error("model `{model}` is `kind: embedding`; agent mode runs a `kind: chat` model")]
     NotChat {
-        /// The profile that was asked for.
-        profile: String,
+        /// The model that was asked for.
+        model: String,
     },
 
     /// A turn failed. Whatever went wrong on turn one goes wrong on turn two.
@@ -324,7 +324,7 @@ pub enum AgentUpdate<'a> {
 ///
 /// # Errors
 ///
-/// Fails when the profile is not a chat profile, or when an exchange itself
+/// Fails when the model is not a chat model, or when an exchange itself
 /// fails. A model that misbehaves is a [`StopOutcome`], not an error.
 pub async fn run(
     runner: &Runner,
@@ -332,7 +332,7 @@ pub async fn run(
     mut on_update: impl FnMut(AgentUpdate<'_>),
 ) -> Result<Trace, AgentError> {
     let Prepared {
-        profile,
+        model,
         spec,
         limit,
         deadline,
@@ -401,7 +401,7 @@ pub async fn run(
             break StopOutcome::Stopped { reason };
         }
 
-        // The model wants tools. Answer them, and — when the profile asked for
+        // The model wants tools. Answer them, and — when the model asked for
         // it — watch for it asking twice.
         let repeated = spec
             .stop_when
@@ -416,7 +416,7 @@ pub async fn run(
         on_update(AgentUpdate::Turn(&turn));
 
         if let Some(tool) = repeated {
-            warn!(profile = %profile.name, %tool, turn = index, "the model asked for the same thing twice");
+            warn!(model = %model.name, %tool, turn = index, "the model asked for the same thing twice");
             turns.push(turn);
             break StopOutcome::RepeatedCall {
                 tool,
@@ -425,12 +425,12 @@ pub async fn run(
         }
 
         feed_back(&mut messages, &completion, &turn.tools);
-        debug!(profile = %profile.name, turn = index, tools = turn.tools.len(), "continuing");
+        debug!(model = %model.name, turn = index, tools = turn.tools.len(), "continuing");
         turns.push(turn);
     };
 
     info!(
-        profile = %profile.name,
+        model = %model.name,
         turns = turns.len(),
         outcome = ?std::mem::discriminant(&stop),
         duration_ms = elapsed_ms(started),
@@ -438,7 +438,7 @@ pub async fn run(
     );
 
     Ok(Trace {
-        profile: profile.name.clone(),
+        model: model.name.clone(),
         auth: auth_name,
         setup,
         turns,
@@ -561,7 +561,7 @@ fn budget_exhausted(
 
 /// What the loop needs, resolved once.
 struct Prepared {
-    profile: std::sync::Arc<Profile>,
+    model: std::sync::Arc<Model>,
     spec: AgentSpec,
     limit: u32,
     deadline: Duration,
@@ -572,7 +572,7 @@ struct Prepared {
 
 /// Everything needed to answer a tool call, from either source.
 struct Tools {
-    profile: std::sync::Arc<Profile>,
+    model: std::sync::Arc<Model>,
     /// One entry per offered tool, simulated and live alike: a real server's
     /// `inputSchema` is checked exactly like a declared one.
     validators: Vec<(String, Option<Validator>)>,
@@ -594,7 +594,7 @@ struct Tools {
 impl Tools {
     /// Every name the model may call, for the message when it invents one.
     fn known(&self) -> Vec<&str> {
-        self.profile
+        self.model
             .tools
             .iter()
             .map(|tool| tool.name.as_str())
@@ -612,15 +612,15 @@ impl Tools {
 
 /// The MCP servers a run will actually set up.
 ///
-/// `None` is every server `mcp.yaml` declares — the file is the opt-in, and it
-/// grants the lot to every `kind: chat` profile. `requested` narrows that to the
+/// `None` is every server `mcp/` declares — the file is the opt-in, and it
+/// grants the lot to every `kind: chat` model. `requested` narrows that to the
 /// ones named. Shared by the API handler, which wants the refusal before it opens
 /// a stream, and by [`prepare`], which is the one that acts on it: two readings of
 /// the same rule are two readings that can disagree.
 ///
 /// # Errors
 ///
-/// Fails when `requested` names a server `mcp.yaml` does not declare.
+/// Fails when `requested` names a server `mcp/` does not declare.
 pub fn selected_servers(
     registry: &McpRegistry,
     requested: Option<&[String]>,
@@ -643,7 +643,7 @@ pub fn selected_servers(
         .collect())
 }
 
-/// Resolves the profile, the budgets and the tools, or explains why the run
+/// Resolves the model, the budgets and the tools, or explains why the run
 /// cannot happen.
 ///
 /// Listing the MCP tools happens here, once, rather than per turn: a server that
@@ -651,15 +651,15 @@ pub fn selected_servers(
 /// model must be offered the same tools on every turn.
 async fn prepare(runner: &Runner, input: &mut AgentInput) -> Result<Prepared, AgentError> {
     let config = runner.config().snapshot();
-    let profile = config
-        .profiles
-        .get(&input.call.profile)
-        .ok_or_else(|| ExecError::UnknownProfile(input.call.profile.clone()))?
+    let model = config
+        .models
+        .get(&input.call.model)
+        .ok_or_else(|| ExecError::UnknownModel(input.call.model.clone()))?
         .clone();
 
-    if profile.kind != ProfileKind::Chat {
+    if model.kind != ModelKind::Chat {
         return Err(AgentError::NotChat {
-            profile: profile.name.clone(),
+            model: model.name.clone(),
         });
     }
 
@@ -669,7 +669,7 @@ async fn prepare(runner: &Runner, input: &mut AgentInput) -> Result<Prepared, Ag
     let hooks: HookJournal = HookJournal::default();
     let attachments: Arc<[UploadRef]> = Arc::from(input.call.uploads.clone());
 
-    let spec = profile.agent.clone().unwrap_or_else(default_spec);
+    let spec = model.agent.clone().unwrap_or_else(default_spec);
 
     // Built before the clients are, because each of them is handed the bag its
     // calls will fill. One bag for the run, however many servers it reaches; the
@@ -683,10 +683,10 @@ async fn prepare(runner: &Runner, input: &mut AgentInput) -> Result<Prepared, Ag
     let declared = config.mcp.descriptors().len();
     if servers.len() != declared {
         // Worth a line of its own: a run offering the model fewer tools than
-        // `mcp.yaml` declares is the first thing to check when it stops calling
+        // `mcp/` declares is the first thing to check when it stops calling
         // one.
         info!(
-            profile = %profile.name,
+            model = %model.name,
             declared,
             reaching = servers.len(),
             "MCP servers narrowed for this run"
@@ -710,12 +710,12 @@ async fn prepare(runner: &Runner, input: &mut AgentInput) -> Result<Prepared, Ag
             .carrying(Arc::clone(&attachments));
         let credentials = McpCredentials::resolve(&config.registry, client.server()).await?;
         let listed = client.list_tools(&credentials).await?;
-        info!(profile = %profile.name, %server, tools = listed.len(), "MCP tools offered");
+        info!(model = %model.name, %server, tools = listed.len(), "MCP tools offered");
         live.extend(listed);
         clients.insert(server.clone(), client);
     }
 
-    let validators = compile_validators(&profile.tools, &live);
+    let validators = compile_validators(&model.tools, &live);
 
     // The live tools go straight into the render context, so every turn offers
     // the model the same set.
@@ -723,7 +723,7 @@ async fn prepare(runner: &Runner, input: &mut AgentInput) -> Result<Prepared, Ag
         .iter()
         // A simulated tool of the same name wins, so declaring it twice would
         // just confuse the model about which schema applies.
-        .filter(|tool| !profile.tools.iter().any(|spec| spec.name == tool.name))
+        .filter(|tool| !model.tools.iter().any(|spec| spec.name == tool.name))
         .map(declare)
         .collect();
 
@@ -734,7 +734,7 @@ async fn prepare(runner: &Runner, input: &mut AgentInput) -> Result<Prepared, Ag
             .map_or(DEFAULT_MAX_DURATION, Duration::from_millis),
         setup: crate::mcp::drain(&journal),
         tools: Tools {
-            profile: profile.clone(),
+            model: model.clone(),
             validators,
             live,
             config,
@@ -742,7 +742,7 @@ async fn prepare(runner: &Runner, input: &mut AgentInput) -> Result<Prepared, Ag
             journal,
             hooks,
         },
-        profile,
+        model,
         spec,
     })
 }
@@ -784,7 +784,7 @@ fn without_transport_keywords(schema: &Value) -> Value {
 /// answer with a chat completion at all.
 ///
 /// A turn with nothing decodable is not a crash: it is a model that answered
-/// something this profile cannot read, and the loop should stop on it rather
+/// something this model cannot read, and the loop should stop on it rather
 /// than pretend.
 fn completion_of(outcome: &CallOutcome) -> crate::decode::Completion {
     match outcome.response.decoded.as_ref() {
@@ -819,12 +819,12 @@ fn default_spec() -> AgentSpec {
 /// same input every turn, so it is rebuilt field by field on purpose.
 fn clone_input(input: &CallInput) -> CallInput {
     CallInput {
-        profile: input.profile.clone(),
+        model: input.model.clone(),
         auth: input.auth.clone(),
         messages: Vec::new(),
         input: input.input.clone(),
         params: input.params.clone(),
-        model: input.model.clone(),
+        model_id: input.model_id.clone(),
         token: input.token.clone(),
         include_vectors: false,
         repeat: 1,
@@ -921,13 +921,13 @@ async fn invoke_tools(tools: &Tools, calls: &[ToolCall], turn: u32) -> Vec<ToolI
             })
             .unwrap_or_default();
 
-        if let Some(spec) = tools.profile.tools.iter().find(|t| t.name == call.name) {
+        if let Some(spec) = tools.model.tools.iter().find(|t| t.name == call.name) {
             invocations.push(simulated(spec, call, turn, schema_errors));
         } else if let Some(tool) = tools.live.iter().find(|t| t.name == call.name) {
             invocations.push(live(tools, tool, call, schema_errors).await);
         } else {
             let message = format!(
-                "no tool named `{}` is declared; this profile offers {:?}",
+                "no tool named `{}` is declared; this model offers {:?}",
                 call.name,
                 tools.known()
             );
@@ -949,7 +949,7 @@ async fn invoke_tools(tools: &Tools, calls: &[ToolCall], turn: u32) -> Vec<ToolI
     invocations
 }
 
-/// A tool the profile declares. Nothing leaves this process.
+/// A tool the model declares. Nothing leaves this process.
 ///
 /// Captures nothing, and has no rules to capture with: `capture:` is declared on
 /// an MCP server, and this tool belongs to none — see [`crate::mcp::capture`].
@@ -1064,7 +1064,7 @@ fn answer(spec: &ToolSpec, call: &ToolCall, turn: u32) -> Result<String, ScriptE
             let value: Value = crate::script::from_dynamic(&returned, "a map or an array")?;
             Ok(value.to_string())
         }
-        // Validation rejects this at load; reaching it means a profile arrived
+        // Validation rejects this at load; reaching it means a model arrived
         // some other way.
         None => Err(ScriptError::WrongShape {
             found: "nothing".to_owned(),
@@ -1164,7 +1164,7 @@ mod tests {
         assert_ne!(fingerprint(&paris), fingerprint(&lyon));
     }
 
-    fn weather_profile(response: &str) -> Profile {
+    fn weather_model(response: &str) -> Model {
         let yaml = format!(
             r"
 name: agent
@@ -1187,17 +1187,17 @@ tools:
         serde_yaml_ng::from_str(&yaml).unwrap()
     }
 
-    /// The dispatch context for a profile with no MCP servers.
-    fn simulated_only(profile: Profile) -> Tools {
-        let profile = std::sync::Arc::new(profile);
+    /// The dispatch context for a model with no MCP servers.
+    fn simulated_only(model: Model) -> Tools {
+        let model = std::sync::Arc::new(model);
         Tools {
-            validators: compile_validators(&profile.tools, &[]),
+            validators: compile_validators(&model.tools, &[]),
             live: Vec::new(),
             config: std::sync::Arc::new(Config::default()),
             clients: BTreeMap::new(),
             journal: McpJournal::default(),
             hooks: HookJournal::default(),
-            profile,
+            model,
         }
     }
 
@@ -1232,7 +1232,7 @@ tools:
 
     #[tokio::test]
     async fn arguments_are_checked_against_the_declared_schema() {
-        let tools = simulated_only(weather_profile(r#"response: '{"temp": 21}'"#));
+        let tools = simulated_only(weather_model(r#"response: '{"temp": 21}'"#));
 
         let good = ToolCall {
             id: None,
@@ -1256,8 +1256,8 @@ tools:
     }
 
     #[tokio::test]
-    async fn a_tool_the_profile_never_declared_is_reported_and_answered() {
-        let tools = simulated_only(weather_profile(r#"response: '{"temp": 21}'"#));
+    async fn a_tool_the_model_never_declared_is_reported_and_answered() {
+        let tools = simulated_only(weather_model(r#"response: '{"temp": 21}'"#));
 
         let invocations = invoke_tools(
             &tools,
@@ -1283,7 +1283,7 @@ tools:
 
     #[tokio::test]
     async fn a_tool_can_answer_from_a_script() {
-        let tools = simulated_only(weather_profile(
+        let tools = simulated_only(weather_model(
             "script: '`{\"city\": \"${arguments.city}\", \"turn\": ${turn}}`'",
         ));
 
@@ -1316,7 +1316,7 @@ tools:
     /// JSON-shaped its answer is, nothing is read out of it.
     #[tokio::test]
     async fn a_simulated_tool_captures_nothing_because_it_belongs_to_no_server() {
-        let tools = simulated_only(weather_profile(r#"response: '{"temp": 21}'"#));
+        let tools = simulated_only(weather_model(r#"response: '{"temp": 21}'"#));
 
         let invocations = invoke_tools(&tools, &[weather_call()], 1).await;
 
@@ -1325,7 +1325,7 @@ tools:
 
     #[tokio::test]
     async fn a_failing_tool_script_answers_with_the_error_rather_than_nothing() {
-        let tools = simulated_only(weather_profile("script: 'arguments.no_such_method()'"));
+        let tools = simulated_only(weather_model("script: 'arguments.no_such_method()'"));
 
         let invocations = invoke_tools(
             &tools,

@@ -7,11 +7,12 @@
 //!
 //! # Layout
 //!
-//! * [`profile`] — the YAML files, read-only.
-//! * [`prompt`] — the questions worth keeping, read-only like the profiles.
-//! * [`config`] — the configuration directory, watched and hot-reloaded as one
-//!   atomic snapshot (profiles *and* auth registry together).
-//! * [`auth`] — the auth registry, orthogonal to the profiles so one model can be
+//! * [`model`] — one YAML file per endpoint, read-only.
+//! * [`prompt`] — the questions worth keeping, read-only like the models.
+//! * [`config`] — the configuration directories, watched and hot-reloaded as one
+//!   atomic snapshot (models *and* auth registry together); [`config::layout`]
+//!   is what a directory holds, one subdirectory per kind of thing.
+//! * [`auth`] — the auth registry, orthogonal to the models so one model can be
 //!   replayed on every mode without duplication.
 //! * [`render`] — `MiniJinja` templates producing the request body.
 //! * [`transport`] — the single place that builds a client and sends a request.
@@ -31,7 +32,7 @@
 //!
 //! `mire`'s own API types are `camelCase`. Two families stay `snake_case` on
 //! purpose, because they mirror someone else's format rather than ours:
-//! [`profile::Profile`] (which *is* the YAML document) and [`message::Message`]
+//! [`model::Model`] (which *is* the YAML document) and [`message::Message`]
 //! (which is what templates serialise straight into an OpenAI-shaped body).
 
 pub mod agent;
@@ -44,8 +45,8 @@ pub mod exec;
 pub mod issue;
 pub mod mcp;
 pub mod message;
+pub mod model;
 pub mod pattern;
-pub mod profile;
 pub mod prompt;
 pub mod redact;
 pub mod render;

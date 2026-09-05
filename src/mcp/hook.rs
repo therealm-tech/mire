@@ -4,7 +4,7 @@
 //! process, which makes it the one thing somebody else usually wants to know
 //! about: an audit trail, a policy gate, an upload endpoint that has to be
 //! handed the inputs before a task runs. A hook is that — declared on the server in
-//! `mcp.yaml`, fired [`Before`](HookPhase::Before) the call goes out,
+//! `mcp/`, fired [`Before`](HookPhase::Before) the call goes out,
 //! [`After`](HookPhase::After) it comes back, or both.
 //!
 //! ```yaml
@@ -55,7 +55,7 @@
 //!
 //! `tools:` is a list of regexes, each matched against the whole name — see
 //! [`NamePattern`] for why anchored. Empty is every tool. Compiled when
-//! `mcp.yaml` loads, like everything else here.
+//! the file loads, like everything else here.
 //!
 //! ```yaml
 //!     tools:
@@ -107,7 +107,7 @@
 //! false — see [`HookRecord::skipped`]. A hook that quietly never ran and a hook
 //! that was never declared must not look the same in a trace.
 //!
-//! The expression is compiled when `mcp.yaml` loads, so a typo in its syntax is
+//! The expression is compiled when the file loads, so a typo in its syntax is
 //! a startup issue naming the hook. What it *reads* is checked against nothing:
 //! a variable may be captured by this server, by another one the run happens to
 //! reach, or by nobody — so a condition naming a variable nothing ever captures
@@ -153,7 +153,7 @@
 //!
 //! # Where it sends it
 //!
-//! `url:` is ordinarily just a URL, parsed and checked when `mcp.yaml` loads. It
+//! `url:` is ordinarily just a URL, parsed and checked when the file loads. It
 //! may also be a template, seeing exactly what `json:` sees — one context, so
 //! there is no second table to remember:
 //!
@@ -271,7 +271,7 @@ pub enum HookPhase {
 }
 
 impl HookPhase {
-    /// The wire spelling, which is also what `mcp.yaml` writes.
+    /// The wire spelling, which is also what the file writes.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -298,7 +298,7 @@ pub enum OnError {
     Continue,
 }
 
-/// A name-matching pattern, shared with the profile's own `tools:` lists.
+/// A name-matching pattern, shared with the model's own `tools:` lists.
 ///
 /// One type because it is one rule — the pattern has to match the whole name.
 /// See [`crate::pattern`] for why that is not negotiable.
@@ -341,7 +341,7 @@ impl Hook {
     }
 }
 
-/// A hook's `if:`, compiled when `mcp.yaml` loaded.
+/// A hook's `if:`, compiled when the file loaded.
 ///
 /// One expression, evaluated per firing against the same context every other
 /// template of the hook sees. Kept as text rather than as a compiled `MiniJinja`
@@ -350,7 +350,7 @@ impl Hook {
 /// `GET /api/mcp` advertises before a run even starts.
 #[derive(Debug, Clone)]
 pub struct HookCondition {
-    /// What `mcp.yaml` wrote, `{{ … }}` and all.
+    /// What the file wrote, `{{ … }}` and all.
     source: String,
     /// The expression alone, with the delimiters — when there were any —
     /// removed. What actually gets compiled.
@@ -402,7 +402,7 @@ impl HookCondition {
         })
     }
 
-    /// What `mcp.yaml` wrote, for the trace and the descriptor.
+    /// What the file wrote, for the trace and the descriptor.
     #[must_use]
     pub fn source(&self) -> &str {
         &self.source
@@ -447,7 +447,7 @@ pub enum HookAction {
 }
 
 impl HookAction {
-    /// Where it sends what it sends, as `mcp.yaml` wrote it.
+    /// Where it sends what it sends, as the file wrote it.
     ///
     /// Its own URL, not the server's — which is the whole reason its credentials
     /// are resolved separately: an auth provider's `allowed_hosts` is a statement
@@ -480,7 +480,7 @@ impl HookAction {
         }
     }
 
-    /// The kind, as `mcp.yaml` spells it.
+    /// The kind, as the file spells it.
     #[must_use]
     pub const fn kind(&self) -> &'static str {
         match self {
@@ -497,9 +497,9 @@ impl HookAction {
 /// string that renders beautifully and fails to parse on the first tool call.
 #[derive(Debug, Clone)]
 pub enum HookUrl {
-    /// A URL, parsed when `mcp.yaml` loaded.
+    /// A URL, parsed when the file loaded.
     Fixed(Url),
-    /// A `MiniJinja` template, compiled when `mcp.yaml` loaded and rendered per
+    /// A `MiniJinja` template, compiled when the file loaded and rendered per
     /// firing. Only a template when it actually contains one.
     Template(String),
 }
@@ -531,7 +531,7 @@ impl HookUrl {
         }
     }
 
-    /// What `mcp.yaml` wrote, for the trace and the descriptor.
+    /// What the file wrote, for the trace and the descriptor.
     #[must_use]
     pub fn source(&self) -> &str {
         match self {
@@ -584,7 +584,7 @@ pub struct HttpAction {
 /// somebody these bytes", which is the shape every upload endpoint already
 /// reads.
 ///
-/// Mutually exclusive, and `mcp.yaml` refuses both together at load rather than
+/// Mutually exclusive, and the loader refuses both together rather than
 /// picking one: a request cannot be a JSON document and a form at the same time,
 /// and a file declaring both was written expecting something else to happen.
 #[derive(Debug, Clone)]
@@ -608,7 +608,7 @@ pub enum HookBody {
 /// endpoint guess field names it cannot know in advance.
 #[derive(Debug, Clone)]
 pub struct PartSpec {
-    /// The form field, as `mcp.yaml` named it.
+    /// The form field, as the file named it.
     pub field: String,
     /// Templates, each naming uploads of the run.
     pub sources: Vec<String>,
@@ -689,7 +689,7 @@ pub struct HookRecord {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Attachment {
-    /// The form field it went out under, as `mcp.yaml` named it.
+    /// The form field it went out under, as the file named it.
     ///
     /// A multipart with three fields makes three different statements to the
     /// endpoint, and a trace listing only file names would say which bytes went
@@ -713,7 +713,7 @@ pub type HookJournal = Arc<Mutex<Vec<HookRecord>>>;
 
 /// Validates a template without rendering it.
 ///
-/// Called when `mcp.yaml` loads, so a syntax error names the hook and the field
+/// Called when the file loads, so a syntax error names the hook and the field
 /// at startup rather than on the first tool call twenty minutes into a run.
 ///
 /// # Errors
@@ -932,7 +932,7 @@ pub(super) async fn fire(
 /// [`HookRecord::skipped`] for why a non-event belongs in a trace, and once per
 /// action because each names its own address. They are not the same answer,
 /// though: a condition that came back false is the hook working as declared,
-/// and one that could not be evaluated is a mistake in `mcp.yaml`.
+/// and one that could not be evaluated is a mistake in `mcp/`.
 ///
 /// # Errors
 ///
@@ -1217,7 +1217,7 @@ fn render_body<'a>(action: &HttpAction, rendering: &Rendering<'a>) -> Result<Sen
 /// A JSON body, rendered node by node.
 ///
 /// Strings render; numbers, booleans, `null` and the shape of the document
-/// itself go out as `mcp.yaml` wrote them. The document is the endpoint's
+/// itself go out as the file wrote them. The document is the endpoint's
 /// schema, written down — which is the whole reason this is a tree and not a
 /// string somebody has to keep valid by hand.
 fn render_json(node: &Value, rendering: &Rendering<'_>) -> Result<Value, String> {
@@ -2359,7 +2359,7 @@ mod tests {
     #[test]
     fn a_condition_keeps_the_spelling_it_was_written_with() {
         // Because that is what the trace quotes back when the answer is no, and
-        // a reader matching it against `mcp.yaml` should find it verbatim.
+        // a reader matching it against `mcp/` should find it verbatim.
         let condition = HookCondition::compile("  {{ vars.session is defined }}  ").expect("valid");
 
         assert_eq!(condition.source(), "{{ vars.session is defined }}");

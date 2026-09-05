@@ -1,7 +1,7 @@
-//! `mcp.yaml`, sitting next to the profiles and `auth.yaml`.
+//! MCP servers: one file per server, in a configuration directory's `mcp/`.
 //!
 //! A server is declared once and referenced by name, for the same reason auth is:
-//! the same server is worth pointing several profiles at, and worth replaying
+//! the same server is worth pointing several models at, and worth replaying
 //! across auth modes without duplicating anything.
 //!
 //! Same loading policy as everywhere else — a bad entry is reported and skipped,
@@ -27,10 +27,8 @@ use super::hook::{
     Hook, HookAction, HookBody, HookCondition, HookPhase, HookUrl, HttpAction, NamePattern,
     OnError, PartSpec,
 };
+use crate::config::layout;
 use crate::issue::LoadIssue;
-
-/// File declaring the MCP servers, in the profiles directory.
-pub const MCP_REGISTRY_FILE: &str = "mcp.yaml";
 
 /// Default per-request timeout. Generous: a real tool does real work.
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
@@ -43,7 +41,7 @@ const DEFAULT_HOOK_TIMEOUT_MS: u64 = 10_000;
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct McpDescriptor {
-    /// Registry name, referenced from a profile's `mcp:` list.
+    /// Registry name, referenced from a model's `mcp:` list.
     pub name: String,
     /// The endpoint, so the UI can show what it is about to talk to.
     pub url: String,
@@ -82,7 +80,7 @@ pub struct McpDescriptor {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureDescriptor {
-    /// Tools it applies to, as the patterns `mcp.yaml` wrote. Empty means every
+    /// Tools it applies to, as the patterns the file wrote. Empty means every
     /// tool.
     pub tools: Vec<String>,
     /// The variables it fills, by name.
@@ -97,10 +95,10 @@ pub struct HookDescriptor {
     pub name: String,
     /// Phases it fires on.
     pub on: Vec<HookPhase>,
-    /// Tools it applies to, as the patterns `mcp.yaml` wrote. Empty means every
+    /// Tools it applies to, as the patterns the file wrote. Empty means every
     /// tool.
     pub tools: Vec<String>,
-    /// The `if:` condition it is fired under, as `mcp.yaml` wrote it. Absent
+    /// The `if:` condition it is fired under, as the file wrote it. Absent
     /// means it fires on every call it covers.
     #[serde(rename = "if", skip_serializing_if = "Option::is_none")]
     pub condition: Option<String>,
@@ -154,65 +152,74 @@ pub struct McpRegistry {
 }
 
 impl McpRegistry {
-    /// Loads `mcp.yaml` from each of the profile directories, in order.
+    /// Loads every server file in each configuration directory's `mcp/`, in
+    /// order.
     ///
-    /// Never fails: a missing file means no servers, and a broken one is an issue
-    /// you can read in the UI rather than a refusal to start.
+    /// Never fails: an `mcp/` that is not there means no servers, and a broken
+    /// file is an issue you can read in the UI rather than a refusal to start.
     #[must_use]
     pub fn load_dirs(dirs: &[impl AsRef<Path>], http: &Client) -> Self {
         let mut registry = Self::default();
         for dir in dirs {
-            registry.read(&dir.as_ref().join(MCP_REGISTRY_FILE), http);
+            registry.read_dir(dir.as_ref(), http);
         }
         registry.descriptors.sort_by(|a, b| a.name.cmp(&b.name));
         registry
     }
 
-    /// Loads `mcp.yaml` from a single profiles directory.
+    /// Loads the servers of a single configuration directory.
     #[must_use]
     pub fn load(dir: &Path, http: &Client) -> Self {
         Self::load_dirs(&[dir], http)
     }
 
-    /// Folds one `mcp.yaml` in, on top of whatever earlier directories declared.
-    fn read(&mut self, path: &Path, http: &Client) {
-        if !path.exists() {
-            debug!(path = %path.display(), "no MCP registry");
-            return;
-        }
-
-        let text = match std::fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(error) => {
-                self.issues.push(LoadIssue::new(path, error.to_string()));
+    /// Folds one directory's `mcp/` in, on top of whatever earlier directories
+    /// declared.
+    fn read_dir(&mut self, dir: &Path, http: &Client) {
+        let paths = match layout::entries(dir, layout::MCP) {
+            Ok(paths) => paths,
+            Err(issue) => {
+                self.issues.push(issue);
                 return;
             }
         };
 
-        let file: RegistryFile = match serde_yaml_ng::from_str(&text) {
-            Ok(file) => file,
-            Err(error) => {
-                self.issues.push(LoadIssue::from_yaml(path, &error));
-                return;
-            }
-        };
+        // Which names *this* directory has already used, as opposed to the ones
+        // an earlier one declared: the first is a typo, the second is layering.
+        let mut here: BTreeMap<String, PathBuf> = BTreeMap::new();
 
-        for config in file.servers {
-            match self.sources.get(&config.name) {
-                Some(previous) if previous == path => {
-                    self.issues.push(LoadIssue::new(
-                        path,
-                        format!("duplicate MCP server `{}`", config.name),
-                    ));
+        for path in paths {
+            let config = match layout::read::<ServerConfig>(&path) {
+                Ok(Some(config)) => config,
+                Ok(None) => {
+                    debug!(path = %path.display(), "file declares no MCP server");
                     continue;
                 }
-                Some(previous) => warn!(
+                Err(issue) => {
+                    self.issues.push(issue);
+                    continue;
+                }
+            };
+            let path = path.as_path();
+
+            if let Some(previous) = here.insert(config.name.clone(), path.to_path_buf()) {
+                self.issues.push(LoadIssue::new(
+                    path,
+                    format!(
+                        "duplicate MCP server `{}`, already declared in {}",
+                        config.name,
+                        previous.display()
+                    ),
+                ));
+                continue;
+            }
+            if let Some(previous) = self.sources.get(&config.name) {
+                warn!(
                     name = %config.name,
                     path = %path.display(),
                     shadowed = %previous.display(),
                     "MCP server overridden by a later directory"
-                ),
-                None => {}
+                );
             }
 
             let headers = match HeaderTemplates::compile(&config.headers) {
@@ -295,8 +302,8 @@ impl McpRegistry {
     /// Every server's name, in the order the descriptors are listed.
     ///
     /// This is the set a chat run may reach: a server is declared once, in
-    /// `mcp.yaml`, and every `kind: chat` profile is offered all of it. Declaring
-    /// it there is the opt-in — there is no second one per profile.
+    /// `mcp/`, and every `kind: chat` model is offered all of it. Declaring
+    /// it there is the opt-in — there is no second one per model.
     #[must_use]
     pub fn names(&self) -> Vec<String> {
         self.descriptors
@@ -316,13 +323,6 @@ impl McpRegistry {
     pub fn is_empty(&self) -> bool {
         self.clients.is_empty()
     }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RegistryFile {
-    #[serde(default)]
-    servers: Vec<ServerConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -483,7 +483,7 @@ fn check_capture(server: &str, rules: &[CaptureRule]) -> Result<(), String> {
 ///
 /// `Display` renders the whole tree, keys and all, which puts `__all__:` in
 /// front of every whole-rule complaint — the internal name for "not about one
-/// field", and not a thing anybody wrote in `mcp.yaml`.
+/// field", and not a thing anybody wrote in a server file.
 fn complaints(errors: &ValidationErrors) -> String {
     errors
         .field_errors()
@@ -633,7 +633,7 @@ fn check_json(label: &str, node: &serde_json::Value) -> Result<(), String> {
     }
 }
 
-/// The multipart fields, in the order `mcp.yaml` wrote them.
+/// The multipart fields, in the order the file wrote them.
 fn compile_parts(
     label: &str,
     declared: &BTreeMap<String, PartConfig>,
@@ -662,7 +662,7 @@ fn compile_parts(
 
 /// One server, for the UI. Names only, never a credential.
 ///
-/// `declared` is the header names as `mcp.yaml` wrote them: the compiled
+/// `declared` is the header names as the file wrote them: the compiled
 /// templates no longer have them, and a listing of what a server sends is one of
 /// the two halves of "what is this about to do".
 fn describe_server<'a>(
@@ -742,16 +742,23 @@ fn default_hook_timeout_ms() -> u64 {
 mod tests {
     use super::*;
 
-    fn write(tag: &str, body: &str) -> std::path::PathBuf {
+    /// A configuration directory whose `mcp/` holds one file per server.
+    fn write_servers(tag: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("mire-mcp-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(MCP_REGISTRY_FILE), body).unwrap();
+        std::fs::create_dir_all(dir.join(layout::MCP)).unwrap();
+        for (name, body) in files {
+            std::fs::write(dir.join(layout::MCP).join(name), body).unwrap();
+        }
         dir
     }
 
+    fn write(tag: &str, body: &str) -> std::path::PathBuf {
+        write_servers(tag, &[("server.yaml", body)])
+    }
+
     #[test]
-    fn no_registry_means_no_servers_and_no_complaints() {
+    fn no_mcp_directory_means_no_servers_and_no_complaints() {
         let dir = std::env::temp_dir().join(format!("mire-mcp-none-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -763,13 +770,10 @@ mod tests {
 
     #[test]
     fn a_later_directory_takes_a_server_the_earlier_one_declared() {
-        let base = write(
-            "layer-base",
-            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n",
-        );
+        let base = write("layer-base", "name: files\nurl: https://mcp.internal/mcp\n");
         let mine = write(
             "layer-mine",
-            "servers:\n  - name: files\n    url: https://staging.internal/mcp\n",
+            "name: files\nurl: https://staging.internal/mcp\n",
         );
 
         let registry = McpRegistry::load_dirs(&[&base, &mine], &Client::new());
@@ -788,11 +792,14 @@ mod tests {
     fn a_duplicate_inside_the_later_directory_is_still_reported() {
         let base = write(
             "layer-dup-base",
-            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n",
+            "name: files\nurl: https://mcp.internal/mcp\n",
         );
-        let mine = write(
+        let mine = write_servers(
             "layer-dup-mine",
-            "servers:\n  - name: files\n    url: https://a.internal/mcp\n  - name: files\n    url: https://b.internal/mcp\n",
+            &[
+                ("a.yaml", "name: files\nurl: https://a.internal/mcp\n"),
+                ("b.yaml", "name: files\nurl: https://b.internal/mcp\n"),
+            ],
         );
 
         let registry = McpRegistry::load_dirs(&[&base, &mine], &Client::new());
@@ -809,10 +816,7 @@ mod tests {
 
     #[test]
     fn a_server_loads_with_its_defaults() {
-        let dir = write(
-            "basic",
-            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n",
-        );
+        let dir = write("basic", "name: files\nurl: https://mcp.internal/mcp\n");
         let registry = McpRegistry::load(&dir, &Client::new());
 
         assert!(registry.issues().is_empty(), "{:?}", registry.issues());
@@ -827,7 +831,7 @@ mod tests {
     fn a_tool_list_restricts_what_the_model_can_reach() {
         let dir = write(
             "restricted",
-            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    auth: workload\n    tools:\n      - read_file\n",
+            "name: files\nurl: https://mcp.internal/mcp\nauth: workload\ntools:\n  - read_file\n",
         );
         let registry = McpRegistry::load(&dir, &Client::new());
 
@@ -839,9 +843,12 @@ mod tests {
 
     #[test]
     fn a_duplicate_name_is_reported_and_the_first_one_wins() {
-        let dir = write(
+        let dir = write_servers(
             "dup",
-            "servers:\n  - name: a\n    url: https://one.internal/mcp\n  - name: a\n    url: https://two.internal/mcp\n",
+            &[
+                ("one.yaml", "name: a\nurl: https://one.internal/mcp\n"),
+                ("two.yaml", "name: a\nurl: https://two.internal/mcp\n"),
+            ],
         );
         let registry = McpRegistry::load(&dir, &Client::new());
 
@@ -854,8 +861,8 @@ mod tests {
     }
 
     #[test]
-    fn a_registry_that_does_not_parse_is_an_issue_rather_than_a_refusal_to_start() {
-        let dir = write("syntax", "servers: [unclosed\n");
+    fn a_server_that_does_not_parse_is_an_issue_rather_than_a_refusal_to_start() {
+        let dir = write("syntax", "name: [unclosed\n");
         let registry = McpRegistry::load(&dir, &Client::new());
 
         assert!(registry.is_empty());
@@ -864,29 +871,28 @@ mod tests {
     }
 
     const WITH_HOOK: &str = r"
-servers:
-  - name: files
-    url: https://mcp.internal/mcp
-    hooks:
-      - name: audit
-        on:
-          - before
-          - after
-        tools:
-          - write_file
-        actions:
-          - http:
-              url: https://audit.internal/events
-              auth: workload
-              headers:
-                x-source: mire
+name: files
+url: https://mcp.internal/mcp
+hooks:
+  - name: audit
+    on:
+      - before
+      - after
+    tools:
+      - write_file
+    actions:
+      - http:
+          url: https://audit.internal/events
+          auth: workload
+          headers:
+            x-source: mire
 ";
 
     /// A server declaring one hook whose single action is `body`.
     fn one_action(body: &str) -> String {
         format!(
-            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      \
-             - name: audit\n        on:\n          - before\n        actions:\n          - http:\n{body}"
+            "name: files\nurl: https://mcp.internal/mcp\nhooks:\n  \
+         - name: audit\n    on:\n      - before\n    actions:\n      - http:\n{body}"
         )
     }
 
@@ -946,22 +952,21 @@ servers:
         let dir = write(
             "hook-actions",
             r"
-servers:
-  - name: files
-    url: https://mcp.internal/mcp
-    hooks:
-      - name: upload
-        on:
-          - before
-        actions:
-          - http:
-              url: https://intake.internal/inputs
-              multipart:
-                file: '{{ uploads[0].path }}'
-          - http:
-              url: https://audit.internal/events
-              json:
-                tool: '{{ tool }}'
+name: files
+url: https://mcp.internal/mcp
+hooks:
+  - name: upload
+    on:
+      - before
+    actions:
+      - http:
+          url: https://intake.internal/inputs
+          multipart:
+            file: '{{ uploads[0].path }}'
+      - http:
+          url: https://audit.internal/events
+          json:
+            tool: '{{ tool }}'
 ",
         );
         let registry = McpRegistry::load(&dir, &Client::new());
@@ -988,7 +993,7 @@ servers:
     fn a_hook_that_does_nothing_is_refused_like_one_that_fires_on_nothing() {
         let dir = write(
             "hook-no-action",
-            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      - name: audit\n        on:\n          - before\n        actions: []\n",
+            "name: files\nurl: https://mcp.internal/mcp\nhooks:\n  - name: audit\n    on:\n      - before\n    actions: []\n",
         );
         let registry = McpRegistry::load(&dir, &Client::new());
 
@@ -1001,7 +1006,7 @@ servers:
     fn a_hook_that_fires_on_nothing_is_a_webhook_nobody_will_ever_get() {
         let dir = write(
             "hook-no-phase",
-            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      - name: audit\n        on: []\n        actions:\n          - http:\n              url: https://audit.internal/events\n",
+            "name: files\nurl: https://mcp.internal/mcp\nhooks:\n  - name: audit\n    on: []\n    actions:\n      - http:\n          url: https://audit.internal/events\n",
         );
         let registry = McpRegistry::load(&dir, &Client::new());
 
@@ -1014,7 +1019,7 @@ servers:
     fn two_hooks_of_the_same_name_are_reported() {
         let dir = write(
             "hook-dup",
-            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      - name: audit\n        on:\n          - before\n        actions:\n          - http:\n              url: https://one.internal/e\n      - name: audit\n        on:\n          - after\n        actions:\n          - http:\n              url: https://two.internal/e\n",
+            "name: files\nurl: https://mcp.internal/mcp\nhooks:\n  - name: audit\n    on:\n      - before\n    actions:\n      - http:\n          url: https://one.internal/e\n  - name: audit\n    on:\n      - after\n    actions:\n      - http:\n          url: https://two.internal/e\n",
         );
         let registry = McpRegistry::load(&dir, &Client::new());
 
@@ -1029,7 +1034,7 @@ servers:
     fn a_url_holding_a_template_is_kept_as_one() {
         let dir = write(
             "hook-url-template",
-            &one_action("              url: https://audit.internal/{{ vars.session }}\n"),
+            &one_action("          url: https://audit.internal/{{ vars.session }}\n"),
         );
         let registry = McpRegistry::load(&dir, &Client::new());
 
@@ -1043,12 +1048,12 @@ servers:
         );
     }
 
-    /// An `mcp.yaml` whose one hook is fired under `condition`.
+    /// A server whose one hook is fired under `condition`.
     fn one_condition(condition: &str) -> String {
         format!(
-            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      - name: audit\n        \
-             on:\n          - after\n        if: '{condition}'\n        actions:\n          - http:\n              \
-             url: https://audit.internal/events\n"
+            "name: files\nurl: https://mcp.internal/mcp\nhooks:\n  - name: audit\n    \
+         on:\n      - after\n    if: '{condition}'\n    actions:\n      - http:\n          \
+         url: https://audit.internal/events\n"
         )
     }
 
@@ -1141,7 +1146,7 @@ servers:
     fn a_url_that_is_not_a_url_and_not_a_template_is_caught_at_startup() {
         let dir = write(
             "hook-url-bad",
-            &one_action("              url: audit.internal/events\n"),
+            &one_action("          url: audit.internal/events\n"),
         );
         let registry = McpRegistry::load(&dir, &Client::new());
 
@@ -1164,7 +1169,7 @@ servers:
     fn a_url_template_that_does_not_parse_is_caught_at_startup() {
         let dir = write(
             "hook-url-template-bad",
-            &one_action("              url: https://audit.internal/{{ vars.session\n"),
+            &one_action("          url: https://audit.internal/{{ vars.session\n"),
         );
         let registry = McpRegistry::load(&dir, &Client::new());
 
@@ -1181,7 +1186,7 @@ servers:
         let dir = write(
             "hook-json",
             &one_action(
-                "              url: https://audit.internal/e\n              json:\n                tool: '{{ tool }}'\n                count: 3\n",
+                "          url: https://audit.internal/e\n          json:\n            tool: '{{ tool }}'\n            count: 3\n",
             ),
         );
         let registry = McpRegistry::load(&dir, &Client::new());
@@ -1203,7 +1208,7 @@ servers:
         let dir = write(
             "hook-json-bad",
             &one_action(
-                "              url: https://audit.internal/e\n              json:\n                nested:\n                  deep: '{{ unclosed'\n",
+                "          url: https://audit.internal/e\n          json:\n            nested:\n              deep: '{{ unclosed'\n",
             ),
         );
         let registry = McpRegistry::load(&dir, &Client::new());
@@ -1218,7 +1223,7 @@ servers:
         let dir = write(
             "hook-multipart",
             &one_action(
-                "              url: https://intake.internal/inputs\n              multipart:\n                file: '{{ uploads[0].path }}'\n                extra:\n                  - a.txt\n                  - b.txt\n",
+                "          url: https://intake.internal/inputs\n          multipart:\n            file: '{{ uploads[0].path }}'\n            extra:\n              - a.txt\n              - b.txt\n",
             ),
         );
         let registry = McpRegistry::load(&dir, &Client::new());
@@ -1248,7 +1253,7 @@ servers:
         let dir = write(
             "hook-multipart-bad",
             &one_action(
-                "              url: https://intake.internal/inputs\n              multipart:\n                file: '{{ unclosed'\n",
+                "          url: https://intake.internal/inputs\n          multipart:\n            file: '{{ unclosed'\n",
             ),
         );
         let registry = McpRegistry::load(&dir, &Client::new());
@@ -1263,7 +1268,7 @@ servers:
         let dir = write(
             "hook-two-bodies",
             &one_action(
-                "              url: https://audit.internal/e\n              json:\n                tool: '{{ tool }}'\n              multipart:\n                file: report.pdf\n",
+                "          url: https://audit.internal/e\n          json:\n            tool: '{{ tool }}'\n          multipart:\n            file: report.pdf\n",
             ),
         );
         let registry = McpRegistry::load(&dir, &Client::new());
@@ -1280,18 +1285,17 @@ servers:
         let dir = write(
             "hook-action-number",
             r"
-servers:
-  - name: files
-    url: https://mcp.internal/mcp
-    hooks:
-      - name: audit
-        on:
-          - before
-        actions:
-          - http:
-              url: https://one.internal/e
-          - http:
-              url: two.internal/e
+name: files
+url: https://mcp.internal/mcp
+hooks:
+  - name: audit
+    on:
+      - before
+    actions:
+      - http:
+          url: https://one.internal/e
+      - http:
+          url: two.internal/e
 ",
         );
         let registry = McpRegistry::load(&dir, &Client::new());
@@ -1308,7 +1312,7 @@ servers:
     fn a_tool_pattern_that_is_not_a_regex_is_caught_at_startup_too() {
         let dir = write(
             "hook-tools",
-            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      - name: gate\n        on:\n          - before\n        tools:\n          - 'write_('\n        actions:\n          - http:\n              url: https://policy.internal/decide\n",
+            "name: files\nurl: https://mcp.internal/mcp\nhooks:\n  - name: gate\n    on:\n      - before\n    tools:\n      - 'write_('\n    actions:\n      - http:\n          url: https://policy.internal/decide\n",
         );
         let registry = McpRegistry::load(&dir, &Client::new());
 
@@ -1325,7 +1329,7 @@ servers:
         let dir = write(
             "hook-method",
             &one_action(
-                "              url: https://audit.internal/e\n              method: 'not a verb'\n",
+                "          url: https://audit.internal/e\n          method: 'not a verb'\n",
             ),
         );
         let registry = McpRegistry::load(&dir, &Client::new());
@@ -1338,7 +1342,7 @@ servers:
     fn an_action_kind_nobody_implements_names_itself() {
         let dir = write(
             "hook-kind",
-            "servers:\n  - name: files\n    url: https://mcp.internal/mcp\n    hooks:\n      - name: audit\n        on:\n          - before\n        actions:\n          - carrier_pigeon:\n              url: https://audit.internal/e\n",
+            "name: files\nurl: https://mcp.internal/mcp\nhooks:\n  - name: audit\n    on:\n      - before\n    actions:\n      - carrier_pigeon:\n          url: https://audit.internal/e\n",
         );
         let registry = McpRegistry::load(&dir, &Client::new());
 
@@ -1350,7 +1354,7 @@ servers:
     fn an_unknown_field_is_caught_rather_than_silently_ignored() {
         let dir = write(
             "typo",
-            "servers:\n  - name: a\n    url: https://mcp.internal/mcp\n    timeout: 5000\n",
+            "name: a\nurl: https://mcp.internal/mcp\ntimeout: 5000\n",
         );
         let registry = McpRegistry::load(&dir, &Client::new());
         assert_eq!(registry.issues().len(), 1);
