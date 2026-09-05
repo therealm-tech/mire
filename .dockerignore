@@ -29,6 +29,9 @@
 # Docs and editor leftovers. The licence travels with the release tarball, which
 # CI takes from the checkout — the image has no use for it.
 /README.md
+/ARCHITECTURE.md
+/CONTRIBUTING.md
+/docs
 /LICENSE
 /Dockerfile
 /.dockerignore
