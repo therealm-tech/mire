@@ -231,11 +231,19 @@ pub fn delta(chunk: &Value, spec: &DecodeSpec, trace: &mut DecodeTrace) -> Delta
 /// chunk is a correct path over a model that said nothing, not a miss. A model
 /// answering with one tool call and no prose is exactly that.
 #[derive(Debug, Clone, Copy, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one independent flag per streamed cascade, not a state machine"
+)]
 pub struct Resolved {
     /// A `delta` path selected a node at least once.
     pub delta: bool,
     /// A `tool_calls` path selected a node at least once.
     pub tool_calls: bool,
+    /// A `finish_reason` path selected a node at least once.
+    pub finish_reason: bool,
+    /// A `usage` path selected a node at least once.
+    pub usage: bool,
 }
 
 /// Records the streamed cascades that never resolved.
@@ -248,6 +256,15 @@ pub fn record_miss(spec: &DecodeSpec, resolved: Resolved, trace: &mut DecodeTrac
     }
     if !resolved.tool_calls {
         trace.miss(DecodeField::ToolCalls, paths::sources(&spec.tool_calls));
+    }
+    if !resolved.finish_reason {
+        trace.miss(
+            DecodeField::FinishReason,
+            paths::sources(&spec.finish_reason),
+        );
+    }
+    if !resolved.usage {
+        trace.miss(DecodeField::Usage, paths::sources(&spec.usage));
     }
 }
 
@@ -272,8 +289,8 @@ pub struct StreamView {
     /// Bytes read off the wire.
     pub bytes: u64,
     /// Whether the endpoint ended the stream itself — a `[DONE]` sentinel, or a
-    /// final chunk saying so. `false` means the connection simply stopped, which
-    /// is what a proxy cutting the stream looks like.
+    /// chunk saying why it stopped. `false` means the connection simply stopped,
+    /// which is what a proxy cutting the stream looks like.
     pub terminated: bool,
     /// Time to the first frame, whatever it carried. Together with `ttftMs` it
     /// separates "the endpoint is slow to start" from "the endpoint sends a
@@ -475,6 +492,7 @@ mod tests {
             Resolved {
                 delta: true,
                 tool_calls: true,
+                ..Resolved::default()
             },
             &mut trace,
         );

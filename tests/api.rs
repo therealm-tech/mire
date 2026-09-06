@@ -6374,6 +6374,78 @@ async fn a_streamed_call_arrives_in_pieces_and_adds_up_to_the_answer() {
     assert_eq!(stream["terminated"], true);
 }
 
+/// A model reading the built-in Anthropic shape, whose stream is the reason the
+/// stop reason is accumulated rather than read off the final frame.
+fn anthropic_streaming_model(url: &str) -> String {
+    format!(
+        r#"
+name: chat
+kind: chat
+url: {url}
+timeout_ms: 5000
+request:
+  template: |
+    {{"model": "m", "messages": {{{{ messages | tojson }}}}, "stream": {{{{ stream | tojson }}}}}}
+decode:
+  from: [anthropic-chat]
+"#
+    )
+}
+
+/// The shape this accumulation exists for.
+///
+/// Anthropic says why it stopped, and what it spent, in a `message_delta` — and
+/// then closes the stream with a `message_stop` carrying nothing at all. It
+/// sends no `[DONE]` either, so with the stop reason read off the last frame
+/// alone there was nothing left to call a clean ending: a stream that finished
+/// exactly as designed was reported as one the connection had cut short.
+#[tokio::test]
+async fn a_stream_saying_why_it_stopped_before_its_last_frame_still_ends_cleanly() {
+    let endpoint = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(event_stream(concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"role\":\"assistant\",\"content\":[]}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hel\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"lo\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":15}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        )))
+        .mount(&endpoint)
+        .await;
+
+    let harness = Harness::start(&[(
+        "models/chat.yaml",
+        anthropic_streaming_model(&endpoint.uri()),
+    )])
+    .await;
+
+    let (status, events) = harness
+        .stream(json!({"model": "chat", "prompt": "hi"}))
+        .await;
+    assert_eq!(status, 200);
+
+    let response = &events.last().unwrap().1["response"];
+    assert_eq!(response["decoded"]["content"], "Hello");
+    // Both of these come from the second-to-last frame.
+    assert_eq!(response["decoded"]["finishReason"], "end_turn");
+    assert_eq!(response["decoded"]["usage"]["completionTokens"], 15);
+
+    let stream = &response["stream"];
+    assert_eq!(stream["deltas"], 2);
+    // The whole point: no sentinel, an empty closing frame, and still a clean
+    // ending — because something in the stream said why it stopped.
+    assert_eq!(stream["terminated"], true);
+}
+
 /// A refused stream is not a stream: the endpoint answers in one shot, and that
 /// single object is the last frame there is. The error still decodes out of it.
 #[tokio::test]

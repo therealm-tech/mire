@@ -25,21 +25,45 @@ pub fn decode(raw: &Value, spec: &DecodeSpec) -> (Completion, DecodeTrace) {
     (completion, trace)
 }
 
-/// Decodes what only the *final* chunk of a streamed response can say.
+/// Reads the stop reason out of one document, whether that is a whole response
+/// or a single chunk of a stream.
 ///
-/// Nothing here was available earlier: this is the stop reason and the token
-/// counts, which every endpoint puts in the chunk that closes the stream. The
-/// text and the tool calls are not read here — both are accumulated chunk by
-/// chunk (see [`super::stream::delta`] and [`read_tool_calls`]), including from
-/// this last one, and the caller already holds them.
+/// `None` means no configured path resolved, and it is deliberately not a miss:
+/// what that says depends on the caller. For a whole response it is one, and
+/// [`decode_finish_reason`] records it. For a chunk it is the ordinary case —
+/// most chunks do not say why generation stopped — and the miss can only be
+/// settled once the stream is over, which [`super::stream::record_miss`] does.
 #[must_use]
-pub fn decode_tail(raw: &Value, spec: &DecodeSpec, trace: &mut DecodeTrace) -> Completion {
-    Completion {
-        content: None,
-        tool_calls: Vec::new(),
-        finish_reason: decode_finish_reason(raw, spec, trace),
-        usage: decode_usage(raw, spec, trace),
+pub fn read_finish_reason(
+    raw: &Value,
+    spec: &DecodeSpec,
+    trace: &mut DecodeTrace,
+) -> Option<String> {
+    let (path, node) = resolve_one(raw, &spec.finish_reason)?;
+
+    if let Some(reason) = node.as_str() {
+        trace.hit(DecodeField::FinishReason, path.source());
+        Some(reason.to_owned())
+    } else {
+        trace.issue_once(
+            DecodeField::FinishReason,
+            path.source(),
+            format!("expected a string, found {}", type_name(node)),
+        );
+        None
     }
+}
+
+/// Reads the token accounting out of one document, whole response or chunk.
+///
+/// `None` is not a miss here either, for the same reason as
+/// [`read_finish_reason`].
+#[must_use]
+pub fn read_usage(raw: &Value, spec: &DecodeSpec, trace: &mut DecodeTrace) -> Option<Usage> {
+    let (path, node) = resolve_one(raw, &spec.usage)?;
+
+    trace.hit(DecodeField::Usage, path.source());
+    Some(Usage::from_value(node))
 }
 
 /// Reads the assistant text.
@@ -169,35 +193,22 @@ pub(crate) fn tool_call_from_value(value: &Value) -> Option<ToolCall> {
 }
 
 fn decode_finish_reason(raw: &Value, spec: &DecodeSpec, trace: &mut DecodeTrace) -> Option<String> {
-    let Some((path, node)) = resolve_one(raw, &spec.finish_reason) else {
+    let reason = read_finish_reason(raw, spec, trace);
+    if reason.is_none() {
         trace.miss(
             DecodeField::FinishReason,
             paths::sources(&spec.finish_reason),
         );
-        return None;
-    };
-
-    if let Some(reason) = node.as_str() {
-        trace.hit(DecodeField::FinishReason, path.source());
-        Some(reason.to_owned())
-    } else {
-        trace.issue(
-            DecodeField::FinishReason,
-            path.source(),
-            format!("expected a string, found {}", type_name(node)),
-        );
-        None
     }
+    reason
 }
 
 fn decode_usage(raw: &Value, spec: &DecodeSpec, trace: &mut DecodeTrace) -> Option<Usage> {
-    let Some((path, node)) = resolve_one(raw, &spec.usage) else {
+    let usage = read_usage(raw, spec, trace);
+    if usage.is_none() {
         trace.miss(DecodeField::Usage, paths::sources(&spec.usage));
-        return None;
-    };
-
-    trace.hit(DecodeField::Usage, path.source());
-    Some(Usage::from_value(node))
+    }
+    usage
 }
 
 pub(super) fn type_name(value: &Value) -> &'static str {
