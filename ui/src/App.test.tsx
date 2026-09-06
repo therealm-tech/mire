@@ -1725,6 +1725,35 @@ describe('the loop', () => {
     // And the model is not the one at fault, so it is not accused of it.
     expect(model.queryByText(/No configured path resolved the content/)).not.toBeInTheDocument()
   })
+
+  it('does not blame the paths when the model answered with a tool call', async () => {
+    const user = userEvent.setup()
+    vi.stubGlobal(
+      'fetch',
+      mockApi({
+        'api/models': MODELS,
+        'api/auth': AUTH,
+        'api/mcp': MCP,
+        'api/prompts': PROMPTS,
+        'api/agent': [
+          'event: turn',
+          `data: ${JSON.stringify({ event: 'turn', ...turnFixture() })}`,
+          '',
+          '',
+        ].join('\n'),
+      }),
+    )
+
+    render(<App />)
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    // `content` is null because the model called a tool instead of talking, not
+    // because a path missed. The call it made is right there above the message
+    // that would have sent the reader off editing the cascade.
+    const model = within(await openCard(user, /Turn 1 · model/))
+    expect(model.getByText(/get_weather/)).toBeInTheDocument()
+    expect(model.queryByText(/No configured path resolved the content/)).not.toBeInTheDocument()
+  })
 })
 
 function turnFixture() {

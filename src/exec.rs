@@ -18,12 +18,12 @@ use crate::auth::{ANONYMOUS, AuthError, AuthProvider, Retry};
 use crate::config::ConfigStore;
 use crate::decode::embedding::{CheckOutcome, EmbeddingChecks, Vectors};
 use crate::decode::error::DecodedError;
-use crate::decode::stream::{Frame, FrameParser, Framing, StreamView};
+use crate::decode::stream::{Delta, Frame, FrameParser, Framing, Resolved, StreamView};
 use crate::decode::{
     Completion, DecodeTrace, Decoded, EmbeddingResult, HttpMeta, chat, embedding, error, script,
     stream,
 };
-use crate::message::Message;
+use crate::message::{Message, ToolCall};
 use crate::model::{DecodeSpec, HttpMethod, Model, ModelKind};
 use crate::redact::{Redactor, Secret};
 use crate::render::{
@@ -550,6 +550,8 @@ struct StreamAccumulator<'a> {
     started: std::time::Instant,
     ttft_ms: Option<u64>,
     text: String,
+    tool_calls: Vec<ToolCall>,
+    resolved: Resolved,
     body: String,
     last: Option<Value>,
     /// Set by the `[DONE]` sentinel. A stop reason in the final chunk also counts
@@ -578,6 +580,8 @@ impl<'a> StreamAccumulator<'a> {
             started,
             ttft_ms: None,
             text: String::new(),
+            tool_calls: Vec::new(),
+            resolved: Resolved::default(),
             body: String::new(),
             last: None,
             sentinel: false,
@@ -606,18 +610,42 @@ impl<'a> StreamAccumulator<'a> {
         match frame {
             Frame::Chunk(value) => {
                 self.view.chunks += 1;
-                if let Some(delta) = stream::delta(&value, self.spec, &mut self.trace) {
-                    self.view.deltas += 1;
-                    // Time to first *token*, not to first chunk: a role-only
-                    // preamble is not an answer starting to arrive.
-                    if self.ttft_ms.is_none() {
-                        self.ttft_ms = Some(millis(self.started, at));
+                // Masked *before* it is decoded, not after, exactly as the
+                // non-streaming path masks the parsed body before handing it to
+                // the decoder. Everything read below is a value the endpoint
+                // chose — a tool call's arguments, a `usage` object commonly
+                // read from `$` — and any of them can quote a credential back at
+                // us. Decoding first and masking the pieces afterwards means
+                // remembering to mask each new piece.
+                let value = self.redactor.json(&value);
+
+                match stream::delta(&value, self.spec, &mut self.trace) {
+                    Delta::Text(text) => {
+                        self.resolved.delta = true;
+                        self.view.deltas += 1;
+                        // Time to first *token*, not to first chunk: a role-only
+                        // preamble is not an answer starting to arrive.
+                        if self.ttft_ms.is_none() {
+                            self.ttft_ms = Some(millis(self.started, at));
+                        }
+                        self.text.push_str(&text);
+                        on_event(CallEvent::Delta { text });
                     }
-                    let masked = self.redactor.text(&delta);
-                    self.text.push_str(&masked);
-                    on_event(CallEvent::Delta { text: masked });
+                    Delta::Silent => self.resolved.delta = true,
+                    Delta::Unresolved => {}
                 }
-                self.last = Some(*value);
+
+                // Every chunk, not just the last one: Ollama's native API sends
+                // a whole tool call in a chunk of its own and then closes the
+                // stream with a chunk that carries only the stop reason and the
+                // counters. Reading the tail alone decodes that as a model that
+                // called nothing.
+                if let Some(calls) = chat::read_tool_calls(&value, self.spec, &mut self.trace) {
+                    self.resolved.tool_calls = true;
+                    self.tool_calls.extend(calls);
+                }
+
+                self.last = Some(value);
             }
             Frame::Done => self.sentinel = true,
             Frame::Unparsable(_) => self.view.unparsable += 1,
@@ -630,21 +658,16 @@ impl<'a> StreamAccumulator<'a> {
             self.handle(frame, at, &mut |_| {});
         }
 
-        // Masked *before* it is decoded, not after. `usage` is commonly pointed
-        // at `$` — Ollama puts its counters at the top level — and `Usage` keeps
-        // the object it read verbatim, so decoding the unmasked chunk would
-        // carry a credential the endpoint quoted back at us straight into the
-        // response. The non-streaming path decodes the masked value for the same
-        // reason.
-        let last = self.last.as_ref().map(|value| self.redactor.json(value));
+        let last = self.last.take();
 
         let mut completion = match &last {
             Some(last) => chat::decode_tail(last, self.spec, &mut self.trace),
             None => Completion::default(),
         };
-        // The aggregate is the answer. It never comes from a path, so nothing in
-        // the trace claims it did.
-        completion.content = (!self.text.is_empty()).then(|| self.text.clone());
+        // The aggregates are the answer. Neither comes from a path in the final
+        // chunk, so nothing in the trace claims it did.
+        completion.content = (!self.text.is_empty()).then(|| std::mem::take(&mut self.text));
+        completion.tool_calls = std::mem::take(&mut self.tool_calls);
 
         // An endpoint that refuses a streamed call refuses it in one shot: the
         // error body arrives as a single frame, which is the last one there is.
@@ -652,7 +675,7 @@ impl<'a> StreamAccumulator<'a> {
             .as_ref()
             .and_then(|last| error::decode(last, self.spec, self.status, &mut self.trace));
 
-        stream::record_miss(self.spec, &mut self.trace);
+        stream::record_miss(self.spec, self.resolved, &mut self.trace);
 
         // Two ways to end on purpose: the sentinel, or a final chunk that says
         // why it stopped. Anything else and the connection merely went quiet,

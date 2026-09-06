@@ -493,11 +493,12 @@ function ModelCard({
             )}
 
             {/*
-              Not said when the endpoint reported an error: there is nothing
-              wrong with the model, and sending the reader off to fix its
-              paths would be sending them the wrong way.
+              Not said when the endpoint reported an error, nor when the model
+              answered with a tool call and no prose: in neither case is there
+              anything wrong with the paths, and sending the reader off to fix
+              them would be sending them the wrong way.
             */}
-            {decoded.content === null && !error ? (
+            {decoded.content === null && !error && decoded.toolCalls.length === 0 ? (
               <p className="text-muted text-sm">
                 No configured path resolved the content. The raw response is below, and the decode
                 trace says what was tried.

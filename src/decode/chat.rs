@@ -25,22 +25,18 @@ pub fn decode(raw: &Value, spec: &DecodeSpec) -> (Completion, DecodeTrace) {
     (completion, trace)
 }
 
-/// Decodes everything a *streamed* response can only say at the end.
+/// Decodes what only the *final* chunk of a streamed response can say.
 ///
-/// The text is not read here: it was accumulated chunk by chunk (see
-/// [`super::stream::delta`]) and the caller already has it. What is left lives in
-/// the final chunk, which is where every endpoint puts its stop reason and its
-/// token counts.
-///
-/// Tool calls are read too, and that works for an endpoint that sends each call
-/// whole — Ollama's native API does. `OpenAI` splits a call's arguments across
-/// chunks, and reassembling those is not attempted: agent mode does not stream,
-/// so tool calling is tested where it is answered.
+/// Nothing here was available earlier: this is the stop reason and the token
+/// counts, which every endpoint puts in the chunk that closes the stream. The
+/// text and the tool calls are not read here — both are accumulated chunk by
+/// chunk (see [`super::stream::delta`] and [`read_tool_calls`]), including from
+/// this last one, and the caller already holds them.
 #[must_use]
 pub fn decode_tail(raw: &Value, spec: &DecodeSpec, trace: &mut DecodeTrace) -> Completion {
     Completion {
         content: None,
-        tool_calls: decode_tool_calls(raw, spec, trace),
+        tool_calls: Vec::new(),
         finish_reason: decode_finish_reason(raw, spec, trace),
         usage: decode_usage(raw, spec, trace),
     }
@@ -75,15 +71,24 @@ fn decode_content(raw: &Value, spec: &DecodeSpec, trace: &mut DecodeTrace) -> Op
     Some(parts.concat())
 }
 
-/// Reads the tool calls.
+/// Reads the tool calls out of one document, whether that is a whole response or
+/// a single chunk of a stream.
+///
+/// `None` means no configured path resolved, and it is deliberately not a miss:
+/// what that says depends on the caller. For a whole response it is one, and
+/// [`decode_tool_calls`] records it. For a chunk it is the ordinary case — most
+/// chunks carry no tool call — and the miss can only be settled once the stream
+/// is over, which [`super::stream::record_miss`] does.
 ///
 /// The selected nodes may be one array (the `OpenAI` shape) or several objects (a
 /// wildcard over content blocks); both are flattened to a list of calls.
-fn decode_tool_calls(raw: &Value, spec: &DecodeSpec, trace: &mut DecodeTrace) -> Vec<ToolCall> {
-    let Some((path, nodes)) = resolve(raw, &spec.tool_calls) else {
-        trace.miss(DecodeField::ToolCalls, paths::sources(&spec.tool_calls));
-        return Vec::new();
-    };
+#[must_use]
+pub fn read_tool_calls(
+    raw: &Value,
+    spec: &DecodeSpec,
+    trace: &mut DecodeTrace,
+) -> Option<Vec<ToolCall>> {
+    let (path, nodes) = resolve(raw, &spec.tool_calls)?;
 
     let items: Vec<&Value> = match nodes.as_slice() {
         [Value::Array(array)] => array.iter().collect(),
@@ -94,7 +99,7 @@ fn decode_tool_calls(raw: &Value, spec: &DecodeSpec, trace: &mut DecodeTrace) ->
     for item in items {
         match tool_call_from_value(item) {
             Some(call) => calls.push(call),
-            None => trace.issue(
+            None => trace.issue_once(
                 DecodeField::ToolCalls,
                 path.source(),
                 format!("cannot read a tool call out of {}", type_name(item)),
@@ -105,7 +110,15 @@ fn decode_tool_calls(raw: &Value, spec: &DecodeSpec, trace: &mut DecodeTrace) ->
     if !calls.is_empty() {
         trace.hit(DecodeField::ToolCalls, path.source());
     }
-    calls
+    Some(calls)
+}
+
+/// Reads the tool calls out of a whole response.
+fn decode_tool_calls(raw: &Value, spec: &DecodeSpec, trace: &mut DecodeTrace) -> Vec<ToolCall> {
+    read_tool_calls(raw, spec, trace).unwrap_or_else(|| {
+        trace.miss(DecodeField::ToolCalls, paths::sources(&spec.tool_calls));
+        Vec::new()
+    })
 }
 
 /// Normalises the two tool-call shapes seen in the wild.
@@ -305,6 +318,28 @@ usage: ["$.usage"]
         assert!(completion.content.is_none());
         assert_eq!(trace.issues.len(), 1);
         assert!(trace.issues[0].message.contains("found a number"));
+    }
+
+    /// The distinction the streamed path is built on: "this document has no
+    /// tool call in it" is not "no configured path fits this endpoint", and one
+    /// chunk in a stream cannot tell the two apart on its own.
+    #[test]
+    fn an_unresolved_cascade_is_told_apart_from_an_empty_one() {
+        let spec = openai_spec();
+        let mut trace = DecodeTrace::default();
+
+        let chunk = serde_json::json!({"choices": [{"delta": {"content": "hi"}}]});
+        assert!(read_tool_calls(&chunk, &spec, &mut trace).is_none());
+
+        let empty = serde_json::json!({"choices": [{"message": {"tool_calls": []}}]});
+        assert_eq!(
+            read_tool_calls(&empty, &spec, &mut trace).map(|calls| calls.len()),
+            Some(0)
+        );
+
+        // Neither is a finding, and neither was recorded as one.
+        assert!(trace.missed.is_empty());
+        assert!(trace.issues.is_empty());
     }
 
     #[test]
