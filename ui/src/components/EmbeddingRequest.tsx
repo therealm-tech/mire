@@ -15,6 +15,7 @@ export function EmbeddingRequest({
   repeat,
   includeVectors,
   busy,
+  missingSignIn,
   onInput,
   onRepeat,
   onIncludeVectors,
@@ -27,6 +28,12 @@ export function EmbeddingRequest({
   repeat: number
   includeVectors: boolean
   busy: boolean
+  /**
+   * An identity this call needs has no browser session behind it, so it would be
+   * refused here rather than by the endpoint. There is no loop and no MCP server
+   * in an embedding run, so this is only ever the model's own `auth:`.
+   */
+  missingSignIn: boolean
   onInput: (value: string) => void
   onRepeat: (value: number) => void
   onIncludeVectors: (value: boolean) => void
@@ -74,7 +81,17 @@ export function EmbeddingRequest({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <Button variant="primary" size="md" disabled={busy} onClick={onSend}>
+          <Button
+            variant="primary"
+            size="md"
+            disabled={busy || missingSignIn}
+            onClick={onSend}
+            title={
+              missingSignIn
+                ? 'An identity this run needs has nobody signed in to it. Sign in above, and Send comes back.'
+                : undefined
+            }
+          >
             Send
           </Button>
           {busy ? (

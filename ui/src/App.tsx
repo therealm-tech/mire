@@ -417,6 +417,14 @@ export function App() {
   // composer's subject and not the bar's.
   const needsUpload = model?.requiresUpload === true && attachments.length === 0
 
+  // The other refusal **Send** obeys rather than only reports. A run whose
+  // identity has no session does not reach the endpoint at all — `mire` answers
+  // `409 not_signed_in` itself and puts nothing on the wire — so pressing Send
+  // buys the same sentence the bar is already showing, next to the button that
+  // fetches the session. Every other red line is the endpoint's verdict to give,
+  // and being refused by it is the answer you came for.
+  const missingSignIn = ready?.rows.some((row) => row.fix?.kind === 'sign-in') ?? false
+
   const signIn = useCallback((provider: string, prompt?: string) => {
     // Opened *before* awaiting anything: a popup opened after an await has lost
     // its user gesture, and browsers block it. It gets its URL a moment later.
@@ -934,6 +942,7 @@ export function App() {
               attachments={attachments}
               attaching={attaching}
               needsUpload={needsUpload}
+              missingSignIn={missingSignIn}
               attachError={attachError ? attachError.body : null}
               onPrompt={setPrompt}
               onMaxIterations={setMaxIterations}
@@ -956,6 +965,7 @@ export function App() {
                 repeat={repeat}
                 includeVectors={includeVectors}
                 busy={busy}
+                missingSignIn={missingSignIn}
                 onInput={setInput}
                 onRepeat={setRepeat}
                 onIncludeVectors={setIncludeVectors}

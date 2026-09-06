@@ -446,7 +446,32 @@ function mockApi(routes: Record<string, unknown>) {
 }
 
 /** Records every `api/agent` body, so a test can assert what went out. */
-function recordingApi(answers: string[], mcp: unknown = MCP) {
+/**
+ * The signed-in half of the auth listing.
+ *
+ * At module scope because two things want it: the browser-login tests, and every
+ * test about what a run puts on the wire — **Send** is shut while an identity
+ * the run needs has nobody behind it, so a test that sends has to have signed in
+ * whenever its servers name `me`.
+ */
+const SIGNED_IN = {
+  ...AUTH,
+  providers: AUTH.providers.map((provider) =>
+    provider.name === 'me'
+      ? {
+          ...provider,
+          session: {
+            subject: 'gleroy',
+            scope: 'openid profile',
+            expiresInS: 240,
+            canRefresh: true,
+          },
+        }
+      : provider,
+  ),
+}
+
+function recordingApi(answers: string[], mcp: unknown = MCP, auth: unknown = AUTH) {
   const sent: Array<Record<string, unknown>> = []
   let turn = 0
 
@@ -456,7 +481,7 @@ function recordingApi(answers: string[], mcp: unknown = MCP) {
       return Promise.resolve(Response.json(MODELS))
     }
     if (url.endsWith('api/auth')) {
-      return Promise.resolve(Response.json(AUTH))
+      return Promise.resolve(Response.json(auth))
     }
     if (url.endsWith('api/mcp')) {
       return Promise.resolve(Response.json(mcp))
@@ -725,7 +750,8 @@ describe('App', () => {
   })
 
   it('never states a revision on the wire, which mcp/ settles', async () => {
-    const { fetchMock, sent } = recordingApi(['pong'])
+    // Signed in, because `dev` calls as `me` and **Send** waits for that session.
+    const { fetchMock, sent } = recordingApi(['pong'], MCP, SIGNED_IN)
     vi.stubGlobal('fetch', fetchMock)
 
     const user = userEvent.setup()
@@ -779,7 +805,7 @@ describe('App', () => {
   })
 
   it('always names the servers on the wire, an empty list included', async () => {
-    const { fetchMock, sent } = recordingApi(['pong', 'pong', 'pong'])
+    const { fetchMock, sent } = recordingApi(['pong', 'pong', 'pong'], MCP, SIGNED_IN)
     vi.stubGlobal('fetch', fetchMock)
 
     const user = userEvent.setup()
@@ -2238,24 +2264,6 @@ describe('traffic', () => {
 })
 
 describe('browser login', () => {
-  /** The signed-in half of the auth listing. */
-  const SIGNED_IN = {
-    ...AUTH,
-    providers: AUTH.providers.map((provider) =>
-      provider.name === 'me'
-        ? {
-            ...provider,
-            session: {
-              subject: 'gleroy',
-              scope: 'openid profile',
-              expiresInS: 240,
-              canRefresh: true,
-            },
-          }
-        : provider,
-    ),
-  }
-
   it('offers a sign-in button only where the model calls as a human', async () => {
     const user = userEvent.setup()
     render(<App />)
@@ -3513,6 +3521,90 @@ const NEEDS_A_FILE_AND_NOTHING_ELSE = {
   ],
   issues: [],
 }
+
+/**
+ * A run whose identity has nobody behind it never reaches the endpoint: `mire`
+ * answers `409 not_signed_in` itself and puts nothing on the wire. So **Send**
+ * waits for the session rather than spending a click on a refusal this side of
+ * the process — which is the opposite of every other red line on the bar, where
+ * being refused by the endpoint is the answer you came for.
+ */
+describe('a run with nobody signed in', () => {
+  it('holds Send shut while the model calls as a human nobody fetched', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    // `chat` calls as `anonymous`: nothing to sign in to, nothing to wait for.
+    expect(await screen.findByRole('button', { name: 'Send' })).toBeEnabled()
+
+    await user.click(screen.getByRole('button', { name: /as-me/ }))
+    const send = screen.getByRole('button', { name: 'Send' })
+    expect(send).toBeDisabled()
+    expect(send).toHaveAttribute('title', expect.stringContaining('Sign in above'))
+  })
+
+  it('lets it go once somebody has', async () => {
+    vi.stubGlobal(
+      'fetch',
+      mockApi({
+        'api/models': MODELS,
+        'api/auth': SIGNED_IN,
+        'api/mcp': MCP,
+        'api/prompts': PROMPTS,
+      }),
+    )
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: /as-me/ }))
+    expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled()
+  })
+
+  it('holds it shut for a session only a server in the run wants', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    // `guarded` calls the model as `pasted`, which needs no browser. Switching
+    // `dev` on brings `me` into the run, and with it the wait.
+    await user.click(await screen.findByRole('button', { name: /guarded/ }))
+    expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled()
+
+    await openMcp(user, 'dev')
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
+
+    // Out of the run, out of the picture: a server that is off is never set up,
+    // so the session it wanted is not this run's business.
+    await user.click(screen.getByRole('switch', { name: 'dev' }))
+    expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled()
+  })
+
+  it('holds the embedding Send shut too, where there is no loop at all', async () => {
+    const embedAsMe = {
+      ...MODELS,
+      models: MODELS.models.map((model) =>
+        model.id === 'embed' ? { ...model, auth: 'me' } : model,
+      ),
+    }
+    vi.stubGlobal(
+      'fetch',
+      mockApi({
+        'api/models': embedAsMe,
+        'api/auth': AUTH,
+        'api/mcp': MCP,
+        'api/prompts': PROMPTS,
+      }),
+    )
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    // No loop and no server, so this is only ever the model's own `auth:` — and
+    // it is refused here just the same.
+    await user.click(await screen.findByRole('button', { name: /embed/ }))
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
+  })
+})
 
 describe('a model that requires a file', () => {
   it('holds Send shut until one is attached, and says why', async () => {

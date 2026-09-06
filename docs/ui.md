@@ -26,6 +26,14 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   attached is refused just as squarely, but the file that fixes it is picked two
   buttons along on the composer, so that is where it is said — beside **Attach**,
   with **Send** shut until it is pressed.
+
+  **Send waits for one of these lines, and only one**: an identity with nobody
+  signed in to it, the model's own or one a server in this run needs. That call
+  never reaches the endpoint — `mire` answers `409 not_signed_in` itself and puts
+  nothing on the wire — so the click buys the sentence already on the page, next
+  to the button that fetches the session. Every other red line leaves **Send**
+  alone on purpose: a credential the endpoint refuses is the endpoint's verdict,
+  and collecting it is the reason you came.
 - **The identity, on one of those lines.** It is the model's, declared in its
   `auth:` next to the URL it authenticates against, so the line shows it rather
   than offering alternatives — what you read in the file is what went out, and
