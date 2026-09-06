@@ -1,0 +1,88 @@
+# What fires around a tool call, and what a call leaves behind for the next one.
+#
+# The same server as `weather.yaml`, with the two halves that turn a tool call
+# into a pipeline:
+#
+#   1. `policy`   a **before** hook. It asks `POST /policy` whether this call may
+#                 happen, and its failure is the call's failure — `on_error` is
+#                 `fail` by default, so a non-2xx means the `tools/call` never
+#                 goes out. The dev server refuses exactly one city, so
+#                 "what is the weather in Mordor?" is a gate you can watch close.
+#   2. `capture`  what to keep out of the result. `get_weather` answers
+#                 `structuredContent: {"temp": …, "conditions": …}`, and these two
+#                 paths turn that into `vars.temp` and `vars.conditions`.
+#   3. `audit`    an **after** hook, which is where those variables are read back.
+#                 It posts the reading to `POST /audit` — and because a template
+#                 naming something undefined fails the hook rather than sending a
+#                 request with a hole in it, the audit is genuinely coupled to the
+#                 capture rather than decorated with it.
+#
+# Both routes are the dev MCP server's, and neither is MCP: they are the third
+# party, so this runs against `docker compose up -d` with nothing else to set up.
+# What the audit sink received is one `curl` away, which is the point — a hook
+# you cannot observe is a hook you have to trust:
+#
+#   curl -sS localhost:11436/audit | jq
+#
+# The trace says all of it either way: a card per hook firing, the rendered URL
+# and body, and — for a hook that sat a call out — the condition that came back
+# false, quoted. A hook that quietly never ran and a hook that was never declared
+# must not look the same.
+#
+# Nothing is narrowed at the server: the run asks for the tool list and the model
+# is offered all three. The `tools:` inside each hook and each capture rule is a
+# different question — which *calls* they apply to — and `get_weather` is the only
+# one that answers a reading worth filing. Ask for a slow echo and watch both
+# hooks sit the call out, named in the trace rather than silently absent.
+#
+# It is live, like its two neighbours, so a chat run sets this server up as well
+# as `weather`, and the model is offered the same tools twice. Untick the others
+# in the composer's Servers row when the hooks are what you are asking about, so
+# the pipeline fires once and the trace has one story in it.
+
+---
+name: weather-hooks
+url: http://127.0.0.1:11436/mcp
+timeout_ms: 15000
+auth: keycloak-user
+
+capture:
+  - tools:
+      - get_weather
+    vars:
+      temp:
+        - $.temp
+      conditions:
+        - $.conditions
+
+hooks:
+  - name: policy
+    on:
+      - before
+    tools:
+      - get_weather
+    actions:
+      - http:
+          url: http://127.0.0.1:11436/policy
+          json:
+            tool: '{{ tool }}'
+            arguments: '{{ arguments }}'
+
+  - name: audit
+    on:
+      - after
+    tools:
+      - get_weather
+    # A tool that answered `isError: true` produced no reading to file. The
+    # condition is the graceful half of the rule above it: undefined is false
+    # here, and only here, because a condition is *asking* whether something is
+    # there.
+    if: '{{ result.isError == false }}'
+    actions:
+      - http:
+          url: http://127.0.0.1:11436/audit
+          json:
+            tool: '{{ tool }}'
+            city: '{{ arguments.city }}'
+            temp: '{{ vars.temp }}'
+            conditions: '{{ vars.conditions }}'

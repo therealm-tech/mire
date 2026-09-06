@@ -3,6 +3,7 @@ import type { AuthDescriptor, McpDescriptor, ModelSummary } from './api'
 import { preflight, reaches } from './preflight'
 
 const MODEL: ModelSummary = {
+  id: 'chat',
   name: 'chat',
   kind: 'chat',
   url: 'https://models.internal/v1/chat/completions',
@@ -14,6 +15,7 @@ const MODEL: ModelSummary = {
 }
 
 const PROVIDER: AuthDescriptor = {
+  id: 'token',
   name: 'token',
   kind: 'token',
   needsValue: false,
@@ -51,6 +53,7 @@ function run(overrides: {
 
 /** A browser identity nobody has signed in to. */
 const HUMAN: AuthDescriptor = {
+  id: 'me',
   name: 'me',
   kind: 'oidc_browser',
   needsValue: false,
@@ -60,8 +63,24 @@ const HUMAN: AuthDescriptor = {
 
 /** Two declared servers, both wanting `me`, in the order the registry lists them. */
 const TWO_SERVERS: McpDescriptor[] = [
-  { name: 'files', url: 'https://a', auth: 'me', tools: [], headers: [], usesAuth: [] },
-  { name: 'search', url: 'https://b', auth: 'me', tools: [], headers: [], usesAuth: [] },
+  {
+    id: 'files',
+    name: 'files',
+    url: 'https://a',
+    auth: 'me',
+    tools: [],
+    headers: [],
+    usesAuth: [],
+  },
+  {
+    id: 'search',
+    name: 'search',
+    url: 'https://b',
+    auth: 'me',
+    tools: [],
+    headers: [],
+    usesAuth: [],
+  },
 ]
 
 describe('reaches', () => {
@@ -126,6 +145,7 @@ describe('preflight', () => {
 
   it('blocks on a server whose identity nobody is signed in to, named or templated', () => {
     const human: AuthDescriptor = {
+      id: 'me',
       name: 'me',
       kind: 'oidc_browser',
       needsValue: false,
@@ -133,8 +153,23 @@ describe('preflight', () => {
       allowedHosts: [],
     }
     const servers: McpDescriptor[] = [
-      { name: 'named', url: 'https://a', auth: 'me', tools: [], headers: [], usesAuth: [] },
-      { name: 'templated', url: 'https://b', tools: [], headers: [], usesAuth: ['me'] },
+      {
+        id: 'named',
+        name: 'named',
+        url: 'https://a',
+        auth: 'me',
+        tools: [],
+        headers: [],
+        usesAuth: [],
+      },
+      {
+        id: 'templated',
+        name: 'templated',
+        url: 'https://b',
+        tools: [],
+        headers: [],
+        usesAuth: ['me'],
+      },
     ]
 
     const state = run({ providers: [PROVIDER, human], servers })
@@ -157,8 +192,8 @@ describe('preflight', () => {
     // and every chat model is offered it.
     const state = run({
       servers: [
-        { name: 'files', url: 'https://a', tools: [], headers: [], usesAuth: [] },
-        { name: 'search', url: 'https://b', tools: [], headers: [], usesAuth: [] },
+        { id: 'files', name: 'files', url: 'https://a', tools: [], headers: [], usesAuth: [] },
+        { id: 'search', name: 'search', url: 'https://b', tools: [], headers: [], usesAuth: [] },
       ],
     })
     expect(state.servers).toEqual(['files', 'search'])

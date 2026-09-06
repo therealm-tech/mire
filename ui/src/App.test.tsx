@@ -14,6 +14,7 @@ import {
 const MODELS = {
   models: [
     {
+      id: 'chat',
       name: 'chat',
       kind: 'chat',
       url: 'https://models.internal/v1/chat/completions',
@@ -24,6 +25,7 @@ const MODELS = {
       requiresUpload: false,
     },
     {
+      id: 'embed',
       name: 'embed',
       kind: 'embedding',
       url: 'https://models.internal/v1/embeddings',
@@ -35,6 +37,7 @@ const MODELS = {
     },
     // Names a credential this tab has to be asked for.
     {
+      id: 'guarded',
       name: 'guarded',
       kind: 'chat',
       url: 'http://127.0.0.1:11435/v1/messages',
@@ -46,6 +49,7 @@ const MODELS = {
     },
     // Calls as a human, which is the one identity nobody can put in a file.
     {
+      id: 'as-me',
       name: 'as-me',
       kind: 'chat',
       url: 'https://models.internal/v1/as-me',
@@ -58,6 +62,7 @@ const MODELS = {
     // Reads a file rather than a sentence, and says so: `has_prompt: false` in
     // its YAML, which is the composer's cue to drop its box.
     {
+      id: 'transcribe',
       name: 'transcribe',
       kind: 'chat',
       url: 'https://models.internal/v1/audio/transcriptions',
@@ -70,6 +75,7 @@ const MODELS = {
     // Broken on purpose: `gateway` may only be sent to 127.0.0.1, and this
     // points somewhere else. Every call it makes is refused before it goes out.
     {
+      id: 'pinned',
       name: 'pinned',
       kind: 'chat',
       url: 'https://models.internal/v1/pinned',
@@ -86,23 +92,39 @@ const MODELS = {
 const AUTH = {
   providers: [
     {
+      id: 'anonymous',
       name: 'anonymous',
       kind: 'anonymous',
       needsValue: false,
       needsLogin: false,
       allowedHosts: [],
     },
-    { name: 'pasted', kind: 'token', needsValue: true, needsLogin: false, allowedHosts: [] },
+    {
+      id: 'pasted',
+      name: 'pasted',
+      kind: 'token',
+      needsValue: true,
+      needsLogin: false,
+      allowedHosts: [],
+    },
     // Pinned to the local gateway, so it is a choice for `guarded` and not one
     // for the models pointing at models.internal.
     {
+      id: 'gateway',
       name: 'gateway',
       kind: 'token',
       needsValue: false,
       needsLogin: false,
       allowedHosts: ['127.0.0.1'],
     },
-    { name: 'me', kind: 'oidc_browser', needsValue: false, needsLogin: true, allowedHosts: [] },
+    {
+      id: 'me',
+      name: 'me',
+      kind: 'oidc_browser',
+      needsValue: false,
+      needsLogin: true,
+      allowedHosts: [],
+    },
   ],
   issues: [],
 }
@@ -116,6 +138,7 @@ const AUTH = {
 const MCP = {
   servers: [
     {
+      id: 'dev',
       name: 'dev',
       url: 'http://127.0.0.1:11436/mcp',
       auth: 'me',
@@ -124,6 +147,7 @@ const MCP = {
       usesAuth: [],
     },
     {
+      id: 'keyed',
       name: 'keyed',
       url: 'https://files.internal/mcp',
       tools: [],
@@ -3416,6 +3440,7 @@ function bodySentTo(
 const NEEDS_A_FILE = {
   models: [
     {
+      id: 'describe-image',
       name: 'describe-image',
       kind: 'chat',
       url: 'https://models.internal/v1/describe',
@@ -3433,6 +3458,7 @@ const NEEDS_A_FILE = {
 const NEEDS_A_FILE_AND_NOTHING_ELSE = {
   models: [
     {
+      id: 'whisper',
       name: 'whisper',
       kind: 'chat',
       url: 'http://127.0.0.1:9000/v1/audio/transcriptions',

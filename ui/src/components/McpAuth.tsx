@@ -55,15 +55,15 @@ export function McpAuth({
   return (
     <ul className="space-y-1.5">
       {servers
-        .filter((server) => names.includes(server.name))
+        .filter((server) => names.includes(server.id))
         .map((server) => {
-          const name = server.name
+          const name = server.id
           const used = identities(server)
           // Every browser provider this server reaches for. Without a session each
           // one is a `409` on the first tool call; with one it is a name somebody
           // signed in as, and may want to stop being.
           const human = used
-            .map(({ name: provider }) => providers.find((entry) => entry.name === provider))
+            .map(({ name: provider }) => providers.find((entry) => entry.id === provider))
             .filter((entry) => entry !== undefined)
             .filter((entry) => entry.needsLogin)
           const awaited = human.filter((entry) => !entry.session)

@@ -60,11 +60,9 @@ pub async fn get_model(
         .config()
         .snapshot()
         .models
-        .get(&path.name)
+        .get(&path.id)
         .map(|model| Json(model.as_ref().clone()))
-        .ok_or_else(|| {
-            ApiError::not_found("unknown_model", format!("unknown model `{}`", path.name))
-        })
+        .ok_or_else(|| ApiError::not_found("unknown_model", format!("unknown model `{}`", path.id)))
 }
 
 /// Works out the callback the identity provider must redirect to.
@@ -165,7 +163,7 @@ pub async fn start_login(
     body: Option<Json<LoginRequest>>,
 ) -> Result<Json<LoginResponse>, ApiError> {
     let config = state.runner.config().snapshot();
-    let provider = browser_provider(&config, &path.name)?;
+    let provider = browser_provider(&config, &path.id)?;
 
     let request = body.map(|Json(request)| request).unwrap_or_default();
     let redirect_uri = resolve_redirect_uri(
@@ -178,7 +176,7 @@ pub async fn start_login(
     let started = provider
         .start_login(&redirect_uri, request.prompt.as_deref())
         .await?;
-    info!(provider = %path.name, %redirect_uri, "login started");
+    info!(provider = %path.id, %redirect_uri, "login started");
 
     Ok(Json(LoginResponse {
         authorization_url: started.url.to_string(),
@@ -199,9 +197,9 @@ pub async fn logout(
     Path(path): Path<AuthPath>,
 ) -> Result<Json<LogoutResponse>, ApiError> {
     let config = state.runner.config().snapshot();
-    let provider = browser_provider(&config, &path.name)?;
-    let signed_out = provider.sessions().clear(&path.name);
-    info!(provider = %path.name, signed_out, "signed out");
+    let provider = browser_provider(&config, &path.id)?;
+    let signed_out = provider.sessions().clear(&path.id);
+    info!(provider = %path.id, signed_out, "signed out");
     Ok(Json(LogoutResponse { signed_out }))
 }
 
@@ -514,8 +512,8 @@ pub async fn list_mcp_tools(
     let config = state.runner.config().snapshot();
     let client = config
         .mcp
-        .get(&path.name)
-        .ok_or_else(|| McpError::UnknownServer(path.name.clone()))?;
+        .get(&path.id)
+        .ok_or_else(|| McpError::UnknownServer(path.id.clone()))?;
 
     // Resolves the server's `auth:` provider *and* whatever its header templates
     // name, which is what makes this endpoint answer the question it is for:
@@ -529,7 +527,7 @@ pub async fn list_mcp_tools(
     let tools = client.list_tools(&credentials).await?;
 
     Ok(Json(McpToolsResponse {
-        server: path.name,
+        server: path.id,
         protocol,
         tools,
     }))

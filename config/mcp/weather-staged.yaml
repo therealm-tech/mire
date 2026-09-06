@@ -1,0 +1,61 @@
+# One endpoint, two declarations of it — the same server as `weather.yaml`, in
+# the two shapes a run might legitimately want:
+#
+#   weather-staged@sandbox   negotiates the revision, a generous timeout, and
+#                            `x-tenant: sandbox`
+#   weather-staged@acme      pinned to 2026-07-28, a tight timeout, and
+#                            `x-tenant: acme`
+#
+# The address is the same on both because the dev stack runs one server. What
+# varies is what a deployment actually differs by: how long it may take, who the
+# request says it is for, and whether the revision is agreed or asserted. Point
+# `url:` at a stage variable too and the two become two endpoints, which is the
+# ordinary case outside a laptop.
+#
+# Neither narrows the tools. Whatever `tools/list` comes back with is what the
+# model is offered, here as in `weather.yaml`.
+#
+# `protocol_version: ${ stage.revision }` resolving to `null` on `@sandbox` is
+# how a file says "negotiate it": a lone `${ … }` keeps the type of what it
+# names, so a null stays a null rather than becoming the string "null". The
+# difference is not decoration — it is the one thing `mire` will not guess at,
+# and the two entries report it differently:
+#
+#   curl -sS localhost:8787/api/mcp/weather-staged@sandbox/tools | jq .protocol
+#     { "revision": "2026-07-28", "settled": "discovered" }
+#   curl -sS localhost:8787/api/mcp/weather-staged@acme/tools    | jq .protocol
+#     { "revision": "2026-07-28", "settled": "pinned" }
+#
+# Same revision, and not the same fact: one end agreed to it, the other was told.
+# Pin one the server refuses and you get the refusal, which is the point of being
+# able to declare the same URL twice.
+#
+# The two stages are two servers as far as a run is concerned: each settles its
+# own revision on first use and holds its own session, so nothing one of them
+# agreed is assumed by the other. A bare `weather-staged` means `default_stage:`,
+# and one run can take exactly one of them:
+# `mcpServers: ["weather-staged@acme"]`.
+---
+name: weather-staged
+url: http://127.0.0.1:11436/mcp
+auth: keycloak-user
+timeout_ms: ${ stage.timeout }
+protocol_version: ${ stage.revision }
+
+# Rendered on every request, including the `tools/list` at setup — which is why a
+# server's headers are the one place `| default(…)` earns its keep. This one
+# needs none: it reads a stage variable, and a stage variable is resolved long
+# before the first request.
+headers:
+  x-tenant: ${ stage.tenant }
+
+default_stage: sandbox
+stages:
+  sandbox:
+    tenant: sandbox
+    timeout: 15000
+    revision: null
+  acme:
+    tenant: acme
+    timeout: 5000
+    revision: "2026-07-28"

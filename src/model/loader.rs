@@ -16,21 +16,32 @@ use validator::Validate;
 
 use super::Model;
 use crate::config::layout;
+use crate::config::stage::Staged;
 use crate::issue::LoadIssue;
 
 /// Everything loaded from the `models/` subdirectories: what parsed, and what did
 /// not.
+///
+/// Keyed by [`Model::id`] rather than by name, so the two stages of one file are
+/// two entries — `qwen3@dev` and `qwen3@prod` — sharing a name and nothing else.
 #[derive(Debug, Clone, Default)]
 pub struct ModelSet {
     models: BTreeMap<String, Arc<Model>>,
+    /// Name to the id a bare reference means. One entry per file, whether or not
+    /// it declares stages.
+    defaults: BTreeMap<String, String>,
     issues: Vec<LoadIssue>,
 }
 
 impl ModelSet {
-    /// Looks a model up by name.
+    /// Looks a model up by `name@stage`, or by name for its default stage.
     #[must_use]
-    pub fn get(&self, name: &str) -> Option<&Arc<Model>> {
-        self.models.get(name)
+    pub fn get(&self, reference: &str) -> Option<&Arc<Model>> {
+        self.models.get(reference).or_else(|| {
+            self.defaults
+                .get(reference)
+                .and_then(|id| self.models.get(id))
+        })
     }
 
     /// Every model that parsed and validated, ordered by name.
@@ -103,59 +114,91 @@ fn read_dir_into(set: &mut ModelSet, dir: &Path) {
     let mut here: BTreeMap<String, PathBuf> = BTreeMap::new();
 
     for path in paths {
-        match load_file(&path) {
-            Ok(None) => debug!(path = %path.display(), "file declares no model"),
-            Ok(Some(model)) => {
-                if let Some(previous) = here.insert(model.name.clone(), path.clone()) {
-                    set.issues.push(LoadIssue::new(
-                        &path,
-                        format!(
-                            "duplicate model name `{}`, already declared in {}",
-                            model.name,
-                            previous.display()
-                        ),
-                    ));
-                    continue;
-                }
-                if let Some(shadowed) = set.models.get(&model.name) {
-                    warn!(
-                        name = %model.name,
-                        path = %path.display(),
-                        shadowed = %shadowed.source.display(),
-                        "model overridden by a later directory"
-                    );
-                }
-                debug!(name = %model.name, kind = ?model.kind, path = %model.source.display(), "model loaded");
-                set.models.insert(model.name.clone(), Arc::new(model));
-            }
+        let staged = match load_file(&path) {
+            Ok(staged) => staged,
             Err(issue) => {
                 warn!(%issue, "model rejected");
                 set.issues.push(issue);
+                continue;
             }
+        };
+        let Some(name) = staged.first().map(|entry| entry.value.name.clone()) else {
+            debug!(path = %path.display(), "file declares no model");
+            continue;
+        };
+
+        if let Some(previous) = here.insert(name.clone(), path.clone()) {
+            set.issues.push(LoadIssue::new(
+                &path,
+                format!(
+                    "duplicate model name `{name}`, already declared in {}",
+                    previous.display()
+                ),
+            ));
+            continue;
+        }
+
+        // The whole name is displaced, stages and all: a later directory
+        // declaring `qwen3` with one stage does not leave the base directory's
+        // other two standing beside it. Overriding an entry means replacing what
+        // that entry is, not merging two files that never saw each other.
+        if let Some(shadowed) = set.models.values().find(|model| model.name == name) {
+            warn!(
+                %name,
+                path = %path.display(),
+                shadowed = %shadowed.source.display(),
+                "model overridden by a later directory"
+            );
+            set.models.retain(|_, model| model.name != name);
+        }
+
+        for entry in staged {
+            let model = entry.value;
+            let id = model.id();
+            if entry.default {
+                set.defaults.insert(name.clone(), id.clone());
+            }
+            debug!(%id, kind = ?model.kind, path = %model.source.display(), "model loaded");
+            set.models.insert(id, Arc::new(model));
         }
     }
 }
 
-/// Reads and validates a single model file.
+/// Reads and validates a single model file, once per stage it declares.
 ///
-/// `Ok(None)` for a file that declares nothing — an example shipped commented
-/// out, for instance.
+/// An empty list for a file that declares nothing — an example shipped commented
+/// out, for instance. One entry for a file with no `stages:`, and one per stage
+/// otherwise, each validated in full: a `prod` that does not hold together is a
+/// load issue at startup rather than a surprise the day somebody picks it.
 ///
 /// # Errors
 ///
-/// Returns a [`LoadIssue`] for an unreadable file, a YAML syntax error, an
-/// unknown or malformed field, or a failed validation rule.
-pub fn load_file(path: &Path) -> Result<Option<Model>, LoadIssue> {
-    let Some(mut model) = layout::read::<Model>(path)? else {
-        return Ok(None);
-    };
-
-    model
-        .validate()
-        .map_err(|error| LoadIssue::new(path, error.to_string()))?;
-
-    path.clone_into(&mut model.source);
-    Ok(Some(model))
+/// Returns a [`LoadIssue`] for an unreadable file, a YAML syntax error, a
+/// malformed `stages:` block, an unknown or malformed field, or a failed
+/// validation rule. One bad stage fails the file: see [`crate::config::stage`].
+pub fn load_file(path: &Path) -> Result<Vec<Staged<Model>>, LoadIssue> {
+    layout::read::<Model>(path)?
+        .into_iter()
+        .map(|staged| {
+            let mut model = staged.value;
+            model.stage.clone_from(&staged.stage);
+            path.clone_into(&mut model.source);
+            model.validate().map_err(|error| {
+                LoadIssue::new(
+                    path,
+                    match &staged.stage {
+                        Some(stage) => format!("stage `{stage}`: {error}"),
+                        None => error.to_string(),
+                    },
+                )
+            })?;
+            Ok(Staged {
+                stage: staged.stage,
+                default: staged.default,
+                value: model,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -301,6 +344,96 @@ request:
             "{:?}",
             set.issues()
         );
+    }
+
+    const STAGED: &str = r#"
+name: staged
+kind: chat
+url: ${ stage.base }/v1/chat
+timeout_ms: ${ stage.timeout | default(30000) }
+stages:
+  dev:
+    base: http://127.0.0.1:11435
+  prod:
+    base: https://models.internal
+    timeout: 60000
+default_stage: dev
+request:
+  template: '{"messages": {{ messages | tojson }}}'
+"#;
+
+    #[test]
+    fn a_staged_file_declares_one_model_per_stage() {
+        let dir = temp_dir("staged");
+        write(&dir, "staged.yaml", STAGED);
+
+        let set = load_dir(&dir);
+
+        assert_eq!(set.len(), 2);
+        assert_eq!(
+            set.get("staged@prod").unwrap().url.as_str(),
+            "https://models.internal/v1/chat"
+        );
+        assert_eq!(set.get("staged@prod").unwrap().timeout_ms, 60_000);
+        assert_eq!(set.get("staged@dev").unwrap().timeout_ms, 30_000);
+    }
+
+    /// What every reference written before stages existed relies on.
+    #[test]
+    fn a_bare_name_means_the_default_stage() {
+        let dir = temp_dir("staged-default");
+        write(&dir, "staged.yaml", STAGED);
+
+        let set = load_dir(&dir);
+
+        assert_eq!(set.get("staged").unwrap().id(), "staged@dev");
+    }
+
+    /// All or nothing: a picker missing a stage, with the reason in the log, is
+    /// exactly the afternoon this is meant to save.
+    #[test]
+    fn one_broken_stage_takes_the_whole_file_down() {
+        let dir = temp_dir("staged-broken");
+        write(
+            &dir,
+            "staged.yaml",
+            &STAGED.replace("base: https://models.internal", "base: \"not a url\""),
+        );
+
+        let set = load_dir(&dir);
+
+        assert!(set.is_empty());
+        assert_eq!(set.issues().len(), 1);
+        assert!(
+            set.issues()[0].message.contains("prod"),
+            "{:?}",
+            set.issues()
+        );
+    }
+
+    /// A later directory replaces the entry, stages and all — it does not merge
+    /// its stages into the ones it displaced.
+    #[test]
+    fn an_override_displaces_every_stage_of_the_name() {
+        let base = temp_dir("staged-layer-base");
+        let mine = temp_dir("staged-layer-mine");
+        write(&base, "staged.yaml", STAGED);
+        write(
+            &mine,
+            "staged.yaml",
+            &STAGED
+                .replace(
+                    "  prod:\n    base: https://models.internal\n    timeout: 60000\n",
+                    "",
+                )
+                .replace("default_stage: dev\n", ""),
+        );
+
+        let set = load_dirs(&[&base, &mine]);
+
+        assert_eq!(set.len(), 1);
+        assert!(set.get("staged@prod").is_none());
+        assert!(set.get("staged@dev").is_some());
     }
 
     #[test]

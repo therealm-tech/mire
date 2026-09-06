@@ -124,7 +124,7 @@ fn model_routes() -> ApiRouter<AppState> {
             }),
         )
         .api_route(
-            "/api/models/{name}",
+            "/api/models/{id}",
             get_with(handlers::get_model, |op| {
                 op.summary("Fetch one model")
                     .description("The model exactly as declared in YAML, field names included.")
@@ -170,7 +170,7 @@ fn auth_routes() -> ApiRouter<AppState> {
             }),
         )
         .api_route(
-            "/api/auth/{name}/login",
+            "/api/auth/{id}/login",
             post_with(handlers::start_login, |op| {
                 op.summary("Start a browser login")
                     .description(
@@ -187,7 +187,7 @@ fn auth_routes() -> ApiRouter<AppState> {
             }),
         )
         .api_route(
-            "/api/auth/{name}/logout",
+            "/api/auth/{id}/logout",
             post_with(handlers::logout, |op| {
                 op.summary("Forget a browser session")
                     .description(
@@ -216,7 +216,7 @@ fn mcp_routes() -> ApiRouter<AppState> {
             }),
         )
         .api_route(
-            "/api/mcp/{name}/tools",
+            "/api/mcp/{id}/tools",
             get_with(handlers::list_mcp_tools, |op| {
                 op.summary("Ask a server what it offers")
                     .description(

@@ -871,6 +871,76 @@ async fn a_later_directory_overrides_a_model_the_earlier_one_declared() {
     assert!(body["issues"].as_array().unwrap().is_empty());
 }
 
+/// A model whose two stages point at two endpoints: one file, two entries, and a
+/// run that says which of them it asked.
+#[tokio::test]
+async fn a_staged_model_is_one_entry_per_stage_and_callable_by_id() {
+    let dev = MockServer::start().await;
+    let prod = MockServer::start().await;
+    for (server, answer) in [(&dev, "from dev"), (&prod, "from prod")] {
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{"message": {"content": answer}, "finish_reason": "stop"}]
+            })))
+            .mount(server)
+            .await;
+    }
+
+    let harness = Harness::start(&[(
+        "models/chat.yaml",
+        format!(
+            r#"
+name: chat
+kind: chat
+url: ${{ stage.base }}/v1/chat/completions
+timeout_ms: 5000
+default_stage: dev
+stages:
+  dev:
+    base: {}
+  prod:
+    base: {}
+request:
+  template: '{{"model": "m", "messages": {{{{ messages | tojson }}}}}}'
+decode:
+  content: ["$.choices[0].message.content"]
+"#,
+            dev.uri(),
+            prod.uri()
+        ),
+    )])
+    .await;
+
+    let listed = harness.get("/api/models").await;
+    assert!(
+        listed["issues"].as_array().unwrap().is_empty(),
+        "{}",
+        listed["issues"]
+    );
+    let models = listed["models"].as_array().unwrap();
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0]["id"], "chat@dev");
+    assert_eq!(models[0]["name"], "chat");
+    assert_eq!(models[1]["stage"], "prod");
+
+    let (status, _, body) = harness
+        .call(json!({"model": "chat@prod", "prompt": "ping"}))
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["model"], "chat@prod");
+    assert_eq!(body["response"]["decoded"]["content"], "from prod");
+
+    // A bare name is the default stage, which is what every request written
+    // before stages existed still means.
+    let (status, _, body) = harness
+        .call(json!({"model": "chat", "prompt": "ping"}))
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["model"], "chat@dev");
+    assert_eq!(body["response"]["decoded"]["content"], "from dev");
+}
+
 /// Every listed directory is watched, not just the first: an override you have
 /// to restart for is an override you stop using.
 #[tokio::test]
@@ -1054,7 +1124,7 @@ async fn the_openapi_document_is_served_and_describes_the_call_endpoint() {
     let spec = harness.get("/openapi.json").await;
     assert_eq!(spec["info"]["title"], "mire");
     assert!(spec["paths"]["/api/call"]["post"].is_object());
-    assert!(spec["paths"]["/api/models/{name}"]["get"].is_object());
+    assert!(spec["paths"]["/api/models/{id}"]["get"].is_object());
     // Ops plumbing stays out of the product surface.
     assert!(spec["paths"]["/healthz"].is_null());
 }

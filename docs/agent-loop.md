@@ -101,5 +101,5 @@ arguments twice, which is a loop rather than progress. That last one is opt-in
 working rather than spinning, and `max_iterations` bounds the run either way.
 
 Try it against the [dev stack](dev-stack.md): `qwen3` fetches `get_weather` from
-the `dev` MCP server and really calls it. On a CPU-only Ollama a two-turn run takes about
+the `weather` MCP server and really calls it. On a CPU-only Ollama a two-turn run takes about
 ninety seconds.

@@ -1,0 +1,57 @@
+# The same credential, two doors.
+#
+# `static-token.yaml` next door is one token for one host. This is the shape it
+# takes once the same idea has to exist in more than one environment: the
+# variable it is read from, the hosts it may be sent to, and the header it goes
+# in all move together, and they move as one file rather than as three that
+# quietly stop matching.
+#
+#   static-token-staged@local     MODEL_TOKEN, as `Authorization: Bearer …`,
+#                                 to 127.0.0.1 — the compose stack's gateway,
+#                                 which only checks that a credential is present
+#   static-token-staged@preprod   MODEL_TOKEN_PREPROD, bare in `x-api-key`, and
+#                                 only ever to models.preprod.internal
+#
+#   export MODEL_TOKEN=anything
+#
+# Two stages are **two identities**. They share a file and nothing else: no cache,
+# no session, and no way for one's token to reach the other's host.
+#
+# `allowed_hosts` is why the second one is more than decoration. It is checked
+# against the resolved URL before anything goes out, and it is advertised, so the
+# UI stops offering a provider against a model it could never authenticate:
+# `@preprod` is greyed out for every model in this directory, all of which point
+# at loopback. That is the rule saying so early enough to be a choice rather than
+# an error.
+#
+# Note `scheme: ${ stage.scheme }` resolving to `null` on `@preprod`, which is
+# how a file says "send the credential bare, with no `Bearer ` in front of it".
+# A lone `${ … }` keeps the type of what it names, so a null stays a null rather
+# than becoming the string "null" — the same rule that lets `allowed_hosts` be a
+# list.
+#
+# No credential is in this file, as ever. It names the variables to read them
+# from, and the values never leave the process.
+---
+name: static-token-staged
+kind: token
+value:
+  env: ${ stage.variable }
+header: ${ stage.header }
+scheme: ${ stage.scheme }
+allowed_hosts: ${ stage.hosts }
+
+default_stage: local
+stages:
+  local:
+    variable: MODEL_TOKEN
+    header: authorization
+    scheme: Bearer
+    hosts:
+      - 127.0.0.1
+  preprod:
+    variable: MODEL_TOKEN_PREPROD
+    header: x-api-key
+    scheme: null
+    hosts:
+      - models.preprod.internal

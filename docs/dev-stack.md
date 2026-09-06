@@ -19,8 +19,7 @@ point at that stack, so there is nothing to pass.
 | `ollama` | 11434 | The models. Unauthenticated, on purpose |
 | `gateway` | 11435 | nginx in front of Ollama, rejecting requests with no credential |
 | `whisper` | 9000 | `speaches`, so `request.multipart:` has an endpoint that takes a form rather than a JSON document |
-| `mcp` | 11436 | A minimal MCP server on `2026-07-28`, so the loop has something real to call |
-| `mcp-legacy` | 11437 | The same server on `2025-06-18`, so the revision negotiation has something to negotiate with |
+| `mcp` | 11436 | A minimal MCP server on `2026-07-28`, so the loop has something real to call — plus `POST /policy` and `POST /audit`, the two plain HTTP routes a hook talks to |
 | `keycloak` | 8080 | Realm `mire`: `mire-workload` (service account) and `mire-ui` (browser login, user `mire` / `mire`) |
 
 Models, as of August 2026 — these rankings move monthly, so revisit the choice:
@@ -35,7 +34,7 @@ Models, as of August 2026 — these rankings move monthly, so revisit the choice
   Ollama. Faster than real time on a laptop CPU at `int8`. `-tiny` is a third of
   the size and audibly worse; `-small` is better and four times the download.
 
-Three models come with it:
+Four models come with it:
 
 - **`qwen3`** — the chat one, and it carries everything `mire` does with a chat
   endpoint at once: a template driven by the call, a decode cascade, an agent
@@ -50,6 +49,13 @@ Three models come with it:
   keycloak-workload  -> 200   a token fetched for a service account
   keycloak-user      -> 200   a token fetched for you, after signing in
   ```
+
+- **`qwen3-staged`** — the same weights, reached two ways, from one file. Its two
+  [stages](configuration.md#stages) are the two halves of the matrix above at
+  once: `qwen3-staged@ollama` goes straight at Ollama's own API anonymously, and
+  `qwen3-staged@gateway` takes the OpenAI-compatible route through nginx as the
+  workload identity. One `decode:` cascade covers both, and which of its paths
+  won is in the trace — the first for one stage, the second for the other.
 
 - **`nomic`** — embeddings, straight at Ollama with no credential, and with
   `$.data[*].embedding` deliberately kept first in the cascade so you can watch

@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use serde::de::DeserializeOwned;
 use tracing::debug;
 
+use super::stage::{self, Staged};
 use crate::issue::LoadIssue;
 
 /// Subdirectory holding one model per file.
@@ -70,20 +71,68 @@ pub fn entries(dir: &Path, kind: &str) -> Result<Vec<PathBuf>, LoadIssue> {
     Ok(paths)
 }
 
-/// Reads one file as a single `T`.
+/// Reads one file as one `T` per stage it declares.
 ///
-/// `Ok(None)` for a document that declares nothing: YAML reads an empty file, or
-/// one holding only comments, as `null`, and [`Option`] is what turns that into
-/// an answer rather than a complaint about a missing field.
+/// An empty list for a document that declares nothing: YAML reads an empty file,
+/// or one holding only comments, as `null`, and that is an answer rather than a
+/// complaint about a missing field.
+///
+/// A file declaring no `stages:` yields exactly one entry, deserialised straight
+/// from the text so that a bad field carries the line it is on. Stages cost that
+/// position — a document is expanded before it is read, and the line an entry sat
+/// on is a line of the file rather than of the expansion — so the issue names the
+/// stage instead. See [`stage`] for what is substituted and when.
 ///
 /// # Errors
 ///
-/// Returns an issue for an unreadable file, a syntax error, or a field the entry
-/// does not have. The position comes across when the parser reports one.
-pub fn read<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, LoadIssue> {
+/// Returns an issue for an unreadable file, a syntax error, a malformed
+/// `stages:` block, an expression that resolves to nothing, or a field the entry
+/// does not have.
+pub fn read<T: DeserializeOwned>(path: &Path) -> Result<Vec<Staged<T>>, LoadIssue> {
     let text =
         std::fs::read_to_string(path).map_err(|error| LoadIssue::new(path, error.to_string()))?;
-    serde_yaml_ng::from_str(&text).map_err(|error| LoadIssue::from_yaml(path, &error))
+    let document: Option<serde_yaml_ng::Value> =
+        serde_yaml_ng::from_str(&text).map_err(|error| LoadIssue::from_yaml(path, &error))?;
+    let Some(document) = document else {
+        return Ok(Vec::new());
+    };
+
+    // The unstaged file is not merely a special case of the staged one: it is
+    // read from the text, keeping every position the parser reports. Going
+    // through the expansion would cost that for every file in the directory to
+    // serve the ones that declare stages.
+    if !stage::declared(&document) {
+        let entry =
+            serde_yaml_ng::from_str(&text).map_err(|error| LoadIssue::from_yaml(path, &error))?;
+        return Ok(vec![Staged {
+            stage: None,
+            default: true,
+            value: entry,
+        }]);
+    }
+
+    stage::expand(document)
+        .map_err(|message| LoadIssue::new(path, message))?
+        .into_iter()
+        .map(|staged| {
+            let stage = staged.stage.clone();
+            serde_yaml_ng::from_value(staged.value)
+                .map(|value| Staged {
+                    stage: staged.stage,
+                    default: staged.default,
+                    value,
+                })
+                .map_err(|error| {
+                    LoadIssue::new(
+                        path,
+                        match &stage {
+                            Some(stage) => format!("stage `{stage}`: {error}"),
+                            None => error.to_string(),
+                        },
+                    )
+                })
+        })
+        .collect()
 }
 
 fn is_yaml(path: &Path) -> bool {
@@ -148,7 +197,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(read::<Entry>(&path).unwrap().is_none());
+        assert!(read::<Entry>(&path).unwrap().is_empty());
     }
 
     #[test]

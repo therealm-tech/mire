@@ -1,0 +1,105 @@
+# The same weights, reached two ways, from one file.
+#
+# `qwen3.yaml` next door describes the matrix this tool exists for — the gateway
+# or Ollama directly, a credential or none — and then has to pick one, because a
+# model is one URL. `stages:` is that matrix as two entries: both are declared
+# here, both load at startup, and the composer's model list shows them as
+# `qwen3-staged@ollama` and `qwen3-staged@gateway`.
+#
+# Both are live against `docker compose up -d`, and everything that differs
+# between them differs for a reason:
+#
+#   @ollama    Ollama's own API, anonymously, on 11434
+#   @gateway   the OpenAI-compatible route through nginx, as the workload
+#              identity, on 11435 — so it needs OIDC_CLIENT_SECRET in the
+#              environment, exactly as `qwen3` does
+#
+# Watch the two syntaxes meet in `request.template:` below. They are the whole
+# trick, and they are not the same thing:
+#
+#   ${ stage.knobs }          resolved when this file loads, seeing one thing:
+#                             `stage`, this stage's variables
+#   {{ messages | tojson }}   resolved when the call goes out, seeing what it
+#                             always saw — including `env`, which is the
+#                             *process* environment and nothing to do with this
+#
+# The payoff is in the decode trace. Every field below is a cascade, and the two
+# stages resolve different paths of it: `@gateway` answers OpenAI's shape and the
+# first path wins, `@ollama` answers Ollama's and the second does. Same file,
+# same cascade, and the trace names the path that won rather than leaving you to
+# assume.
+#
+# A bare `qwen3-staged` means `default_stage:`, and stages are per entry — so
+# pairing this model's `@gateway` with a credential in another stage is one field
+# on the call:
+#
+#   POST /api/call -d '{"model": "qwen3-staged@gateway",
+#                       "auth": "keycloak-user", "prompt": "ping"}'
+---
+name: qwen3-staged
+kind: chat
+url: ${ stage.url }
+# The credential is a stage variable like any other: the gateway wants one, and
+# Ollama on loopback does not. `anonymous` is a mode rather than the absence of
+# one — a `401` from a route that should be protected is a *passing* check.
+auth: ${ stage.auth }
+# Agent turns add up, and a cold model loads on the first call.
+timeout_ms: 300000
+
+default_stage: ollama
+stages:
+  ollama:
+    url: http://127.0.0.1:11434/api/chat
+    auth: anonymous
+    knobs: '"think": false, "options": {"num_predict": 256}'
+  gateway:
+    url: http://127.0.0.1:11435/v1/chat/completions
+    auth: keycloak-workload
+    knobs: '"reasoning_effort": "none", "max_tokens": 256'
+
+# Two knobs, spelled differently by the two routes, which is why they travel
+# together in one variable rather than one each.
+#
+# **Turning qwen3's thinking off**: `think` on Ollama's own API,
+# `reasoning_effort` on the OpenAI-compatible one. Without it the model spends
+# its whole budget reasoning and `content` comes back empty with a finish reason
+# of `length`.
+#
+# **Capping the answer**: `options.num_predict`, or `max_tokens`. Not decoration
+# either — measured on the compose stack, this endpoint answers a capped `ping`
+# in about a minute and an uncapped one not at all, so a template without one
+# reads as an endpoint that hangs.
+request:
+  template: |
+    {
+      "model": "qwen3:0.6b-q4_K_M",
+      "messages": {{ messages | tojson }},
+      {% if tools %}"tools": {{ tools | tojson }},{% endif %}
+      "stream": {{ stream | tojson }},
+      ${ stage.knobs }
+    }
+
+# One cascade, both shapes. `$.choices[0]…` is the OpenAI-compatible route and
+# `$.message…` is Ollama's own; neither stage had to bring a decode block of its
+# own, which is the half of a duplicated model file that quietly stops matching.
+decode:
+  content:
+    - $.choices[0].message.content
+    - $.message.content
+  delta:
+    - $.choices[0].delta.content
+    - $.message.content
+  tool_calls:
+    - $.choices[0].message.tool_calls
+    - $.message.tool_calls
+  finish_reason:
+    - $.choices[0].finish_reason
+    - $.done_reason
+  usage:
+    - $.usage
+    - $
+  # `$` rather than `$.error`: a gateway refusing the call puts its sentence in
+  # `error_description`, and pointing one level down hands back the code and
+  # drops the only line that explains it.
+  error:
+    - $

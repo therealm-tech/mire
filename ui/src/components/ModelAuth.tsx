@@ -60,8 +60,8 @@ export function ModelAuth({
       ) : (
         <div className="space-y-1.5" data-testid="model-auth">
           <div className="flex flex-wrap items-center gap-1.5">
-            <span className="font-medium text-sm">{provider.name}</span>
-            {provider.kind === provider.name ? null : (
+            <span className="font-medium text-sm">{provider.id}</span>
+            {provider.kind === provider.id ? null : (
               <span className="text-faint text-xs">{provider.kind}</span>
             )}
             {declared === null ? (
@@ -86,10 +86,10 @@ export function ModelAuth({
           {provider.needsLogin ? (
             <BrowserLogin
               provider={provider}
-              signingIn={signingIn === provider.name}
-              error={loginError?.provider === provider.name ? loginError.message : null}
-              onLogin={(prompt) => onLogin(provider.name, prompt)}
-              onLogout={() => onLogout(provider.name)}
+              signingIn={signingIn === provider.id}
+              error={loginError?.provider === provider.id ? loginError.message : null}
+              onLogin={(prompt) => onLogin(provider.id, prompt)}
+              onLogout={() => onLogout(provider.id)}
             />
           ) : null}
 

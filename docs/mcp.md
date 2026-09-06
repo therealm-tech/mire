@@ -28,7 +28,7 @@ and the round trip.
 
 Everything goes through the same HTTP client as your model endpoints, so
 `--ca-bundle` applies, and so does the whole auth registry:
-`GET /api/mcp/{name}/tools` against `anonymous`, a token and a workload identity
+`GET /api/mcp/{id}/tools` against `anonymous`, a token and a workload identity
 in turn answers "is this MCP endpoint up, and does my credential get me in?"
 without running a model at all.
 
@@ -67,7 +67,7 @@ and the request goes out as it always did — `server/discover` is a method a
 perfectly good server may not implement, and failing there would break endpoints
 that work in order to report a problem they do not have.
 
-**It tells you which, every time.** `GET /api/mcp/{name}/tools` carries the
+**It tells you which, every time.** `GET /api/mcp/{id}/tools` carries the
 answer next to the tools it produced:
 
 ```json
@@ -98,6 +98,15 @@ refusal, which is the point — declare the same URL twice under different pins 
 you can say exactly which revisions your endpoint accepts. An unknown one is a
 load issue naming what this build speaks, reported at startup like every other
 bad entry, without taking the rest of the file down.
+
+Declaring the same server twice is what [stages](configuration.md#stages) are
+for, and `config/mcp/weather-staged.yaml` is that against the
+[dev stack](dev-stack.md): one file, two entries of one endpoint, one
+negotiating its revision and one pinned to it, with their own timeout and their
+own tenant header. Same revision either way, and not the same fact — `settled` is
+`discovered` for one and `pinned` for the other. A stage is an identity here
+rather than a label: each settles on first use and holds its own session, so
+nothing one of them agreed is assumed by the other.
 
 ### Or choose it per run
 
@@ -262,7 +271,13 @@ Calling a live tool is the one thing `mire` does that has effects outside this
 process, which makes it the one thing somebody else usually wants to know about
 — an audit trail, a policy service, an upload endpoint that has to be handed
 the inputs before a task runs. `hooks:` on a server declares that, fired `before`
-the call goes out, `after` it comes back, or both:
+the call goes out, `after` it comes back, or both.
+
+`config/mcp/weather-hooks.yaml` is the whole of this section as one runnable
+file: a `before` gate that can stop the call, a `capture:` that keeps the
+reading, and an `after` hook that files it. Both endpoints it talks to are the
+[dev stack](dev-stack.md)'s, so `curl -sS localhost:11436/audit` shows what it
+actually posted. Uncomment it to watch it run.
 
 ```yaml
 ---
@@ -687,7 +702,7 @@ about the writes that actually worked, the gate that only asks about the big
 files, the hook that is for staging only:
 
 ```yaml
-        if: '{{ result.is_error == false }}'
+        if: '{{ result.isError == false }}'
         if: '{{ arguments.size > 1048576 }}'
         if: '{{ vars.session is defined and env.STAGE == "prod" }}'
 ```
@@ -726,3 +741,36 @@ checked against nothing — a variable may be captured by this server, by anothe
 one the run happens to reach, or by nobody — so a condition naming a variable
 nothing ever captures shows up as a skip quoting it, run after run, which is the
 readable version of that mistake.
+
+## The same server in two environments
+
+`stages:` works here exactly as it does on a model:
+
+```yaml
+---
+name: files
+url: ${ stage.base }/mcp
+auth: keycloak-user
+headers:
+  x-tenant: ${ stage.tenant }
+
+default_stage: local
+stages:
+  local:
+    base: http://127.0.0.1:11436
+    tenant: sandbox
+  prod:
+    base: https://mcp.internal
+    tenant: acme
+```
+
+Both readings are offered to every `kind: chat` model, as `files@local` and
+`files@prod` — so the Servers row shows two boxes, and `mcpServers: ["files@prod"]`
+leaves the other out of a run. They negotiate their revision and hold their
+session separately, which is what keeps a `local` session from travelling to the
+`prod` endpoint.
+
+Note the two syntaxes standing side by side in `headers:`: `${ stage.tenant }` is
+resolved once, when the file loads, and `{{ env.API_KEY }}` on the line below it
+would be resolved on every request. See
+[configuration.md](configuration.md#stages).
