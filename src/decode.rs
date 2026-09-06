@@ -196,6 +196,18 @@ impl DecodeTrace {
             message: message.into(),
         });
     }
+
+    /// Records a path that resolved to an unusable value, unless the field
+    /// already has one.
+    ///
+    /// A path that points at the wrong thing points at it in every chunk of the
+    /// stream, and five hundred copies of one sentence is not five hundred times
+    /// as useful.
+    pub fn issue_once(&mut self, field: DecodeField, path: &str, message: impl Into<String>) {
+        if !self.issues.iter().any(|issue| issue.field == field) {
+            self.issue(field, path, message);
+        }
+    }
 }
 
 #[cfg(test)]

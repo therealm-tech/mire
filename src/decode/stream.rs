@@ -168,19 +168,34 @@ fn next_line(buffer: &str) -> Option<(String, usize)> {
     Some((buffer[..end].trim_end_matches('\r').to_owned(), end + 1))
 }
 
+/// What one chunk had to say.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Delta {
+    /// Text arrived.
+    Text(String),
+    /// A path resolved, and there was nothing in it. The role-only first chunk
+    /// of an `OpenAI` stream, the final chunk carrying only `finish_reason`, or
+    /// a model that answered with a tool call and no prose at all.
+    Silent,
+    /// No path resolved. On its own this says nothing — plenty of endpoints send
+    /// chunks with no text field — and only means something once the stream is
+    /// over and no chunk ever resolved one. See [`record_miss`].
+    Unresolved,
+}
+
 /// Reads the text delta out of one chunk.
 ///
 /// Same cascade machinery as every other decoded field: paths are tried in
-/// order, the first that resolves wins. A chunk that resolves to an empty string
-/// — the role-only first chunk of an `OpenAI` stream, or the final chunk that
-/// carries only `finish_reason` — is not a delta and does not count as one.
+/// order, the first that resolves wins.
 ///
 /// The trace is only touched on a hit: a stream has hundreds of chunks, and
 /// recording a miss per chunk would bury the trace under the one fact it already
 /// knows.
 #[must_use]
-pub fn delta(chunk: &Value, spec: &DecodeSpec, trace: &mut DecodeTrace) -> Option<String> {
-    let (path, nodes) = resolve(chunk, &spec.delta)?;
+pub fn delta(chunk: &Value, spec: &DecodeSpec, trace: &mut DecodeTrace) -> Delta {
+    let Some((path, nodes)) = resolve(chunk, &spec.delta) else {
+        return Delta::Unresolved;
+    };
 
     let mut text = String::new();
     for node in &nodes {
@@ -189,39 +204,50 @@ pub fn delta(chunk: &Value, spec: &DecodeSpec, trace: &mut DecodeTrace) -> Optio
             // A number or an object here means the path points at the wrong
             // thing, which is worth saying once.
             other => {
-                // Once, not once per chunk: the path is wrong for the whole
-                // stream, and five hundred copies of that sentence is not five
-                // hundred times as useful.
-                let known = trace
-                    .issues
-                    .iter()
-                    .any(|issue| issue.field == DecodeField::Delta);
-                if !known {
-                    trace.issue(
-                        DecodeField::Delta,
-                        path.source(),
-                        format!("expected a string, found {}", super::chat::type_name(other)),
-                    );
-                }
-                return None;
+                trace.issue_once(
+                    DecodeField::Delta,
+                    path.source(),
+                    format!("expected a string, found {}", super::chat::type_name(other)),
+                );
+                // Resolved, so the cascade itself is not what is wrong: the
+                // issue above is the finding, and a miss on top would blame the
+                // paths twice.
+                return Delta::Silent;
             }
         }
     }
 
     if text.is_empty() {
-        return None;
+        return Delta::Silent;
     }
     trace.hit(DecodeField::Delta, path.source());
-    Some(text)
+    Delta::Text(text)
 }
 
-/// Records that no configured delta path ever resolved.
+/// Which streamed cascades ever resolved, whatever they resolved to.
+///
+/// The distinction the trace needs at the end, and the reason a bare
+/// `matched` lookup will not do: a path that selected an empty string on every
+/// chunk is a correct path over a model that said nothing, not a miss. A model
+/// answering with one tool call and no prose is exactly that.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Resolved {
+    /// A `delta` path selected a node at least once.
+    pub delta: bool,
+    /// A `tool_calls` path selected a node at least once.
+    pub tool_calls: bool,
+}
+
+/// Records the streamed cascades that never resolved.
 ///
 /// Called once at the end rather than per chunk, and only when the model
 /// actually asked for something.
-pub fn record_miss(spec: &DecodeSpec, trace: &mut DecodeTrace) {
-    if !trace.matched.contains_key(&DecodeField::Delta) {
+pub fn record_miss(spec: &DecodeSpec, resolved: Resolved, trace: &mut DecodeTrace) {
+    if !resolved.delta {
         trace.miss(DecodeField::Delta, paths::sources(&spec.delta));
+    }
+    if !resolved.tool_calls {
+        trace.miss(DecodeField::ToolCalls, paths::sources(&spec.tool_calls));
     }
 }
 
@@ -377,7 +403,10 @@ mod tests {
         let mut trace = DecodeTrace::default();
 
         let ollama = serde_json::json!({"message": {"content": "hi"}});
-        assert_eq!(delta(&ollama, &spec, &mut trace), Some("hi".to_owned()));
+        assert_eq!(
+            delta(&ollama, &spec, &mut trace),
+            Delta::Text("hi".to_owned())
+        );
         assert_eq!(
             trace.matched.get(&DecodeField::Delta).map(String::as_str),
             Some("$.message.content")
@@ -393,16 +422,18 @@ mod tests {
         let mut trace = DecodeTrace::default();
         let chunk = serde_json::json!({"choices": [{"delta": {"content": ""}}]});
 
-        assert_eq!(delta(&chunk, &spec, &mut trace), None);
+        // Silent, not unresolved: the path is right and there was nothing in it,
+        // which is what keeps it out of the miss list at the end.
+        assert_eq!(delta(&chunk, &spec, &mut trace), Delta::Silent);
     }
 
     #[test]
-    fn a_chunk_with_no_delta_at_all_is_silent() {
+    fn a_chunk_with_no_delta_field_at_all_is_unresolved() {
         let spec = spec(&["$.choices[0].delta.content"]);
         let mut trace = DecodeTrace::default();
         let chunk = serde_json::json!({"choices": [{"finish_reason": "stop"}]});
 
-        assert_eq!(delta(&chunk, &spec, &mut trace), None);
+        assert_eq!(delta(&chunk, &spec, &mut trace), Delta::Unresolved);
         assert!(trace.issues.is_empty());
         assert!(trace.missed.is_empty());
     }
@@ -413,7 +444,7 @@ mod tests {
         let mut trace = DecodeTrace::default();
         let chunk = serde_json::json!({"choices": [{"delta": {"content": "hi"}}]});
 
-        assert_eq!(delta(&chunk, &spec, &mut trace), None);
+        assert_eq!(delta(&chunk, &spec, &mut trace), Delta::Silent);
         assert_eq!(trace.issues.len(), 1);
         // Five hundred chunks must not mean five hundred identical issues.
         let _ = delta(&chunk, &spec, &mut trace);
@@ -424,11 +455,30 @@ mod tests {
     fn a_cascade_that_never_resolves_is_recorded_once_at_the_end() {
         let spec = spec(&["$.nope"]);
         let mut trace = DecodeTrace::default();
-        record_miss(&spec, &mut trace);
+        record_miss(&spec, Resolved::default(), &mut trace);
 
         assert_eq!(
             trace.missed.get(&DecodeField::Delta),
             Some(&vec!["$.nope".to_owned()])
         );
+    }
+
+    /// A model that answers with a tool call and no prose resolves its delta
+    /// path on every chunk and never finds a word in it. Calling that a miss
+    /// sends the reader off to fix a path that is already right.
+    #[test]
+    fn a_path_that_only_ever_resolved_an_empty_string_is_not_a_miss() {
+        let spec = spec(&["$.message.content"]);
+        let mut trace = DecodeTrace::default();
+        record_miss(
+            &spec,
+            Resolved {
+                delta: true,
+                tool_calls: true,
+            },
+            &mut trace,
+        );
+
+        assert!(trace.missed.is_empty(), "{:?}", trace.missed);
     }
 }

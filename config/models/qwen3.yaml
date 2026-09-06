@@ -31,11 +31,13 @@ timeout_ms: 300000
 # whatever the run's turn budget. The `| tojson` is not decoration
 # — MiniJinja renders a bare boolean as `True`, which is Python and is not JSON.
 #
-# Ticking it for a loop is worth one caveat: a streamed answer is decoded from
-# its last chunk, and this endpoint splits a tool call's arguments across several
-# — so a streamed run of the agent below stops at turn one with `noToolCalls`
-# rather than calling `get_weather`. Which is a real answer about this endpoint,
-# and the reason the box starts unticked.
+# Ticking it for a loop is worth one caveat, and it is the OpenAI-compatible
+# route's: that endpoint splits a tool call's arguments across chunks, and
+# reassembling those fragments is not attempted — so a streamed run of the agent
+# below stops at turn one with `noToolCalls` rather than calling `get_weather`.
+# Ollama's own API sends each call whole and streams the loop fine — see
+# `qwen3-staged.yaml` next door, where both routes sit side by side. Which is a
+# real answer about this endpoint, and the reason the box starts unticked.
 #
 # `reasoning_effort: "none"` is what turns qwen3's thinking off on Ollama's
 # OpenAI-compatible endpoint. Without it the model spends its whole budget

@@ -6316,6 +6316,7 @@ request:
 decode:
   content: ["$.choices[0].message.content"]
   delta: ["$.choices[0].delta.content", "$.message.content"]
+  tool_calls: ["$.choices[0].message.tool_calls", "$.message.tool_calls"]
   finish_reason: ["$.choices[0].finish_reason", "$.done_reason"]
   usage: ["$.usage", "$"]
   error: ["$.error"]
@@ -6329,6 +6330,11 @@ decode:
 /// `content-type` afterwards, which would undo the framing the test is about.
 fn event_stream(body: &str) -> ResponseTemplate {
     ResponseTemplate::new(200).set_body_raw(body.to_owned(), "text/event-stream")
+}
+
+/// Serves `body` as NDJSON, the framing Ollama's own API answers in.
+fn ndjson(body: &str) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_raw(body.to_owned(), "application/x-ndjson")
 }
 
 #[tokio::test]
@@ -6449,17 +6455,13 @@ async fn time_to_first_token_is_measured_from_the_first_chunk_that_had_one() {
 async fn an_ndjson_stream_is_read_without_being_told() {
     let endpoint = MockServer::start().await;
     Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(
-            concat!(
-                "{\"message\":{\"content\":\"pi\"},\"done\":false}\n",
-                "{\"message\":{\"content\":\"ng\"},\"done\":false}\n",
-                // Ollama ends without a trailing newline often enough, and this
-                // is the object carrying the counters.
-                "{\"message\":{\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\",\"eval_count\":7}"
-            )
-            .to_owned(),
-            "application/x-ndjson",
-        ))
+        .respond_with(ndjson(concat!(
+            "{\"message\":{\"content\":\"pi\"},\"done\":false}\n",
+            "{\"message\":{\"content\":\"ng\"},\"done\":false}\n",
+            // Ollama ends without a trailing newline often enough, and this is
+            // the object carrying the counters.
+            "{\"message\":{\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\",\"eval_count\":7}"
+        )))
         .mount(&endpoint)
         .await;
 
@@ -6478,6 +6480,50 @@ async fn an_ndjson_stream_is_read_without_being_told() {
     assert_eq!(response["decoded"]["usage"]["completionTokens"], 7);
     // No sentinel in NDJSON: the stop reason is what says it ended on purpose.
     assert_eq!(response["stream"]["terminated"], true);
+}
+
+/// Ollama's native API sends a whole tool call in a chunk of its own, then closes
+/// the stream with a chunk carrying nothing but the stop reason and the counters.
+/// Reading only that last chunk decodes the turn as a model that called nothing —
+/// and an agent loop then stops on `noToolCalls` at turn one.
+#[tokio::test]
+async fn a_tool_call_sent_before_the_last_chunk_is_not_lost() {
+    let endpoint = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ndjson(concat!(
+            "{\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"call_dbyfas27\",\"function\":{\"index\":0,\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}}]},\"done\":false}\n",
+            "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\",\"eval_count\":20}"
+        )))
+        .mount(&endpoint)
+        .await;
+
+    let harness = Harness::start(&[("models/chat.yaml", streaming_model(&endpoint.uri()))]).await;
+
+    let (_, events) = harness
+        .stream(json!({"model": "chat", "prompt": "weather in Paris"}))
+        .await;
+
+    let response = &events.last().expect("done").1["response"];
+    let calls = &response["decoded"]["toolCalls"];
+    assert_eq!(calls[0]["name"], "get_weather", "{response}");
+    assert_eq!(calls[0]["arguments"], json!({"city": "Paris"}));
+    assert_eq!(calls[0]["id"], "call_dbyfas27");
+    assert_eq!(
+        response["decode"]["matched"]["toolCalls"],
+        "$.message.tool_calls"
+    );
+
+    // The model said nothing, which is not the same as a path that does not fit
+    // this endpoint. Neither cascade is reported as having missed.
+    assert!(response["decoded"]["content"].is_null());
+    assert!(
+        response["decode"]["missed"]["delta"].is_null(),
+        "{response}"
+    );
+    assert!(
+        response["decode"]["missed"]["toolCalls"].is_null(),
+        "{response}"
+    );
 }
 
 #[tokio::test]
@@ -6973,17 +7019,17 @@ async fn a_loop_does_not_stream_unless_the_run_asks_for_it() {
 #[tokio::test]
 async fn a_streamed_loop_reports_deltas_per_turn() {
     let server = MockServer::start().await;
-    // Turn one asks for a tool, and the call is in the *last* chunk — the only
-    // place `mire` reads one from in a stream. An endpoint that split it across
-    // chunks would end the loop here instead, which is a fact about the endpoint
-    // rather than a thing to work around.
+    // Turn one asks for a tool in the middle of the stream, keeps talking, and
+    // then closes with a chunk carrying nothing but the stop reason. Read from
+    // the last chunk alone the turn asked for nothing, and the loop stops here
+    // on `noToolCalls` instead of calling anything.
     Mock::given(method("POST"))
         .respond_with(event_stream(concat!(
             "data: {\"choices\":[{\"delta\":{\"content\":\"look\"}}]}\n\n",
-            "data: {\"choices\":[{\"delta\":{\"content\":\"ing\"}}]}\n\n",
             "data: {\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"c1\",\
-             \"function\":{\"name\":\"get_weather\",\"arguments\":\"{}\"}}]},\
-             \"finish_reason\":\"tool_calls\"}]}\n\n",
+             \"function\":{\"name\":\"get_weather\",\"arguments\":\"{}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ing\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
             "data: [DONE]\n\n",
         )))
         .up_to_n_times(1)

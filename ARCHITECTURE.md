@@ -372,11 +372,13 @@ run by something that already has one.
 
 ## Limitations
 
-- **Tool calls are not reassembled from a stream.** A streamed answer is decoded
-  from its last chunk, so an endpoint that splits a call's arguments across
-  chunks comes back looking like a turn that asked for nothing. Stitching them
-  would be guesswork; the run is honest about it instead, and streaming is off by
-  default.
+- **A tool call split across chunks is not reassembled.** The `tool_calls`
+  cascade runs on every chunk, so an endpoint that sends a call whole — in the
+  last chunk or any other — decodes streamed exactly as it does unstreamed. One
+  that fragments a call's arguments across chunks, as the `OpenAI` shape does,
+  comes back looking like a turn that asked for nothing. Stitching those
+  fragments would be guesswork; the run is honest about it instead, and
+  streaming is off by default.
 - **MCP is Streamable HTTP only.** There is no stdio transport, so a server that
   is a local subprocess has to be fronted by something that speaks HTTP.
 - **A server asking for interactive input stops the tool.** An elicitation needs
