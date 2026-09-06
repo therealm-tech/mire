@@ -54,6 +54,7 @@ export function ChatPanel({
   attaching,
   attachError,
   needsUpload,
+  missingSignIn,
   onPrompt,
   onMaxIterations,
   onStreaming,
@@ -106,6 +107,8 @@ export function ChatPanel({
    * lies about what it does.
    */
   needsUpload: boolean
+  /** An identity this run needs has no browser session behind it. */
+  missingSignIn: boolean
   onPrompt: (value: string) => void
   onMaxIterations: (value: number) => void
   onStreaming: (value: boolean) => void
@@ -118,6 +121,15 @@ export function ChatPanel({
   onReset: () => void
 }) {
   const positions = messagePositions(items)
+
+  // Why nothing can be sent, in the words the button will use. Both refusals are
+  // `mire`'s own — neither call leaves the process — so there is nothing to
+  // learn by pressing **Send** and being told what is already on the page.
+  const refusal = needsUpload
+    ? 'This model is built around a file. Attach one, and Send comes back.'
+    : missingSignIn
+      ? 'An identity this run needs has nobody signed in to it. Sign in above, and Send comes back.'
+      : null
   const turns = positions.size
 
   // Following the answer as it is written is the whole reason this is a
@@ -166,7 +178,7 @@ export function ChatPanel({
                 position={positions.get(item.id) ?? 0}
                 turns={turns}
                 busy={busy}
-                blocked={needsUpload}
+                blocked={refusal}
                 onRetry={() => onRetry(item.id)}
               />
             ) : item.kind === 'activity' ? (
@@ -214,6 +226,7 @@ export function ChatPanel({
           attaching={attaching}
           attachError={attachError}
           needsUpload={needsUpload}
+          refusal={refusal}
           onPrompt={onPrompt}
           onMaxIterations={onMaxIterations}
           onStreaming={onStreaming}
@@ -249,11 +262,11 @@ function Bubble({
   turns: number
   busy: boolean
   /**
-   * Nothing can be sent at all — a `requires_upload:` model with the file since
-   * detached. A retry is a send, so it goes the same way **Send** does rather
-   * than being the one door left open onto a `422`.
+   * Why nothing can be sent at all, or `null`. A retry is a send, so it goes the
+   * same way **Send** does rather than being the one door left open onto a
+   * refusal the button next to it is shut against.
    */
-  blocked: boolean
+  blocked: string | null
   onRetry: () => void
 }) {
   const mine = message.role === 'user'
@@ -284,15 +297,14 @@ function Bubble({
         <span className="text-faint text-xs">{ROLE_LABELS[message.role]}</span>
         <button
           type="button"
-          disabled={busy || blocked}
+          disabled={busy || blocked !== null}
           onClick={onRetry}
           aria-label={`Retry turn ${position}`}
           title={
-            blocked
-              ? 'This model is built around a file, and none is attached.'
-              : (mine
-                  ? 'Send the conversation again, ending on this message.'
-                  : 'Drop this answer and ask the same question again.') + cost
+            blocked ??
+            (mine
+              ? 'Send the conversation again, ending on this message.'
+              : 'Drop this answer and ask the same question again.') + cost
           }
           className="text-faint text-xs disabled:opacity-50 hover:text-ink hover:underline"
         >
@@ -672,6 +684,7 @@ function Composer({
   attaching,
   attachError,
   needsUpload,
+  refusal,
   onPrompt,
   onMaxIterations,
   onStreaming,
@@ -698,6 +711,8 @@ function Composer({
    * lies about what it does.
    */
   needsUpload: boolean
+  /** Why **Send** does not go, beyond an empty box. See `refusal` in `ChatPanel`. */
+  refusal: string | null
   onPrompt: (value: string) => void
   onMaxIterations: (value: number) => void
   onStreaming: (value: boolean) => void
@@ -714,11 +729,11 @@ function Composer({
   const empty = hasPrompt && prompt.trim().length === 0
 
   // Every reason **Send** does not go, in one place, because Enter has to obey
-  // the same list the button does. The last is the one worth pointing at: a
-  // missing file is fixed by **Attach**, right there two buttons along, rather
-  // than by anything in the box — which on a `has_prompt: false` model is not
-  // even there.
-  const stuck = busy || empty || needsUpload
+  // the same list the button does. The last is the one worth pointing at: it is
+  // never fixed by anything in the box — which on a `has_prompt: false` model is
+  // not even there — but by **Attach** two buttons along, or by the sign-in on
+  // the bar above.
+  const stuck = busy || empty || refusal !== null
 
   // The real control is the input; the button is what you can see. Styling a
   // file input into something that matches the rest of the page is a fight
@@ -797,11 +812,10 @@ function Composer({
           disabled={stuck}
           onClick={onSend}
           title={
-            needsUpload
-              ? 'This model is built around a file. Attach one, and Send comes back.'
-              : single
-                ? 'One turn of this model, and no second one: a tool call comes back unanswered.'
-                : 'Run the model in a loop, answering its tools. A model with none stops on turn one.'
+            refusal ??
+            (single
+              ? 'One turn of this model, and no second one: a tool call comes back unanswered.'
+              : 'Run the model in a loop, answering its tools. A model with none stops on turn one.')
           }
         >
           Send
