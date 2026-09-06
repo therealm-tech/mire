@@ -169,13 +169,12 @@ all.
 request gets to invent. The file stays the authority on what exists, and the
 switch decides what this run actually did.
 
-A server that is off carries none of its blockers. One whose browser identity
+A server that is off carries none of its refusals. One whose browser identity
 nobody has signed in to would refuse the first tool call with a `409`; off, it is
-not in the run, so the bar stays green and the sign-in it wants is not on its
-card either. The card stays, saying what being off means — and while a run
-reaches nothing at all the bar says so outright, because "the model is offered no
-live tool" is the thing you want in front of you rather than reconstructed from
-an empty trace afterwards.
+not in the run, so the bar says nothing about it and the sign-in it wants is not
+on its card either. The card is where being off is said — "nothing is set up, and
+the model is offered no live tool", on the block that holds the switch, rather
+than reconstructed from an empty trace afterwards.
 
 ## A token that does not fit
 

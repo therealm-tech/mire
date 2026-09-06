@@ -1,7 +1,17 @@
 import { describe, expect, it } from 'vitest'
 import type { AuthDescriptor, McpDescriptor, ModelSummary } from './api'
-import { activeServers, serverNames } from './mcp'
-import { preflight, reaches } from './preflight'
+import { activeServers } from './mcp'
+import { type Preflight, preflight, reaches } from './preflight'
+
+/** The rows that refuse the call — what used to be the whole of `blockers`. */
+function blocking(state: Preflight) {
+  return state.rows.filter((row) => row.blocks)
+}
+
+/** The one row about who the model call goes out as. */
+function identity(state: Preflight) {
+  return state.rows.find((row) => row.key === 'identity')
+}
 
 const MODEL: ModelSummary = {
   id: 'chat',
@@ -33,7 +43,6 @@ function run(overrides: {
   token?: string
   /** A chat model with servers unless a test says otherwise. */
   usesMcp?: boolean
-  uploads?: number
   /** The servers switched on. Nothing is, unless a test says so. */
   mcpOn?: string[]
 }) {
@@ -55,9 +64,7 @@ function run(overrides: {
     providers: overrides.providers ?? (provider ? [provider] : []),
     servers,
     token: overrides.token ?? '',
-    uploads: overrides.uploads ?? 0,
     mcpActive: usesMcp ? activeServers(servers, on, {}) : [],
-    mcpDeclared: usesMcp ? serverNames(servers) : [],
   })
 }
 
@@ -108,51 +115,134 @@ describe('reaches', () => {
 describe('preflight', () => {
   it('clears a model whose identity is resolved and unconstrained', () => {
     const state = run({})
-    expect(state.blockers).toEqual([])
-    expect(state.identity).toBe('token')
+    expect(blocking(state)).toEqual([])
+    expect(identity(state)?.subject).toBe('token')
     expect(state.url).toBe('https://models.internal/v1/chat/completions')
+  })
+
+  it('always says who the call goes out as, however dull the answer', () => {
+    // The line is read rather than looked for, so it is there when there is
+    // nothing wrong — which is most of the time.
+    const state = run({})
+    expect(state.rows).toHaveLength(1)
+    expect(identity(state)?.label).toBe('token')
+    expect(identity(state)?.tone).toBe('neutral')
+  })
+
+  it('names the source the server reads a token from, and nothing else', () => {
+    // The point of the line: an empty MODEL_TOKEN and the wrong variable name
+    // are the same 401 until one of them is said out loud. The name is the whole
+    // of what the badge cannot hold, so the name is the whole of the detail.
+    const env = run({ provider: { valueSource: { from: 'env', name: 'MODEL_TOKEN' } } })
+    expect(identity(env)?.detail).toBe('env: MODEL_TOKEN')
+
+    const file = run({ provider: { valueSource: { from: 'file', name: '/run/token' } } })
+    expect(identity(file)?.detail).toBe('file: /run/token')
+  })
+
+  it('leaves anonymous to its badge', () => {
+    const state = run({
+      model: { auth: 'anonymous' },
+      provider: { id: 'anonymous', name: 'anonymous', kind: 'anonymous' },
+    })
+    expect(identity(state)?.label).toBe('anonymous')
+    expect(identity(state)?.blocks).toBe(false)
+    expect(identity(state)?.detail).toBe('')
+  })
+
+  it('tells an identity nobody chose apart from one somebody did', () => {
+    // Both send nothing. One is a decision in the file and the other is a field
+    // that was never filled in, and only the second is worth a word.
+    const state = run({
+      model: { auth: null },
+      provider: { id: 'anonymous', name: 'anonymous', kind: 'anonymous' },
+    })
+    expect(identity(state)?.detail).toBe('no auth: in this model')
+  })
+
+  it('says what a workload identity asserts', () => {
+    const state = run({
+      provider: { kind: 'oidc', valueSource: { from: 'file', name: '/var/run/sa/token' } },
+    })
+    expect(identity(state)?.label).toBe('workload')
+    expect(identity(state)?.detail).toBe('file: /var/run/sa/token')
   })
 
   it('blocks on an identity no provider declares', () => {
     const state = run({ provider: undefined, model: { auth: 'ghost' } })
-    expect(state.blockers).toHaveLength(1)
-    expect(state.blockers[0]?.message).toContain('ghost')
+    expect(blocking(state)).toHaveLength(1)
+    expect(identity(state)?.label).toBe('undeclared')
+    expect(identity(state)?.subject).toBe('ghost')
     // Nothing to press: the fix is in a file, not in this tab.
-    expect(state.blockers[0]?.signIn).toBeUndefined()
+    expect(identity(state)?.fix).toBeUndefined()
   })
 
-  it('blocks a requires_upload model until a file is attached', () => {
-    const empty = run({ model: { name: 'whisper', requiresUpload: true } })
-    expect(empty.blockers).toHaveLength(1)
-    expect(empty.blockers[0]?.message).toContain('whisper')
-    // The fix is a button on the composer, not one on the bar.
-    expect(empty.blockers[0]?.needsUpload).toBe(true)
-    expect(empty.blockers[0]?.signIn).toBeUndefined()
-
-    // Any file clears it: the model asked for one, not for a particular one.
-    expect(run({ model: { requiresUpload: true }, uploads: 1 }).blockers).toEqual([])
-  })
-
-  it('says nothing about attachments a model never asked for', () => {
-    expect(run({ uploads: 0 }).blockers).toEqual([])
-    expect(run({ uploads: 3 }).blockers).toEqual([])
+  it('says nothing about what the request carries', () => {
+    // A `requires_upload:` model with nothing attached is a real refusal, and
+    // it is the composer's to report: the fix is the button next to **Send**,
+    // and the bar is about where the call goes and who it goes as.
+    const state = run({ model: { name: 'whisper', requiresUpload: true } })
+    expect(blocking(state)).toEqual([])
+    expect(state.rows).toHaveLength(1)
+    expect(state.rows[0]?.key).toBe('identity')
   })
 
   it('blocks a credential pinned away from where the model points', () => {
     const state = run({ provider: { allowedHosts: ['127.0.0.1'] } })
-    expect(state.blockers[0]?.message).toContain('models.internal')
+    expect(identity(state)?.label).toBe('out of allowed_hosts')
+    // Where it may go. Where it would have gone is the URL on the line above.
+    expect(identity(state)?.detail).toBe('allowed_hosts: 127.0.0.1')
   })
 
   it('blocks on a credential this tab was never given, and clears once it is', () => {
-    expect(run({ provider: { needsValue: true } }).blockers).toHaveLength(1)
+    const empty = run({ provider: { needsValue: true } })
+    expect(blocking(empty)).toHaveLength(1)
+    expect(identity(empty)?.label).toBe('no value')
     // Whitespace is not a credential.
-    expect(run({ provider: { needsValue: true }, token: '   ' }).blockers).toHaveLength(1)
-    expect(run({ provider: { needsValue: true }, token: 'sk-x' }).blockers).toEqual([])
+    expect(blocking(run({ provider: { needsValue: true }, token: '   ' }))).toHaveLength(1)
+
+    const typed = run({ provider: { needsValue: true }, token: 'sk-x' })
+    expect(blocking(typed)).toEqual([])
+    expect(identity(typed)?.label).toBe('in this tab')
+  })
+
+  it('keeps the credential field through the first keystroke', () => {
+    // The row carries the input whether or not it is satisfied: one that
+    // appeared and vanished around a value would take the caret with it.
+    expect(identity(run({ provider: { needsValue: true } }))?.prompts).toBe(true)
+    expect(identity(run({ provider: { needsValue: true }, token: 'sk-x' }))?.prompts).toBe(true)
   })
 
   it('sends you to the sign-in for a browser identity with no session', () => {
     const state = run({ provider: { needsLogin: true } })
-    expect(state.blockers[0]?.signIn).toBe('token')
+    expect(identity(state)?.label).toBe('not signed in')
+    // Nothing after the badge: it has already said the whole of it.
+    expect(identity(state)?.detail).toBe('')
+    expect(identity(state)?.fix).toEqual({ kind: 'sign-in', provider: 'token', retry: false })
+  })
+
+  it('offers to sign out of a session rather than only reporting it', () => {
+    const state = run({
+      provider: {
+        needsLogin: true,
+        session: { expiresInS: 600, canRefresh: true, subject: 'gleroy', scope: 'openid' },
+      },
+    })
+    expect(identity(state)?.label).toBe('signed in')
+    expect(identity(state)?.blocks).toBe(false)
+    expect(identity(state)?.detail).toContain('gleroy')
+    expect(identity(state)?.detail).toContain('expires in 10 min')
+    expect(identity(state)?.fix).toEqual({ kind: 'sign-out', provider: 'token' })
+  })
+
+  it('carries the reason the last sign-in failed, and offers a second way in', () => {
+    // Pressing the same button again replays the identity provider's own
+    // session, and with it the same failure; `retry` is what says to offer the
+    // one that forces it to ask.
+    const state = run({ provider: { needsLogin: true, lastError: 'access_denied' } })
+    expect(identity(state)?.label).toBe('sign-in failed')
+    expect(identity(state)?.detail).toBe('access_denied')
+    expect(identity(state)?.fix).toEqual({ kind: 'sign-in', provider: 'token', retry: true })
   })
 
   it('blocks on a server whose identity nobody is signed in to, named or templated', () => {
@@ -186,11 +276,17 @@ describe('preflight', () => {
       },
     ]
 
+    // One line, not two: `me` is what is missing, and one sign-in is what fixes
+    // both servers. Which of them wanted it is not said — it is the same
+    // identity either way, and each card says its own business.
     const state = run({ providers: [PROVIDER, human], servers, mcpOn: ['named', 'templated'] })
-    expect(state.blockers).toHaveLength(2)
-    expect(state.blockers.every((blocker) => blocker.signIn === 'me')).toBe(true)
+    expect(blocking(state)).toHaveLength(1)
+    expect(blocking(state)[0]?.subject).toBe('me')
+    expect(blocking(state)[0]?.detail).toBe('')
+    expect(blocking(state)[0]?.fix).toEqual({ kind: 'sign-in', provider: 'me', retry: false })
 
-    // A session on that provider is all it took.
+    // A session on that provider is all it took — and the line stays, now
+    // saying who was fetched rather than that nobody was.
     const signedIn = run({
       providers: [
         PROVIDER,
@@ -199,7 +295,11 @@ describe('preflight', () => {
       servers,
       mcpOn: ['named', 'templated'],
     })
-    expect(signedIn.blockers).toEqual([])
+    expect(blocking(signedIn)).toEqual([])
+    const row = signedIn.rows.find((entry) => entry.key === 'mcp:me')
+    expect(row?.label).toBe('signed in')
+    expect(row?.detail).toContain('gleroy')
+    expect(row?.fix).toEqual({ kind: 'sign-out', provider: 'me' })
   })
 
   it('reaches no server until one is switched on, and says as much', () => {
@@ -207,12 +307,13 @@ describe('preflight', () => {
     // really runs somewhere, so the run reaches one because somebody said so.
     const idle = run({ servers: TWO_SERVERS })
     expect(idle.servers).toEqual([])
-    expect(idle.blockers).toEqual([])
-    expect(idle.notes[0]).toContain('2 declared in mcp/')
+    expect(blocking(idle)).toEqual([])
+    // Nothing is set up, and the block that holds the switches says so. The bar
+    // counts what the run reaches, and reaching nothing counts to nothing.
+    expect(idle.notes).toEqual([])
 
     const state = run({ servers: TWO_SERVERS, mcpOn: ['files', 'search'] })
     expect(state.servers).toEqual(['files', 'search'])
-    // Nothing left out, so nothing to report.
     expect(state.notes).toEqual([])
   })
 
@@ -223,17 +324,17 @@ describe('preflight', () => {
       mcpOn: ['files', 'search'],
     }
 
-    // With the servers in the run both are its business, and both want a session.
-    expect(run(overrides).blockers).toHaveLength(2)
+    // With the servers in the run both are its business, and both want the one
+    // session nobody has fetched.
+    expect(blocking(run(overrides))).toHaveLength(1)
 
     // On an embedding model neither is. There is no loop, so a credential it
     // never uses cannot refuse it — and the bar stays green, correctly. Nothing
     // is noted either: a run with no loop has not left a server out, it has no
     // business with one.
     const loopless = run({ ...overrides, usesMcp: false })
-    expect(loopless.blockers).toEqual([])
+    expect(blocking(loopless)).toEqual([])
     expect(loopless.servers).toEqual([])
-    expect(loopless.notes).toEqual([])
   })
 
   it('carries only the blockers of the servers this run actually reaches', () => {
@@ -243,12 +344,11 @@ describe('preflight', () => {
     // this call: a server left off is never discovered, listed or signed in to.
     const narrowed = run({ ...overrides, mcpOn: ['files'] })
     expect(narrowed.servers).toEqual(['files'])
-    expect(narrowed.blockers).toHaveLength(1)
-    expect(narrowed.blockers[0]?.signIn).toBe('me')
-    // Something is on, so the note about reaching nothing has nothing to say.
-    expect(narrowed.notes).toEqual([])
+    expect(blocking(narrowed)).toHaveLength(1)
+    expect(blocking(narrowed)[0]?.fix).toEqual({ kind: 'sign-in', provider: 'me', retry: false })
 
-    expect(run({ ...overrides, mcpOn: ['files', 'search'] }).blockers).toHaveLength(2)
+    // Still one line: two servers wanting one identity is one thing to fetch.
+    expect(blocking(run({ ...overrides, mcpOn: ['files', 'search'] }))).toHaveLength(1)
   })
 
   it('ignores a switched-on name that nothing declares any more', () => {
@@ -258,9 +358,35 @@ describe('preflight', () => {
     expect(state.servers).toEqual(['files'])
   })
 
+  it('says an identity the model and a server share once, and once only', () => {
+    // `as-me` calls the model as `me`, and `files` wants `me` too. One sign-in
+    // fixes both, so one line says both — with the servers named on it, since
+    // "who is missing" and "what is waiting on them" are one answer.
+    const state = run({
+      model: { auth: 'me' },
+      provider: HUMAN,
+      providers: [HUMAN],
+      servers: TWO_SERVERS,
+      mcpOn: ['files'],
+    })
+
+    expect(state.rows).toHaveLength(1)
+    expect(state.rows[0]?.key).toBe('identity')
+    expect(state.rows[0]?.subject).toBe('me')
+    expect(state.rows[0]?.detail).toBe('')
+  })
+
+  it('keeps an identity only a server wants on its own line', () => {
+    // The model calls as `token`, which is fine; `files` wants `me`, which is
+    // not. Two identities, two answers, two lines.
+    const state = run({ providers: [PROVIDER, HUMAN], servers: TWO_SERVERS, mcpOn: ['files'] })
+    expect(state.rows.map((row) => row.subject)).toEqual(['token', 'me'])
+    expect(state.rows[1]?.key).toBe('mcp:me')
+  })
+
   it('counts a missing decode block as a note rather than a refusal', () => {
     const state = run({ model: { hasDecode: false } })
-    expect(state.blockers).toEqual([])
+    expect(blocking(state)).toEqual([])
     expect(state.notes).toHaveLength(1)
   })
 })

@@ -26,7 +26,7 @@
     {
       "clientId": "mire-ui",
       "name": "mire browser login",
-      "description": "Public client for the authorization code + PKCE flow. No secret: mire runs from a directory of YAML files and has none to keep, which is what PKCE is for.",
+      "description": "Public client for the authorization code + PKCE flow. No secret: mire has none to keep, which is what PKCE is for. Redirects are open because the callback follows the browser: any port, any proxy. A real realm registers the exact URIs.",
       "enabled": true,
       "protocol": "openid-connect",
       "publicClient": true,
@@ -36,8 +36,7 @@
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
       "redirectUris": [
-        "http://127.0.0.1:8787/*",
-        "http://localhost:8787/*"
+        "*"
       ],
       "webOrigins": [
         "+"

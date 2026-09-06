@@ -51,6 +51,21 @@ pub enum AuthKind {
     OidcBrowser,
 }
 
+/// Where a provider reads its credential.
+///
+/// The *name* of the source, never its content: a variable name and a path are
+/// not secrets, and until one of them is said out loud a `401` because the
+/// variable is empty and a `401` because the wrong variable is being read are
+/// the same screen.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase", tag = "from", content = "name")]
+pub enum ValueSource {
+    /// An environment variable, read on every call.
+    Env(String),
+    /// A file, re-read on every call so a rotated credential is picked up.
+    File(PathBuf),
+}
+
 /// A provider as advertised to the UI. Carries no credential.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -68,6 +83,13 @@ pub struct AuthDescriptor {
     /// `true` when the UI must prompt for the value: the registry declares neither
     /// `value.env` nor `value.file`.
     pub needs_value: bool,
+    /// What the server reads the credential from, for a provider that reads one.
+    ///
+    /// `None` where there is nothing to read: `anonymous`, a browser flow that
+    /// fetches its own, and a token provider the UI has to be asked for — which
+    /// is the [`Self::needs_value`] case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value_source: Option<ValueSource>,
     /// `true` when using this provider requires signing in through a browser
     /// first, so the UI knows to offer the button.
     pub needs_login: bool,
@@ -103,6 +125,7 @@ impl AuthDescriptor {
             stage: stage.map(ToOwned::to_owned),
             kind,
             needs_value: false,
+            value_source: None,
             needs_login: matches!(kind, AuthKind::OidcBrowser),
             allowed_hosts: allowed_hosts.to_vec(),
             session: None,
@@ -110,9 +133,24 @@ impl AuthDescriptor {
         }
     }
 
-    /// The registry declares no source, so the UI has to prompt.
-    fn prompting(mut self) -> Self {
-        self.needs_value = true;
+    /// Where a static token comes from: the source by name, or — when the
+    /// registry named none — a prompt, since only the UI can supply one.
+    fn reading_value(mut self, value: &TokenValue) -> Self {
+        match source_of(value) {
+            Some(source) => self.value_source = Some(source),
+            None => self.needs_value = true,
+        }
+        self
+    }
+
+    /// Where an OIDC client reads the credential it authenticates the token
+    /// endpoint with. Never prompts: a machine identity is not something to ask
+    /// a human to paste.
+    fn reading_credential(mut self, credential: &ClientCredential) -> Self {
+        self.value_source = match credential {
+            ClientCredential::Secret(value) => source_of(value),
+            ClientCredential::Assertion { file } => Some(ValueSource::File(file.clone())),
+        };
         self
     }
 }
@@ -349,10 +387,8 @@ fn build(
             allowed_hosts,
         } => {
             let header = header_name(path, &name, &header)?;
-            let mut descriptor = AuthDescriptor::new(&name, stage, AuthKind::Token, &allowed_hosts);
-            if value.env.is_none() && value.file.is_none() {
-                descriptor = descriptor.prompting();
-            }
+            let descriptor = AuthDescriptor::new(&name, stage, AuthKind::Token, &allowed_hosts)
+                .reading_value(&value);
             let provider = Auth::Token(TokenAuth::new(
                 descriptor.id.clone(),
                 header,
@@ -378,8 +414,10 @@ fn build(
             let header = header_name(path, &name, &header)?;
             let credential = client_credential(path, &name, client_secret, client_assertion)?;
             // A machine identity: never something the UI could sensibly ask a
-            // human to paste, and never something to sign in to.
-            let descriptor = AuthDescriptor::new(&name, stage, AuthKind::Oidc, &allowed_hosts);
+            // human to paste, and never something to sign in to. It still reads
+            // its credential from somewhere, and that somewhere is worth naming.
+            let descriptor = AuthDescriptor::new(&name, stage, AuthKind::Oidc, &allowed_hosts)
+                .reading_credential(&credential);
             let provider = Auth::Oidc(Box::new(OidcAuth::new(
                 OidcConfig {
                     name: descriptor.id.clone(),
@@ -462,6 +500,14 @@ fn client_credential(
             ),
         )),
     }
+}
+
+/// Where a token value is read from, or `None` when nobody said.
+fn source_of(value: &TokenValue) -> Option<ValueSource> {
+    if let Some(variable) = &value.env {
+        return Some(ValueSource::Env(variable.clone()));
+    }
+    value.file.clone().map(ValueSource::File)
 }
 
 /// Parses a header name, or explains which provider declared a bad one.
@@ -792,7 +838,34 @@ stages:
             .unwrap();
         assert_eq!(descriptor.kind, AuthKind::Token);
         assert!(!descriptor.needs_value);
+        // Named rather than only counted: an empty MODEL_TOKEN and a typo in
+        // the variable name are the same `401` until one of them is said.
+        assert!(matches!(
+            &descriptor.value_source,
+            Some(ValueSource::Env(variable)) if variable == "MODEL_TOKEN"
+        ));
         assert!(matches!(registry.get("gateway"), Some(Auth::Token(_))));
+    }
+
+    #[test]
+    fn a_token_read_from_a_file_names_the_path() {
+        let dir = write_provider(
+            "rotating",
+            "rotating",
+            "name: rotating\nkind: token\nvalue:\n  file: /var/run/secrets/token\n",
+        );
+        let registry = load(&dir);
+
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|d| d.name == "rotating")
+            .unwrap();
+        assert!(!descriptor.needs_value);
+        assert!(matches!(
+            &descriptor.value_source,
+            Some(ValueSource::File(path)) if path.as_os_str() == "/var/run/secrets/token"
+        ));
     }
 
     #[test]
@@ -806,6 +879,9 @@ stages:
             .find(|d| d.name == "pasted")
             .unwrap();
         assert!(descriptor.needs_value);
+        // Nothing to name: the value comes from the tab, and the tab is not a
+        // source the server could describe.
+        assert!(descriptor.value_source.is_none());
     }
 
     #[test]
@@ -883,6 +959,10 @@ audience: https://models.internal
         assert_eq!(descriptor.kind, AuthKind::Oidc);
         // A machine identity is never something to prompt a human for.
         assert!(!descriptor.needs_value);
+        assert!(matches!(
+            &descriptor.value_source,
+            Some(ValueSource::Env(variable)) if variable == "OIDC_CLIENT_SECRET"
+        ));
     }
 
     #[test]
@@ -902,6 +982,19 @@ client_assertion:
         let registry = load(&dir);
         assert!(registry.issues().is_empty(), "{:?}", registry.issues());
         assert!(registry.get("workload").is_some());
+
+        // The projected token it asserts, by path: what a pod sends, and the
+        // one thing that tells this identity apart from any other workload.
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|d| d.name == "workload")
+            .unwrap();
+        assert!(matches!(
+            &descriptor.value_source,
+            Some(ValueSource::File(path))
+                if path.as_os_str() == "/var/run/secrets/kubernetes.io/serviceaccount/token"
+        ));
     }
 
     #[test]

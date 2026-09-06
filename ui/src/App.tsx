@@ -23,7 +23,6 @@ import {
   type UploadedFile,
   uploadFile,
 } from './api'
-import { AuthPanel } from './components/AuthPanel'
 import { ChatPanel } from './components/ChatPanel'
 import { EmbeddingPanel } from './components/EmbeddingPanel'
 import { EmbeddingRequest } from './components/EmbeddingRequest'
@@ -48,7 +47,7 @@ import {
 } from './conversation'
 import { download, exportFilename, runExport } from './export'
 import { logger } from './logger'
-import { activeServers, serverNames } from './mcp'
+import { activeServers } from './mcp'
 import { useMediaQuery } from './media'
 import { preflight } from './preflight'
 import { usePersisted } from './storage'
@@ -211,7 +210,6 @@ export function App() {
   const [busy, setBusy] = useState(false)
   // The auth detail, which is a thing you read once. Shut by default so the box
   // you actually came to type in starts near the top of the page.
-  const [authOpen, setAuthOpen] = useState(false)
   // The servers, the same way and for the same reason: read when it is the
   // question, folded away when it is not.
   const [mcpOpen, setMcpOpen] = useState(false)
@@ -361,14 +359,6 @@ export function App() {
   const usesMcp = model?.kind === 'chat' && (mcp?.servers.length ?? 0) > 0
 
   /**
-   * Every declared server, by the name of the file that declared it.
-   *
-   * One name per file rather than per stage: the block shows one card per file,
-   * and the switch on it is about the file.
-   */
-  const declaredMcp = useMemo(() => (mcp ? serverNames(mcp.servers) : []), [mcp])
-
-  /**
    * The servers this run will actually set up, by id.
    *
    * One id per file — the stage that is picked, and only that one — minus
@@ -391,12 +381,10 @@ export function App() {
             providers: auth.providers,
             servers: mcp.servers,
             token,
-            uploads: attachments.length,
             mcpActive: activeMcp,
-            mcpDeclared: usesMcp ? declaredMcp : [],
           })
         : null,
-    [model, provider, auth, mcp, token, attachments, activeMcp, usesMcp, declaredMcp],
+    [model, provider, auth, mcp, token, activeMcp],
   )
 
   /** Puts one server in or out of the next run. */
@@ -420,22 +408,14 @@ export function App() {
     [setMcpStages],
   )
 
-  // One kind of blocker is fixed by a field inside the panel rather than by a
-  // button on the bar, and telling somebody to paste a credential below while
-  // the box to paste it into is folded away would be a joke at their expense.
-  const blockedOnAField = ready?.blockers.some((blocker) => blocker.opensAuth) ?? false
-  useEffect(() => {
-    if (blockedOnAField) {
-      setAuthOpen(true)
-    }
-  }, [blockedOnAField])
-
-  // The one blocker the composer acts on rather than only reports. Every other
-  // one is a credential the server will refuse, and refusing it is how you find
-  // out that it does; this one has no call in it at all — a `requires_upload:`
-  // model with nothing attached renders a request around a file that is not
-  // there — so **Send** is shut until **Attach** has been pressed.
-  const needsUpload = ready?.blockers.some((blocker) => blocker.needsUpload) ?? false
+  // The one refusal the composer acts on rather than reports. Every other one is
+  // a credential the server will refuse, and being refused is how you find out
+  // that it does; this one has no call in it at all — a `requires_upload:` model
+  // with nothing attached renders a request around a file that is not there — so
+  // **Send** is shut until **Attach** has been pressed. Worked out here rather
+  // than read off the bar: it is about what the request carries, which is the
+  // composer's subject and not the bar's.
+  const needsUpload = model?.requiresUpload === true && attachments.length === 0
 
   const signIn = useCallback((provider: string, prompt?: string) => {
     // Opened *before* awaiting anything: a popup opened after an await has lost
@@ -895,33 +875,23 @@ export function App() {
 
           {/*
             Above the box, because it is about the call that box is going to
-            make. The auth detail hangs off it rather than off the page: it is
-            the answer to a question this bar has already summarised.
+            make. The identity is one of its lines rather than a panel hanging
+            off it: there was nothing behind that button a line could not say,
+            and the two things no file can hold — a credential typed into this
+            tab, a browser session somebody has to go and fetch — are asked for
+            where the refusal is reported.
           */}
           {ready ? (
             <Preflight
               state={ready}
-              authOpen={authOpen}
               mcpOpen={mcpOpen}
               showMcp={usesMcp}
-              signingIn={signingIn}
-              onSignIn={signIn}
-              onOpenAuth={() => setAuthOpen((open) => !open)}
-              onOpenMcp={() => setMcpOpen((open) => !open)}
-            />
-          ) : null}
-
-          {authOpen ? (
-            <AuthPanel
-              auth={auth}
-              model={model}
-              provider={provider}
               token={token}
               signingIn={signingIn}
-              loginError={loginError}
               onToken={setToken}
-              onLogin={signIn}
-              onLogout={signOut}
+              onSignIn={signIn}
+              onSignOut={signOut}
+              onOpenMcp={() => setMcpOpen((open) => !open)}
             />
           ) : null}
 

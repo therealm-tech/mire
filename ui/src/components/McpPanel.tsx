@@ -247,13 +247,11 @@ function Server({
               )
             }
 
+            // Not signed in: the badge on the row above has said so, and what
+            // a `409 not_signed_in` is does not need repeating on every card of
+            // every run. All this adds is the button that fetches the session.
             return (
               <div key={provider.id} className="mt-1.5 space-y-1">
-                <p className="text-muted text-xs">
-                  A tool call answers <span className="font-mono">409 not_signed_in</span> and sends
-                  nothing until somebody signs in to{' '}
-                  <span className="font-medium">{provider.id}</span>.
-                </p>
                 <div className="flex flex-wrap items-center gap-2">
                   <Button
                     variant="primary"

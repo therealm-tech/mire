@@ -56,6 +56,10 @@ stages:
     url: http://127.0.0.1:11435/v1/chat/completions
     auth: keycloak-workload
     knobs: '"reasoning_effort": "none", "max_tokens": 256'
+  oidc:
+    url: http://127.0.0.1:11435/v1/chat/completions
+    auth: keycloak-user
+    knobs: '"reasoning_effort": "none", "max_tokens": 256'
 
 # Two knobs, spelled differently by the two routes, which is why they travel
 # together in one variable rather than one each.
