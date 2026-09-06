@@ -112,9 +112,12 @@ jobs:
       - name: cache cargo build artifacts
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
 
-      # `build.rs` writes a placeholder into `ui/dist` when the front end has
-      # not been built, so the crate compiles without a Node toolchain here.
+      # No Node step, and `MIRE_BUILD_UI=0` so that `build.rs` does not go looking
+      # for one: this suite exercises the API, not the bundle, and it compiles
+      # against the placeholder page the script writes instead.
       - name: run the test suite
+        env:
+          MIRE_BUILD_UI: "0"
         run: cargo test
 
   ui-test:

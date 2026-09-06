@@ -24,9 +24,9 @@
 
 # --- the UI ------------------------------------------------------------------
 #
-# Built first and copied into the Rust build: `build.rs` embeds `ui/dist` at
-# compile time, and without it the binary serves a placeholder page telling you
-# to build the front end.
+# Built here and copied into the Rust build rather than left to `build.rs`, which
+# would otherwise do it during `cargo build`: a stage of its own keeps `npm ci` in
+# a layer cached on the lockfile, and keeps Node out of the Rust stage entirely.
 FROM node:24.13-alpine AS ui
 WORKDIR /usr/local/src/mire/ui
 # The lockfile alone, so `npm ci` is only re-run when dependencies actually move.
@@ -68,10 +68,11 @@ COPY --from=planner /usr/local/src/mire/recipe.json recipe.json
 RUN cargo chef cook --release --locked --recipe-path recipe.json
 COPY . .
 COPY --from=ui /usr/local/src/mire/ui/dist ui/dist
-# The empty configuration directory is built here for the same reason everything
-# else is: the runtime image has no shell to create it with, and no writable root
-# to create it in later.
-RUN cargo build --release --locked \
+# `MIRE_BUILD_UI=0` because the bundle arrived from the stage above and there is
+# no npm in this one to rebuild it with. The empty configuration directory is
+# built here for the same reason everything else is: the runtime image has no
+# shell to create it with, and no writable root to create it in later.
+RUN MIRE_BUILD_UI=0 cargo build --release --locked \
     && mkdir -p /out/etc/mire/config
 
 # --- the runtime -------------------------------------------------------------
