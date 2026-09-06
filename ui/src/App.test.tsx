@@ -16,6 +16,7 @@ const MODELS = {
     {
       id: 'chat',
       name: 'chat',
+      isDefault: true,
       kind: 'chat',
       url: 'https://models.internal/v1/chat/completions',
       auth: null,
@@ -27,6 +28,7 @@ const MODELS = {
     {
       id: 'embed',
       name: 'embed',
+      isDefault: true,
       kind: 'embedding',
       url: 'https://models.internal/v1/embeddings',
       auth: null,
@@ -39,6 +41,7 @@ const MODELS = {
     {
       id: 'guarded',
       name: 'guarded',
+      isDefault: true,
       kind: 'chat',
       url: 'http://127.0.0.1:11435/v1/messages',
       auth: 'pasted',
@@ -51,6 +54,7 @@ const MODELS = {
     {
       id: 'as-me',
       name: 'as-me',
+      isDefault: true,
       kind: 'chat',
       url: 'https://models.internal/v1/as-me',
       auth: 'me',
@@ -64,6 +68,7 @@ const MODELS = {
     {
       id: 'transcribe',
       name: 'transcribe',
+      isDefault: true,
       kind: 'chat',
       url: 'https://models.internal/v1/audio/transcriptions',
       auth: null,
@@ -77,6 +82,7 @@ const MODELS = {
     {
       id: 'pinned',
       name: 'pinned',
+      isDefault: true,
       kind: 'chat',
       url: 'https://models.internal/v1/pinned',
       auth: 'gateway',
@@ -3442,6 +3448,7 @@ const NEEDS_A_FILE = {
     {
       id: 'describe-image',
       name: 'describe-image',
+      isDefault: true,
       kind: 'chat',
       url: 'https://models.internal/v1/describe',
       auth: null,
@@ -3460,6 +3467,7 @@ const NEEDS_A_FILE_AND_NOTHING_ELSE = {
     {
       id: 'whisper',
       name: 'whisper',
+      isDefault: true,
       kind: 'chat',
       url: 'http://127.0.0.1:9000/v1/audio/transcriptions',
       auth: null,
@@ -3769,6 +3777,85 @@ describe('attaching a file', () => {
     await user.click(screen.getByRole('button', { name: 'New conversation' }))
 
     expect(screen.queryByText('report.pdf')).not.toBeInTheDocument()
+  })
+})
+
+/** One file, two stages: two endpoints under the name they share. */
+const STAGED = {
+  models: [
+    {
+      id: 'qwen3@dev',
+      name: 'qwen3',
+      stage: 'dev',
+      isDefault: true,
+      kind: 'chat',
+      url: 'https://models.internal/dev/v1/chat/completions',
+      auth: null,
+      source: '/tmp/qwen3.yaml',
+      hasPrompt: true,
+      hasDecode: true,
+      requiresUpload: false,
+    },
+    {
+      id: 'qwen3@prod',
+      name: 'qwen3',
+      stage: 'prod',
+      isDefault: false,
+      kind: 'chat',
+      url: 'https://models.internal/prod/v1/chat/completions',
+      auth: null,
+      source: '/tmp/qwen3.yaml',
+      hasPrompt: true,
+      hasDecode: true,
+      requiresUpload: false,
+    },
+  ],
+  issues: [],
+}
+
+describe('a model that declares stages', () => {
+  it('is one row, opens on its default stage, and calls the one that is pressed', async () => {
+    const sent: Array<Record<string, unknown>> = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input)
+        if (url.endsWith('api/models')) return Promise.resolve(Response.json(STAGED))
+        if (url.endsWith('api/auth')) return Promise.resolve(Response.json(AUTH))
+        if (url.endsWith('api/prompts')) return Promise.resolve(Response.json(PROMPTS))
+        if (url.endsWith('api/mcp')) return Promise.resolve(Response.json(MCP))
+        sent.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+        return Promise.resolve(sse(agentStream([answerTurn(200, 'pong')])))
+      }),
+    )
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    // The name once, and the stages as buttons under it — never `qwen3@dev` on
+    // a row of its own.
+    await screen.findByRole('heading', { name: 'Models' })
+    const models = within(panel('Models'))
+    expect(models.getByText('qwen3')).toBeInTheDocument()
+    expect(models.getAllByRole('listitem')).toHaveLength(1)
+    expect(models.getByText('https://models.internal/dev/v1/chat/completions')).toBeInTheDocument()
+
+    await user.click(models.getByRole('button', { name: /prod/ }))
+    expect(models.getByText('https://models.internal/prod/v1/chat/completions')).toBeInTheDocument()
+
+    const box = await screen.findByRole('textbox', { name: /message/i })
+    await user.type(box, 'ping')
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+
+    // The stage is the address, so it is what the call carries.
+    await waitFor(() => expect(sent).toHaveLength(1))
+    expect(sent[0]?.model).toBe('qwen3@prod')
+
+    // And the tab remembers where you were asking, per model — coming back to
+    // `qwen3` is coming back to `prod`, not to what its file calls the default.
+    expect(JSON.parse(window.localStorage.getItem('mire.stages') ?? '{}')).toEqual({
+      qwen3: 'prod',
+    })
   })
 })
 

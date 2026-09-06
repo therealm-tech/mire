@@ -49,6 +49,17 @@ impl ModelSet {
         self.models.values()
     }
 
+    /// Whether a bare reference to this model's name resolves to this entry.
+    ///
+    /// Always true for a file that declares no stages, which is its own default
+    /// by having nothing to choose between.
+    #[must_use]
+    pub fn is_default(&self, model: &Model) -> bool {
+        self.defaults
+            .get(&model.name)
+            .is_some_and(|id| *id == model.id())
+    }
+
     /// Number of usable models.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -387,6 +398,33 @@ request:
         let set = load_dir(&dir);
 
         assert_eq!(set.get("staged").unwrap().id(), "staged@dev");
+        // And the set says so of the entry, which is how the composer knows
+        // where a row points before anybody picks a stage.
+        assert!(set.is_default(set.get("staged@dev").unwrap()));
+        assert!(!set.is_default(set.get("staged@prod").unwrap()));
+    }
+
+    /// The invariant the composer leans on: a name it lists always has exactly
+    /// one entry a bare reference means. A file that leaves the choice open does
+    /// not load at all, so there is no name in the list without a default.
+    #[test]
+    fn stages_with_no_default_between_them_take_the_file_down() {
+        let dir = temp_dir("staged-no-default");
+        write(
+            &dir,
+            "staged.yaml",
+            &STAGED.replace("default_stage: dev\n", ""),
+        );
+
+        let set = load_dir(&dir);
+
+        assert!(set.is_empty());
+        assert_eq!(set.issues().len(), 1);
+        assert!(
+            set.issues()[0].message.contains("default_stage"),
+            "{:?}",
+            set.issues()
+        );
     }
 
     /// All or nothing: a picker missing a stage, with the reason in the log, is

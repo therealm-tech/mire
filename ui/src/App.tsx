@@ -31,7 +31,7 @@ import { Failure } from './components/Failure'
 import { Mark } from './components/Mark'
 import { ModelList } from './components/ModelList'
 import { Preflight } from './components/Preflight'
-import { Button, Panel, Spinner } from './components/primitives'
+import { Badge, Button, Panel, Spinner } from './components/primitives'
 import { TrafficPanel } from './components/TrafficPanel'
 import {
   activityItem,
@@ -186,6 +186,16 @@ export function App() {
   // `mcp/`'s and so global to the tab — which is also all they can be now
   // that every declared server is offered to every model.
   const [mcpOff, setMcpOff] = usePersisted<string[]>('mcpOff', z.array(z.string()), [])
+  // The stage last picked, per model name. Coming back to a model is coming back
+  // to the endpoint you were asking, which is rarely its default one: the whole
+  // reason to have stages is that `prod` is where the question was. A name whose
+  // file no longer declares that stage falls back to the default rather than to
+  // nothing, and the entry is simply never read again.
+  const [stages, setStages] = usePersisted<Record<string, string>>(
+    'stages',
+    z.record(z.string(), z.string()),
+    {},
+  )
 
   const [signingIn, setSigningIn] = useState<string | null>(null)
   // Carries the provider, because two places can start a login now and an error
@@ -282,7 +292,12 @@ export function App() {
         // explanation for it.
         setSelectedModel((current) => {
           const kept = loadedModels.models.some((entry) => entry.id === current)
-          return kept ? current : (loadedModels.models[0]?.name ?? null)
+          // The first model at its default stage, rather than the first entry:
+          // the list is ordered by id, so falling back to `models[0]` would open
+          // on whichever stage sorts first rather than on the one a bare name
+          // means.
+          const first = loadedModels.models.find((entry) => entry.isDefault)
+          return kept ? current : (first?.id ?? loadedModels.models[0]?.id ?? null)
         })
         logger.info('config.loaded', {
           models: loadedModels.models.length,
@@ -864,13 +879,26 @@ export function App() {
                 models={models.models}
                 issues={models.issues}
                 selected={selectedModel}
-                onSelect={(name) => {
-                  setSelectedModel(name)
+                stages={stages}
+                onSelect={(picked) => {
+                  setSelectedModel(picked.id)
+                  const stage = picked.stage
+                  if (stage !== undefined) {
+                    setStages((current) => ({ ...current, [picked.name]: stage }))
+                  }
                   setPicking(false)
                 }}
               />
             ) : (
-              <p className="truncate font-medium text-sm">{selectedModel ?? 'None selected'}</p>
+              // Folded away, the name and its stage rather than the `name@stage`
+              // the call carries: the panel below is not the wire, and the two
+              // are two things to read on the row that opens it.
+              <p className="flex items-center gap-2">
+                <span className="truncate font-medium text-sm">
+                  {model?.name ?? selectedModel ?? 'None selected'}
+                </span>
+                {model?.stage === undefined ? null : <Badge>{model.stage}</Badge>}
+              </p>
             )}
           </Panel>
         </div>

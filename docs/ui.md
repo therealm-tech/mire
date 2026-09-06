@@ -88,11 +88,13 @@ editor's — and it holds no logic of its own: it shows what the API returns.
 - **Models**, a column where there is room for one and a fold-away where there
   is not — on a phone the list was a screenful to scroll past before reaching the
   thing it configures. A model declaring
-  [stages](configuration.md#stages) has one row per stage, its name carrying the
-  `@dev` or `@prod` it answers to. One row per stage rather than a name with a
-  picker beside it, because two stages are two endpoints — their own URL, their
-  own credential, their own answer — and which one you are asking is the choice
-  the list is for. They sort together, under the name they share.
+  [stages](configuration.md#stages) is one row all the same, with a button per
+  stage under its name and a dot on the one a bare name means. Picking an
+  endpoint and picking where it runs are two questions, and the row asks them in
+  that order; what the row shows — the URL, the badges — is the stage that is
+  pressed, because that is what **Send** would ask. Two stages are still two
+  endpoints, with their own URL, their own credential and their own answer, and
+  the call carries the `name@stage` the button stands for.
 - **Embedding.** Count, width, encoding, the five checks, and per vector its
   norm, a sample of the first values and a distribution histogram. Never a wall
   of floats. A multi-vector answer stays grouped under the input it belongs to,
@@ -103,10 +105,13 @@ with the call and never stored, never logged, never echoed back. A credential
 `mire` fetched for you never reaches the tab at all — the browser sees a
 username, the granted scopes and a countdown.
 
-**The tab remembers a little, and never that.** Which model you were on, what
-you had half typed, how many turns you allow, which revision you pinned, which
-MCP servers you switched off — small settings whose loss is pure annoyance, kept
-in the browser's own storage. The credential is not among them, and neither is
+**The tab remembers a little, and never that.** Which model you were on and the
+stage you were asking it at, what you had half typed, how many turns you allow,
+which revision you pinned, which MCP servers you switched off — small settings
+whose loss is pure annoyance, kept in the browser's own storage. The stage is
+remembered per model, so coming back to one comes back to where the question was
+rather than to its default; a stage the file no longer declares is simply the
+default again. The credential is not among them, and neither is
 the conversation or the traffic: a session's bodies are unbounded, and the first
 oversized run would start throwing quota errors at a tool whose job is to be
 dependable while other things fail. Storage that is missing or full is a browser

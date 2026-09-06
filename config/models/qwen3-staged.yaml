@@ -3,8 +3,8 @@
 # `qwen3.yaml` next door describes the matrix this tool exists for — the gateway
 # or Ollama directly, a credential or none — and then has to pick one, because a
 # model is one URL. `stages:` is that matrix as two entries: both are declared
-# here, both load at startup, and the composer's model list shows them as
-# `qwen3-staged@ollama` and `qwen3-staged@gateway`.
+# here, both load at startup, and the composer lists `qwen3-staged` once, with
+# `ollama` and `gateway` as buttons under it.
 #
 # Both are live against `docker compose up -d`, and everything that differs
 # between them differs for a reason:

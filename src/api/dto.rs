@@ -22,6 +22,10 @@ use crate::prompt::{Prompt, PromptRegistry};
 use crate::redact::Secret;
 
 /// One model, as listed.
+// Four independent facts about an endpoint, each of which the UI acts on alone.
+// The lint's advice — a state machine, or two-variant enums — would be a wire
+// contract invented for the linter rather than for the reader.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSummary {
@@ -34,6 +38,11 @@ pub struct ModelSummary {
     /// Stage this reading of the file belongs to, absent when it declares none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stage: Option<String>,
+    /// `true` when a bare `name` means this reading — the file's
+    /// `default_stage:`, and `true` for a file that declares no stages at all.
+    /// The UI marks it, because that is the stage another file's `auth:` or a
+    /// hand-written call reaches without saying so.
+    pub is_default: bool,
     /// What the endpoint does.
     pub kind: ModelKind,
     /// `false` when the model takes no typed message, so the composer hides
@@ -54,12 +63,17 @@ pub struct ModelSummary {
     pub requires_upload: bool,
 }
 
-impl From<&Model> for ModelSummary {
-    fn from(model: &Model) -> Self {
+impl ModelSummary {
+    /// Summarises one model. `is_default` is the set's answer rather than the
+    /// model's: which stage a bare name means is a property of the file the
+    /// stages came from, and a model on its own has never seen its siblings.
+    #[must_use]
+    pub fn new(model: &Model, is_default: bool) -> Self {
         Self {
             id: model.id(),
             name: model.name.clone(),
             stage: model.stage.clone(),
+            is_default,
             kind: model.kind,
             has_prompt: model.has_prompt,
             url: model.url.clone(),
@@ -85,7 +99,10 @@ impl ModelsResponse {
     #[must_use]
     pub fn new(set: &ModelSet) -> Self {
         Self {
-            models: set.iter().map(|model| model.as_ref().into()).collect(),
+            models: set
+                .iter()
+                .map(|model| ModelSummary::new(model, set.is_default(model)))
+                .collect(),
             issues: set.issues().to_vec(),
         }
     }

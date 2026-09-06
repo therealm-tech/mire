@@ -4,8 +4,9 @@ import type { z } from 'zod'
 /**
  * What this tab remembers across a reload.
  *
- * Settings and a draft — which model you were on, what you had half typed, how
- * many turns you allow. Small, bounded things whose loss is pure annoyance.
+ * Settings and a draft — which model you were on and at which stage, what you had
+ * half typed, how many turns you allow. Small, bounded things whose loss is pure
+ * annoyance.
  *
  * Three things are deliberately not here. **The credential**, because a token
  * typed into this tab lives in this tab and nowhere else, and putting it on disk
