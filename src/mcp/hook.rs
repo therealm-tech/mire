@@ -656,6 +656,13 @@ pub struct HookRecord {
     pub files: Vec<Attachment>,
     /// HTTP status, or `0` when the request never reached anybody.
     pub status: u16,
+    /// Response headers, masked.
+    ///
+    /// A gate that refuses a call is entitled to explain itself in a header —
+    /// `www-authenticate`, `retry-after`, a correlation id an operator will ask
+    /// for — and a record that kept only the request could not show any of it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub response_headers: BTreeMap<String, String>,
     /// The response body, masked.
     pub response: String,
     /// Round trip, in milliseconds.
@@ -1019,6 +1026,7 @@ fn unfired(hook: &Hook, action: &HookAction, step: usize, payload: &Payload<'_>)
         request: String::new(),
         files: Vec::new(),
         status: 0,
+        response_headers: BTreeMap::new(),
         response: String::new(),
         latency_ms: 0,
         error: None,
@@ -1064,6 +1072,7 @@ async fn run(
         request: String::new(),
         files: Vec::new(),
         status: 0,
+        response_headers: BTreeMap::new(),
         response: String::new(),
         latency_ms: 0,
         error: None,
@@ -1152,6 +1161,8 @@ async fn run(
     };
 
     let status = response.status();
+    // Read before the body: `text()` consumes the response, headers and all.
+    record.response_headers = scrub.headers(&readable(response.headers()));
     let text = response.text().await.unwrap_or_default();
     record.status = status.as_u16();
     record.response = scrub.text(&text);

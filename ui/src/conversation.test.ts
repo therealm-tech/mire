@@ -45,6 +45,7 @@ function hook(name: string, phase: 'before' | 'after', on: string): HookExchange
     request: '',
     files: [],
     status: 204,
+    responseHeaders: {},
     response: '',
     latencyMs: 3,
     stoppedTheCall: false,

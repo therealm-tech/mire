@@ -441,18 +441,41 @@ list somebody arranged is not re-sorted on the way out.
 ## Reading the traffic
 
 Under the conversation, **Traffic** is every wire this process touched, in the
-order it touched them. **Cards land folded**: the summary line — turn, kind,
-status, latency, the badges that say something went wrong — is the list, and the
-list is a table of contents before it is a transcript. You open the one you came
-for, and *Expand all* opens the lot when the whole run is what you are reading.
-Three kinds of card, each showing what went out and what came back:
+order it touched them. **Cards land folded**, and the folded list is a grid:
+every row puts the same thing in the same column, so fifty exchanges are read by
+running down one column rather than by reading fifty headlines.
 
-| | Model call | MCP round trip | Tool call |
-| --- | --- | --- | --- |
-| **Request** | Method, URL, masked headers, body, *Copy as curl* | The JSON-RPC that went out, with its headers and the revision it went out on | The arguments the model produced |
-| **Decode** | Which configured path matched which field, which missed, and everything that was tried | — | Whether those arguments match the schema the tool was declared with |
-| **Response** | Status, latency, decoded content and tool calls, whatever the endpoint said went wrong, stream counters, the body, the raw JSON as a tree | Status, latency, and the JSON-RPC that came back | Status, latency, what the tool handed back, and whether it reported a problem |
-| **Captured** | — | — | Every variable the answering server's [`capture:`](mcp.md#keeping-something-a-tool-call-answered) pulled out of that answer, by name and by worth — only when a rule matched |
+| | | | | | | |
+| --- | --- | --- | --- | --- | --- | --- |
+| kind | what was asked | who was asked, and where | turn | status | received | took |
+| `mcp` | `server/discover` | weather · 127.0.0.1:11436/mcp | setup | 200 | 892 B | 2 ms |
+| `model` | `/v1/chat/completions` | gpt-oss-20b · api.groq.com | T1 | 200 | 18.2 kB | 1240 ms |
+| `hook` | `gate` | before get_weather · vault.internal/v1/sign | T1 | 403 | 96 B | 61 ms |
+
+The bar beside the duration is drawn against the slowest call in view, so the one
+that did the waiting is picked out without reading a single number. A status
+nobody answered with is not shown as one: a request that never reached anybody
+leaves the column empty and says **never answered** in words. The few things
+worth knowing before opening anything — *simulated, nothing executed*, *stopped
+the call*, *first token 310 ms*, *error in the body* — sit beside the address.
+
+**Open one and it is request on the left, response on the right**, in the same
+three strata on both sides — the start line, the headers, the body — because the
+thing you are checking is then in the same place on both, and comparing the two
+halves is a glance rather than a scroll. Underneath, full width, whatever belongs
+to neither wire:
+
+| | Model call | MCP round trip | Tool call | Hook |
+| --- | --- | --- | --- | --- |
+| **Request** | Method, path, masked headers, body, *Copy as curl* | The JSON-RPC that went out, with its headers and the revision | The arguments the model produced | Method, the address it rendered, headers, body or attached files |
+| **Response** | Status, latency, response headers, the decoded answer, the body, stream counters | Status, latency, response headers, the JSON-RPC that came back | Status, latency, what the tool handed back | Status, latency, response headers, what the gate answered |
+| **Underneath** | — | — | The schema check, and every variable the answering server's [`capture:`](mcp.md#keeping-something-a-tool-call-answered) pulled out — only when a rule matched | What the failure cost the tool call |
+
+**Both sets of headers are here, folded.** They cost one line each until you open
+them, with the count and the first few names on the fold; credentials arrive
+already masked as `***`. The response's are the half a request-only record cannot
+answer — a rate limit, `retry-after`, the `Mcp-Session-Id` a server issues on the
+handshake and nowhere else, the request id an operator is going to ask you for.
 
 **The transcript points at the cards.** A tool row in the conversation is a
 summary of one of these, so it takes you to it: the tool's name opens its own
@@ -487,13 +510,22 @@ was interesting. It is built in the page, because the page is the only place the
 run exists as a whole — the server answers one call at a time and keeps none of
 them.
 
-**Every body is a foldable tree**, in both directions and on all three cards —
-the same view the raw response always had, because finding where an endpoint hid
-a field is the job and a wall of text is the one shape that does not help with
-it. A body that is not JSON is shown as itself: an HTML error page from a gateway
-is a finding, and prettifying it would hide the finding. The one-line version is
-what *Copy as curl* still hands you — that button reproduces the call, this panel
-explains it.
+**Every body is a foldable tree**, in both directions and on every card, because
+finding where an endpoint hid a field is the job and a wall of text is the one
+shape that does not help with it. **A branch is named by its key**, with a
+glimpse of what is inside it while it is folded — `messages · 2  [{ role,
+content }, …]` — so you can tell which branch you want without opening all of
+them. An empty value is said in place rather than hidden behind a toggle that
+reveals nothing. The same bytes are also a piece of text and, for a request, a
+command you can paste: the tabs over the body are the readings of it, and a
+response that came back `400` opens on the body rather than on the decoder's
+empty hands. A body that is not JSON is shown as itself — an HTML error page from
+a gateway is a finding, and prettifying it would hide the finding.
+
+**The JSON-RPC envelope is lifted off the payload.** `jsonrpc`, `id` and `method`
+are three of the four fields of every MCP message ever sent; on a line of their
+own they cost nothing, and the tree opens on `params` — or on `result`, which is
+the answer somebody came to read.
 
 **Every word said to an MCP server is here, not just the tool calls.**
 `server/discover`, `initialize`, `notifications/initialized` and `tools/list`
@@ -519,11 +551,10 @@ the easiest way to believe an integration works.
 **The status is on the tool card, not only on the round trip beside it.** A
 `tools/call` that came back `401` is a tool call that failed for a reason the
 words "tool failed" do not carry, and reading it used to mean finding the
-protocol card underneath. It reads like the others now — the badge on the folded
-summary line, `never answered` when the request never reached anybody at all,
-and nothing at all when nothing was sent, which is what a simulated tool and a
-call [a gate refused](mcp.md#hooks-something-that-happens-around-a-tool-call) have in
-common.
+protocol card underneath. It reads like the others now — the status column of the folded
+row, `never answered` when the request never reached anybody at all, and nothing
+at all when nothing was sent, which is what a simulated tool and a call [a gate
+refused](mcp.md#hooks-something-that-happens-around-a-tool-call) have in common.
 
 The list **accumulates across the whole conversation** rather than resetting on
 every send, because "it worked on turn one and not on turn four" is a comparison

@@ -4073,6 +4073,14 @@ async fn every_word_said_to_an_mcp_server_is_reported_not_just_the_tool_calls() 
     assert!(listed["request"].as_str().unwrap().contains("tools/list"));
     assert!(listed["response"].as_str().unwrap().contains("get_weather"));
     assert_eq!(listed["revision"], "2026-07-28");
+    // The response's own headers, not only the request's. `Mcp-Session-Id` is
+    // issued here and nowhere else, and a gateway that refuses a handshake
+    // usually says which one it is in a header rather than in the body.
+    assert_eq!(listed["headers"]["mcp-method"], "tools/list");
+    assert_eq!(
+        listed["responseHeaders"]["content-type"],
+        "application/json"
+    );
 
     // And the tool call itself rides on the turn that made it.
     let turn = events
@@ -4845,6 +4853,13 @@ async fn a_before_hook_that_says_no_stops_the_call_from_happening_at_all() {
     assert!(message.contains("not allowed here"), "{message}");
 
     assert_eq!(turn["hooks"][0]["stoppedTheCall"], true);
+    // What the gate answered with, header included: a policy that refuses a call
+    // is entitled to explain itself in one, and a record that kept only the
+    // request could not show any of it.
+    let answered = turn["hooks"][0]["responseHeaders"]["content-type"]
+        .as_str()
+        .expect("the gate's response headers");
+    assert!(answered.starts_with("text/plain"), "{answered}");
 
     let calls = mcp
         .received_requests()
