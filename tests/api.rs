@@ -971,6 +971,68 @@ async fn editing_the_second_directory_reloads_too() {
     assert_eq!(body["models"].as_array().unwrap().len(), 1);
 }
 
+/// The reload is pushed, not polled: a tab that has to be told to refresh is a
+/// tab showing a file somebody edited ten minutes ago.
+#[tokio::test]
+async fn a_reload_is_announced_on_the_event_stream() {
+    let harness = Harness::start(&[(
+        "models/chat.yaml",
+        openai_model("https://models.internal/v1"),
+    )])
+    .await;
+
+    // The head arrives once the handler has subscribed, so the write below
+    // cannot slip through between opening the stream and listening to it.
+    let mut stream = harness
+        .client
+        .get(format!("{}/api/events", harness.base))
+        .send()
+        .await
+        .expect("open the event stream");
+    assert_eq!(stream.status().as_u16(), 200);
+    assert_eq!(
+        stream
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("text/event-stream")
+    );
+
+    harness.write(
+        "models/second.yaml",
+        &openai_model("https://second.internal/v1").replace("name: chat", "name: second"),
+    );
+
+    // Read by hand rather than to the end: this stream has no end.
+    let announced = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut buffer = String::new();
+        loop {
+            let chunk = stream.chunk().await.expect("read the stream");
+            buffer.push_str(&String::from_utf8_lossy(&chunk.expect("the stream closed")));
+            if let Some(event) = events(&buffer).into_iter().next() {
+                return event;
+            }
+        }
+    })
+    .await
+    .expect("a reload was never announced");
+
+    assert_eq!(announced.0, "config");
+    assert_eq!(announced.1["event"], "config");
+    // First reload of this process, whatever it was that changed.
+    assert_eq!(announced.1["generation"], 1);
+
+    // And the listing it is telling the browser to re-read has actually moved.
+    let body = harness
+        .wait_for("/api/models", |body| {
+            body["models"]
+                .as_array()
+                .is_some_and(|models| models.len() == 2)
+        })
+        .await;
+    assert_eq!(body["models"][1]["url"], "https://second.internal/v1");
+}
+
 #[tokio::test]
 async fn the_model_listing_reports_broken_files_without_hiding_the_good_ones() {
     let harness = Harness::start(&[

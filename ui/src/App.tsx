@@ -22,6 +22,7 @@ import {
   startLogin,
   type UploadedFile,
   uploadFile,
+  watchConfig,
 } from './api'
 import { ChatPanel } from './components/ChatPanel'
 import { EmbeddingPanel } from './components/EmbeddingPanel'
@@ -99,6 +100,9 @@ function abandoned(error: unknown): boolean {
   )
 }
 
+/** How long the note about a configuration reload stays up. */
+const RELOAD_NOTE_MS = 4_000
+
 /** How long to wait for someone to get through their identity provider. */
 const LOGIN_TIMEOUT_MS = 180_000
 const LOGIN_POLL_MS = 1_000
@@ -149,6 +153,18 @@ export function App() {
   const [mcp, setMcp] = useState<McpResponse | null>(null)
   const [prompts, setPrompts] = useState<PromptsResponse | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
+  /** When the last announced reload landed on this page, for the note that says so. */
+  const [reloadedAt, setReloadedAt] = useState<number | null>(null)
+
+  /**
+   * Which read of the configuration is the current one.
+   *
+   * A ref rather than state: it settles which answer to keep, and re-rendering
+   * on it would be re-rendering on the bookkeeping.
+   */
+  const loading = useRef(0)
+  /** Whether a configuration has ever made it onto the page. See the `catch` below. */
+  const settled = useRef(false)
 
   // Remembered across a reload, all of it small and none of it secret — see
   // `storage.ts` for what is deliberately left out, starting with the token.
@@ -293,13 +309,37 @@ export function App() {
     logger.info('run.stopped', {})
   }, [])
 
-  useEffect(() => {
-    Promise.all([fetchModels(), fetchAuth(), fetchMcp(), fetchPrompts()])
+  /**
+   * Reads the four listings, and settles what this tab had selected against
+   * what came back.
+   *
+   * Called at startup and again on every reload `mire` announces, which is why
+   * the reconciliation lives in here rather than in the mount effect: a model
+   * file deleted while the tab sits open has to be handled exactly like one that
+   * was never there.
+   *
+   * Answers whether what came back was actually put on the page, which is what
+   * tells a reload that landed from one that was overtaken or never arrived.
+   */
+  const loadConfig = useCallback((): Promise<boolean> => {
+    loading.current += 1
+    const attempt = loading.current
+
+    return Promise.all([fetchModels(), fetchAuth(), fetchMcp(), fetchPrompts()])
       .then(([loadedModels, loadedAuth, loadedMcp, loadedPrompts]) => {
+        // Two saves in quick succession are two announcements, so two of these
+        // can be in the air at once. The last one asked is the only one whose
+        // answer is still about the files on disk.
+        if (attempt !== loading.current) {
+          logger.debug('config.superseded', { attempt })
+          return false
+        }
+
         setModels(loadedModels)
         setAuth(loadedAuth)
         setMcp(loadedMcp)
         setPrompts(loadedPrompts)
+        settled.current = true
         // A remembered name is only good while the file behind it still is:
         // models are a directory somebody edits, and coming back to a
         // selection that no longer exists would be an empty page with no
@@ -319,13 +359,60 @@ export function App() {
           servers: loadedMcp.servers.length,
           prompts: loadedPrompts.prompts.length,
         })
+        return true
       })
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error)
         logger.error('config.load_failed', { message })
-        setLoadError(message)
+        // Only while there is nothing on the page yet. Once a configuration has
+        // loaded once, a refetch that fails is a blip on a stream nobody asked
+        // for, and tearing a working page down over it would lose the run that
+        // was on it.
+        if (!settled.current) {
+          setLoadError(message)
+        }
+        return false
       })
   }, [setSelectedModel])
+
+  useEffect(() => {
+    void loadConfig()
+  }, [loadConfig])
+
+  /**
+   * The other half of the file watcher: `mire` re-reads the directories, and the
+   * tab hears about it.
+   *
+   * Without this the page shows the configuration as it was when it was opened,
+   * which is the one thing a tool for editing model files all afternoon must not
+   * do. The event says only that something moved — `loadConfig` is what finds
+   * out what.
+   */
+  useEffect(
+    () =>
+      watchConfig((generation) => {
+        logger.info('config.changed', { generation })
+        void loadConfig().then((applied) => {
+          if (applied) {
+            setReloadedAt(Date.now())
+          }
+        })
+      }),
+    [loadConfig],
+  )
+
+  // Says why the lists moved, then gets out of the way. A page that rearranges
+  // itself in silence reads as a bug in the page rather than as a save landing.
+  // Keyed on the instant rather than on a flag, so a second save while the note
+  // is still up starts its four seconds again instead of inheriting what is left
+  // of the first's.
+  useEffect(() => {
+    if (reloadedAt === null) {
+      return
+    }
+    const timer = window.setTimeout(() => setReloadedAt(null), RELOAD_NOTE_MS)
+    return () => window.clearTimeout(timer)
+  }, [reloadedAt])
 
   const model = models?.models.find((candidate) => candidate.id === selectedModel)
 
@@ -832,7 +919,16 @@ export function App() {
           <Mark />
           <h1 className="font-semibold text-xl tracking-tight">mire</h1>
         </div>
-        <p className="text-faint text-xs">A known signal in, a look at what comes out.</p>
+        {/*
+          In place of the tagline rather than beside it: the tagline is there
+          because the corner was empty, and a save landing is worth more than it
+          for the few seconds it has something to say.
+        */}
+        {reloadedAt === null ? (
+          <p className="text-faint text-xs">A known signal in, a look at what comes out.</p>
+        ) : (
+          <Badge tone="good">Configuration reloaded</Badge>
+        )}
       </header>
 
       {/*

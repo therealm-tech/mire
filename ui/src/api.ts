@@ -97,6 +97,24 @@ export const promptsResponseSchema = z.object({
   issues: z.array(loadIssueSchema),
 })
 
+/**
+ * What `GET /api/events` announces: the directories were re-read.
+ *
+ * It says nothing about *what* moved, on purpose — the listings are still the
+ * only place the contents come from, and an event that carried them would be a
+ * second copy to keep honest.
+ */
+export const configEventSchema = z.object({
+  event: z.literal('config'),
+  /**
+   * Which reading of the directories is now current.
+   *
+   * Per process: a number lower than the last one seen means `mire` was
+   * restarted, not that time ran backwards.
+   */
+  generation: z.number(),
+})
+
 /** A live browser login. Never carries a token — that stays on the server. */
 export const sessionViewSchema = z.object({
   subject: z.string().optional(),
@@ -727,6 +745,70 @@ export function fetchAuth(): Promise<AuthResponse> {
 
 export function fetchMcp(): Promise<McpResponse> {
   return request('api/mcp', mcpResponseSchema)
+}
+
+/**
+ * Watches `mire` for configuration reloads, calling `onChange` for each one.
+ *
+ * `EventSource` rather than the hand-rolled reader below, because this stream is
+ * a GET and gets what that buys: the browser reconnects on its own, with its own
+ * backoff. That is not a detail — it is what makes a tab left open across a
+ * restart of `mire` catch up by itself instead of showing yesterday's files.
+ *
+ * The event carries a generation and nothing else. Deliberately: what changed is
+ * answered by re-reading the listings, which is four requests over loopback, and
+ * a stream that carried the configuration would be a second way to learn it and
+ * therefore a second way to be wrong about it.
+ *
+ * Returns the way to stop watching.
+ */
+export function watchConfig(onChange: (generation: number | null) => void): () => void {
+  const source = new EventSource(endpoint('api/events'))
+  let opened = false
+
+  // A reconnection closes a gap: reloads that happened while the stream was down
+  // were announced to nobody, and this tab cannot know how many. `null` says
+  // exactly that — something may have moved, and the generation is not the way to
+  // find out, since a restarted `mire` counts from zero again.
+  source.addEventListener('open', () => {
+    const reconnected = opened
+    opened = true
+    if (reconnected) {
+      logger.info('config.stream_reconnected', {})
+      onChange(null)
+    }
+  })
+
+  source.addEventListener('config', (message) => {
+    // The listener is typed against the generic event map, so narrow rather
+    // than cast: a `config` event without data is not one we can read.
+    if (!(message instanceof MessageEvent)) {
+      return
+    }
+
+    let payload: unknown
+    try {
+      payload = JSON.parse(String(message.data))
+    } catch {
+      logger.warn('config.unparsable_event', { data: String(message.data) })
+      return
+    }
+
+    const parsed = configEventSchema.safeParse(payload)
+    if (!parsed.success) {
+      logger.error('config.schema_mismatch', { issues: parsed.error.issues })
+      return
+    }
+    onChange(parsed.data.generation)
+  })
+
+  // Not an error worth showing: the browser is already reconnecting, and a
+  // banner for every laptop lid closed would be noise about nothing.
+  source.addEventListener('error', () => {
+    logger.debug('config.stream_interrupted', {})
+  })
+
+  return () => source.close()
 }
 
 /**

@@ -20,12 +20,13 @@ pub mod layout;
 pub mod stage;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use reqwest::Client;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error, info, warn};
 
 use crate::auth::{AuthRegistry, SessionStore};
@@ -40,6 +41,14 @@ use crate::prompt::PromptRegistry;
 /// Editors write in bursts (temp file, rename, chmod); reloading on every event
 /// would reload three times per save.
 const DEBOUNCE: Duration = Duration::from_millis(200);
+
+/// How many announcements a subscriber may fall behind before it is told it
+/// lagged.
+///
+/// Small on purpose. What a late subscriber needs is the current generation, not
+/// the ones it slept through — so a lag is answered with today's number rather
+/// than avoided with a deep buffer.
+const CHANGE_BUFFER: usize = 16;
 
 /// One consistent view of the configuration directories.
 #[derive(Debug, Default)]
@@ -84,6 +93,17 @@ pub struct ConfigStore {
     /// cannot, and losing it on every save would make the flow unusable.
     sessions: Arc<SessionStore>,
     current: RwLock<Arc<Config>>,
+    /// How many times the contents have been swapped, from zero at startup.
+    ///
+    /// The number a reader compares its own copy against. Nothing here decides
+    /// what changed — a generation says only that the answer to every question
+    /// about these directories may now be different.
+    generation: AtomicU64,
+    /// Announces each new generation to whoever is listening.
+    ///
+    /// A broadcast rather than a callback list: the subscribers are browser tabs
+    /// arriving and leaving on their own, and none of them is known here.
+    changes: broadcast::Sender<u64>,
 }
 
 impl ConfigStore {
@@ -106,6 +126,8 @@ impl ConfigStore {
             http,
             sessions,
             current: RwLock::new(Arc::new(config)),
+            generation: AtomicU64::new(0),
+            changes: broadcast::Sender::new(CHANGE_BUFFER),
         }))
     }
 
@@ -131,6 +153,24 @@ impl ConfigStore {
         Arc::clone(&self.current.read().expect("config store lock"))
     }
 
+    /// Which reading of the directories [`snapshot`](Self::snapshot) currently
+    /// answers with. Zero at startup, and one higher after every reload that
+    /// landed.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+
+    /// Subscribes to the generations to come.
+    ///
+    /// Only the ones after this call: a subscriber has just read the current
+    /// snapshot, so the number it holds is already the right one and replaying
+    /// history would only make it fetch what it has.
+    #[must_use]
+    pub fn changes(&self) -> broadcast::Receiver<u64> {
+        self.changes.subscribe()
+    }
+
     /// Re-reads the directories and swaps the result in. Errors are logged and
     /// the previous snapshot is kept: a transiently unreadable directory must not
     /// blank the UI.
@@ -141,7 +181,19 @@ impl ConfigStore {
     pub fn reload(&self) {
         match read(&self.dirs, &self.http, &self.sessions) {
             Ok(config) => {
+                let config = Arc::new(config);
+                *self.current.write().expect("config store lock") = Arc::clone(&config);
+                // Counted and announced after the swap, never before: a
+                // subscriber woken by this goes straight back to `snapshot()`,
+                // and a moment earlier would hand it the very configuration it
+                // is being told to forget.
+                let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+                // Fails when nobody is listening, which is the normal case: no
+                // tab is open, or none is subscribed.
+                let _ = self.changes.send(generation);
+
                 info!(
+                    generation,
                     models = config.models.len(),
                     providers = config.registry.descriptors().len(),
                     prompts = config.prompts.len(),
@@ -152,7 +204,6 @@ impl ConfigStore {
                 for issue in config.issues() {
                     warn!(%issue, "configuration issue");
                 }
-                *self.current.write().expect("config store lock") = Arc::new(config);
             }
             Err(error) => {
                 error!(%error, "reload failed, keeping the previous configuration");
@@ -328,6 +379,40 @@ mod tests {
         store.reload();
 
         assert_eq!(store.snapshot().prompts.prompts()[0].text, "ping");
+    }
+
+    /// The cue the browser reloads on. It arrives once per reload, and it
+    /// arrives *after* the swap: a subscriber that fetches the moment it is
+    /// woken must not be handed the configuration it is being told to forget.
+    #[test]
+    fn a_reload_announces_the_new_generation() {
+        let dir = temp_dir("generation");
+        let store = ConfigStore::load(std::slice::from_ref(&dir), Client::new()).unwrap();
+        let mut changes = store.changes();
+        assert_eq!(store.generation(), 0);
+
+        write(&dir, layout::MODELS, "late.yaml", MODEL);
+        store.reload();
+
+        assert_eq!(changes.try_recv().unwrap(), 1);
+        assert_eq!(store.generation(), 1);
+        assert_eq!(store.snapshot().models.len(), 1);
+    }
+
+    /// Nothing changed, so nobody is woken: a tab that refetched here would
+    /// replace what it has with an identical copy, and the log line already says
+    /// the reload failed.
+    #[test]
+    fn a_failed_reload_announces_nothing() {
+        let dir = temp_dir("generation-failed");
+        let store = ConfigStore::load(std::slice::from_ref(&dir), Client::new()).unwrap();
+        let mut changes = store.changes();
+
+        std::fs::remove_dir_all(&dir).unwrap();
+        store.reload();
+
+        assert!(changes.try_recv().is_err());
+        assert_eq!(store.generation(), 0);
     }
 
     /// A directory that is not there at all is a typo in `--config-dir`, and the

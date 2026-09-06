@@ -39,6 +39,7 @@ flowchart LR
     sink["Hook endpoint"]
 
     browser -- "HTTP + SSE, JSON" --> api
+    api -- "reload announcements, SSE" --> browser
     api --> agent
     api --> exec
     agent --> exec
@@ -73,7 +74,9 @@ produce changes while the process runs.
 **[`config`](src/config.rs)** holds the hot-reloading view of the configuration
 directories, and [`config::layout`](src/config/layout.rs) says what a directory
 holds and how each kind is read out of it. It watches every listed directory and
-swaps the registries together. It owns no file format of its own: the loaders do.
+swaps the registries together, counting the swaps and announcing each one to
+whoever is subscribed — which is how the browser hears about a save. It owns no
+file format of its own: the loaders do.
 [`config::stage`](src/config/stage.rs) is the one exception, and it is a
 pre-pass rather than a format: it reads a file once per environment the file
 declares, substituting `${ stage.… }` before the loader sees a document.
@@ -142,7 +145,9 @@ embedded front end and rewrites its base URL under a path prefix.
 
 **[`ui/`](ui/)** is a React + TypeScript front end, built by Vite and embedded
 into the binary. It renders what the API returns and holds the conversation; it
-has no model of its own and edits no configuration.
+has no model of its own and edits no configuration. It follows the configuration
+rather than sampling it once: it subscribes to `GET /api/events` and re-reads the
+listings whenever a reload is announced.
 
 ## Data flow
 
@@ -201,6 +206,23 @@ the deadline, a repeated call, or a predicate that could never be evaluated
 once — and appends only the answer it finished on to the conversation. The tool
 calls in between stay out of the history: replaying them into the next request
 without their results is how a working endpoint starts answering `400`.
+
+### A save landing
+
+The watcher debounces the burst an editor makes of one save, re-reads every
+directory and swaps the snapshot; the swap is what bumps the generation, and the
+generation is announced on `GET /api/events` after it, never before. A browser
+that hears it re-reads the four listings and settles what the tab had selected
+against what came back — a model whose file is gone is replaced rather than left
+pointing at nothing.
+
+The event carries a number and no configuration: the listings stay the only place
+the contents come from, and the number exists to be compared with the last one
+seen rather than resolved into anything. It counts within one process, so a tab
+that reconnects to a lower number is looking at a `mire` that was restarted under
+it — which is one more reason to re-read. A reload that fails announces nothing,
+because nothing changed. See
+[ADR 0001](docs/adr/0001-push-configuration-reloads-to-the-browser.md).
 
 ### Signing in
 

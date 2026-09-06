@@ -4,6 +4,7 @@
 
 | Route | What it does |
 | --- | --- |
+| `GET /api/events` | Server-sent events: one `config` event per configuration reload, so a client can re-read the listings instead of showing what was there when it connected |
 | `GET /api/models` | Every model, plus the files that failed to load and why |
 | `GET /api/models/{id}` | One model, as declared |
 | `GET /api/prompts` | Prompts declared in `prompts/`, plus the entries that did not load |
