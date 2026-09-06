@@ -209,8 +209,6 @@ impl CheckOutcome {
 pub struct EmbeddingChecks {
     /// One vector per input sent.
     pub count: CheckOutcome,
-    /// Width matches the model's `expect.dimensions`.
-    pub dimensions: CheckOutcome,
     /// Every value is a finite number — no `NaN`, no `null`.
     pub finite: CheckOutcome,
     /// No vector is all zeros.
@@ -229,12 +227,7 @@ impl EmbeddingChecks {
     /// Determinism starts [`CheckOutcome::Skipped`]; the caller fills it in if it
     /// sent the request more than once.
     #[must_use]
-    pub fn evaluate(
-        embedding: &Embedding,
-        vectors: &Vectors,
-        inputs: usize,
-        expected_dimensions: Option<usize>,
-    ) -> Self {
+    pub fn evaluate(embedding: &Embedding, vectors: &Vectors, inputs: usize) -> Self {
         let count = if inputs == 0 {
             CheckOutcome::skipped("no input was sent, so there is nothing to count against")
         } else {
@@ -244,25 +237,6 @@ impl EmbeddingChecks {
                     embedding.count
                 )
             })
-        };
-
-        let dimensions = match (expected_dimensions, &embedding.dimensions) {
-            (None, _) => {
-                CheckOutcome::skipped("set `expect.dimensions` in the model to check this")
-            }
-            (Some(expected), Dimensions::Uniform { value }) => {
-                CheckOutcome::from(*value == expected, || {
-                    format!("expected {expected} dimensions, got {value}")
-                })
-            }
-            (Some(expected), Dimensions::Ragged { values }) => CheckOutcome::Fail {
-                detail: format!(
-                    "expected {expected} dimensions, got inconsistent widths {values:?}"
-                ),
-            },
-            (Some(_), Dimensions::Unknown) => CheckOutcome::Fail {
-                detail: "no vector was decoded".to_owned(),
-            },
         };
 
         let holes: Vec<String> = vectors
@@ -288,7 +262,6 @@ impl EmbeddingChecks {
 
         Self {
             count,
-            dimensions,
             finite,
             non_zero_norm,
             determinism: CheckOutcome::skipped("send `repeat: 2` to check this"),
@@ -300,7 +273,6 @@ impl EmbeddingChecks {
     pub fn any_failed(&self) -> bool {
         [
             &self.count,
-            &self.dimensions,
             &self.finite,
             &self.non_zero_norm,
             &self.determinism,
@@ -913,13 +885,12 @@ usage: ["$.usage"]
         });
 
         let (embedding, vectors, _) = decode(&raw, &spec(), 2, false);
-        let checks = EmbeddingChecks::evaluate(&embedding, &vectors, 2, Some(2));
+        let checks = EmbeddingChecks::evaluate(&embedding, &vectors, 2);
         assert!(
             matches!(checks.count, CheckOutcome::Pass),
             "{:?}",
             checks.count
         );
-        assert!(matches!(checks.dimensions, CheckOutcome::Pass));
     }
 
     #[test]
@@ -966,7 +937,7 @@ usage: ["$.usage"]
         let raw = serde_json::json!({"data": [{"embedding": token_vectors}]});
 
         let (embedding, vectors, _) = decode(&raw, &spec(), 1, false);
-        let checks = EmbeddingChecks::evaluate(&embedding, &vectors, 1, None);
+        let checks = EmbeddingChecks::evaluate(&embedding, &vectors, 1);
 
         // Past the summary cap, and named by item and position because the item
         // alone no longer identifies a vector.

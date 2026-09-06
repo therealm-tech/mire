@@ -278,7 +278,6 @@ export const checkOutcomeSchema = z.discriminatedUnion('status', [
 
 const embeddingChecksSchema = z.object({
   count: checkOutcomeSchema,
-  dimensions: checkOutcomeSchema,
   finite: checkOutcomeSchema,
   nonZeroNorm: checkOutcomeSchema,
   determinism: checkOutcomeSchema,

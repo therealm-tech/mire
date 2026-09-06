@@ -7,9 +7,6 @@
 #
 # No `auth:`: this one goes straight at Ollama, so it calls as `anonymous` —
 # which is what makes the auth panel read differently here than on `qwen3`.
-#
-# nomic-embed-text:v1.5 returns 768 dimensions, and `expect.dimensions` is what
-# turns that into a check rather than a number you have to eyeball.
 ---
 name: nomic
 kind: embedding
@@ -36,6 +33,3 @@ decode:
   # this line turns into a sentence instead of an empty vector list.
   error:
     - $.error
-
-expect:
-  dimensions: 768

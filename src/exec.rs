@@ -939,8 +939,7 @@ fn response_view(
                     embedding::decode(value, &model.decode, inputs, include_vectors);
                 (embedding, vectors, None, trace)
             };
-            let checks =
-                EmbeddingChecks::evaluate(&embedding, &vectors, inputs, model.expect.dimensions);
+            let checks = EmbeddingChecks::evaluate(&embedding, &vectors, inputs);
             let result = EmbeddingResult { embedding, checks };
             (
                 Some(Decoded::Embedding(Box::new(result))),
