@@ -608,10 +608,33 @@ fn exactly_one_request_source(spec: &RequestSpec) -> Result<(), ValidationError>
 #[serde(deny_unknown_fields)]
 #[validate(schema(function = paths_or_script))]
 pub struct DecodeSpec {
+    /// Named decodes this one is built from, tried in the order given.
+    ///
+    /// A decode is the half of a model file that describes the *answer*, and the
+    /// endpoints that answer alike can share one instead of repeating it. The
+    /// names are entries of the `decodes/` directories, on top of the ones
+    /// compiled into the binary — `openai-chat`, `anthropic-chat`, `gemini-chat`,
+    /// `ollama-native-chat` and the two embedding shapes beside them.
+    ///
+    /// Every field is still a cascade, and this is what fills it: for each field,
+    /// the paths written here come first, then each named decode's in turn. So
+    /// `from: [openai-chat, ollama-native-chat]` is one model covering both
+    /// shapes of the endpoint it points at, and a path written beside it wins
+    /// over both.
+    ///
+    /// Resolved once, when the model is loaded: what runs is a flat cascade, and
+    /// the decode trace names the winning path as it always has. The list is kept
+    /// here afterwards to record where those paths came from.
+    #[serde(default)]
+    pub from: Vec<String>,
     /// Rhai script replacing the cascades entirely, for a response no set of
     /// paths can describe. It receives `raw`, `status` and `headers`, and returns
     /// a map: `content` / `tool_calls` / `finish_reason` / `usage` for a chat
     /// model, `vectors` / `usage` for an embedding one.
+    ///
+    /// Never allowed on a decode a model reaches through `from:`: a script
+    /// replaces the cascades, and one arriving from another file would make the
+    /// rule below a question about two documents at once.
     #[serde(default)]
     pub script: Option<ScriptSource>,
     /// Assistant text. `kind: chat`.
@@ -656,7 +679,7 @@ impl DecodeSpec {
     /// you have not taught to decode yet, which is valid.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.script.is_none() && !self.has_paths()
+        self.script.is_none() && !self.has_paths() && self.from.is_empty()
     }
 
     /// Returns `true` when at least one cascade is configured.
@@ -673,9 +696,10 @@ impl DecodeSpec {
 }
 
 /// A script takes over the whole decode, so declaring both is a mistake worth
-/// naming rather than a precedence rule to remember.
+/// naming rather than a precedence rule to remember. `from:` is paths by another
+/// route, and collides with a script for exactly the same reason.
 fn paths_or_script(spec: &DecodeSpec) -> Result<(), ValidationError> {
-    if spec.script.is_some() && spec.has_paths() {
+    if spec.script.is_some() && (spec.has_paths() || !spec.from.is_empty()) {
         return Err(ValidationError::new("ambiguous_decode").with_message(
             "set either `decode` paths or `decode.script`, not both — a script replaces the cascades".into(),
         ));

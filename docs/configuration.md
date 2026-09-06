@@ -86,9 +86,11 @@ config/
 │   └── keycloak-user.yaml
 ├── mcp/             one MCP server per file
 │   └── dev.yaml
-└── prompts/         one saved prompt per file
-    ├── 01-ping.yaml
-    └── 02-call-a-tool.yaml
+├── prompts/         one saved prompt per file
+│   ├── 01-ping.yaml
+│   └── 02-call-a-tool.yaml
+└── decodes/         one named response shape per file
+    └── my-gateway.yaml
 ```
 
 The name is the `name:` field inside the file, not the file name: renaming
@@ -103,6 +105,38 @@ thing the next run has to set up. Uncomment it and it is live.
 
 The directory itself does have to exist: a `--config-dir` that is not there is a
 typo worth stopping for, and the startup error says which one.
+
+### Decodes
+
+`decodes/` is the one kind with entries that exist without a file. The shapes
+endpoints answer in — `openai-chat`, `anthropic-chat`, `gemini-chat`,
+`ollama-native-chat` and the two embedding ones — are compiled into `mire`, and a
+model names them under `decode.from` without installing anything. See
+[models](models.md#name-a-shape-instead-of-spelling-it-out) for what each covers.
+
+A file here is one more of the same:
+
+```yaml
+---
+name: my-gateway
+kind: chat
+decode:
+  content:
+    - $.result.answer
+  finish_reason:
+    - $.result.stop
+  error:
+    - $.error
+```
+
+The built-ins are layer *zero*: a file taking one of their names displaces it for
+every model that asks, exactly as a later directory displaces an earlier one, and
+the shadowed one is named in a warning. Two rules of their own, both because a
+shape that arrives from another file has to stay readable: a decode here declares
+no `stages:` — a response shape is the same in every environment, and what
+differs per stage is which one the model asks for — and it carries no `script:`,
+which belongs in the single model that needs it rather than in something several
+models share.
 
 ## Stages
 

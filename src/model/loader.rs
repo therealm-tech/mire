@@ -17,6 +17,7 @@ use validator::Validate;
 use super::Model;
 use crate::config::layout;
 use crate::config::stage::Staged;
+use crate::decode::registry::DecodeRegistry;
 use crate::issue::LoadIssue;
 
 /// Everything loaded from the `models/` subdirectories: what parsed, and what did
@@ -90,18 +91,18 @@ impl ModelSet {
 /// directory itself exists is settled once, by [`crate::config`], before any of
 /// this runs.
 #[must_use]
-pub fn load_dirs(dirs: &[impl AsRef<Path>]) -> ModelSet {
+pub fn load_dirs(dirs: &[impl AsRef<Path>], decodes: &DecodeRegistry) -> ModelSet {
     let mut set = ModelSet::default();
     for dir in dirs {
-        read_dir_into(&mut set, dir.as_ref());
+        read_dir_into(&mut set, dir.as_ref(), decodes);
     }
     set
 }
 
 /// Reads every model file in one configuration directory.
 #[must_use]
-pub fn load_dir(dir: &Path) -> ModelSet {
-    load_dirs(&[dir])
+pub fn load_dir(dir: &Path, decodes: &DecodeRegistry) -> ModelSet {
+    load_dirs(&[dir], decodes)
 }
 
 /// Folds one directory into `set`, which may already hold earlier directories.
@@ -112,7 +113,7 @@ pub fn load_dir(dir: &Path) -> ModelSet {
 /// earlier is a deliberate override: this one takes it, and the one it displaced
 /// is named in the log so that a model behaving unexpectedly has somewhere to be
 /// explained.
-fn read_dir_into(set: &mut ModelSet, dir: &Path) {
+fn read_dir_into(set: &mut ModelSet, dir: &Path, decodes: &DecodeRegistry) {
     let paths = match layout::entries(dir, layout::MODELS) {
         Ok(paths) => paths,
         Err(issue) => {
@@ -125,7 +126,7 @@ fn read_dir_into(set: &mut ModelSet, dir: &Path) {
     let mut here: BTreeMap<String, PathBuf> = BTreeMap::new();
 
     for path in paths {
-        let staged = match load_file(&path) {
+        let staged = match load_file(&path, decodes) {
             Ok(staged) => staged,
             Err(issue) => {
                 warn!(%issue, "model rejected");
@@ -187,22 +188,26 @@ fn read_dir_into(set: &mut ModelSet, dir: &Path) {
 /// Returns a [`LoadIssue`] for an unreadable file, a YAML syntax error, a
 /// malformed `stages:` block, an unknown or malformed field, or a failed
 /// validation rule. One bad stage fails the file: see [`crate::config::stage`].
-pub fn load_file(path: &Path) -> Result<Vec<Staged<Model>>, LoadIssue> {
+pub fn load_file(path: &Path, decodes: &DecodeRegistry) -> Result<Vec<Staged<Model>>, LoadIssue> {
     layout::read::<Model>(path)?
         .into_iter()
         .map(|staged| {
             let mut model = staged.value;
             model.stage.clone_from(&staged.stage);
             path.clone_into(&mut model.source);
-            model.validate().map_err(|error| {
-                LoadIssue::new(
-                    path,
-                    match &staged.stage {
-                        Some(stage) => format!("stage `{stage}`: {error}"),
-                        None => error.to_string(),
-                    },
-                )
-            })?;
+            let stage_prefix = |message: String| match &staged.stage {
+                Some(stage) => format!("stage `{stage}`: {message}"),
+                None => message,
+            };
+            model
+                .validate()
+                .map_err(|error| LoadIssue::new(path, stage_prefix(error.to_string())))?;
+            // Resolved here, once, so that everything downstream — the executor,
+            // the trace, the API — sees the flat cascade a model with no `from:`
+            // would have written by hand.
+            model.decode = decodes
+                .resolve(&model.decode, model.kind)
+                .map_err(|message| LoadIssue::new(path, stage_prefix(message)))?;
             Ok(Staged {
                 stage: staged.stage,
                 default: staged.default,
@@ -215,6 +220,12 @@ pub fn load_file(path: &Path) -> Result<Vec<Staged<Model>>, LoadIssue> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nothing in these tests names a decode, so the built-ins alone are the
+    /// registry every model here resolves against.
+    fn decodes() -> DecodeRegistry {
+        DecodeRegistry::builtin()
+    }
 
     fn write(dir: &Path, name: &str, body: &str) {
         std::fs::write(dir.join(layout::MODELS).join(name), body).unwrap();
@@ -241,7 +252,7 @@ request:
         write(&dir, "good.yaml", GOOD);
         write(&dir, "broken.yaml", "name: broken\nkind: nope\n");
 
-        let set = load_dir(&dir);
+        let set = load_dir(&dir, &decodes());
         assert_eq!(set.len(), 1);
         assert!(set.get("good").is_some());
         assert_eq!(set.issues().len(), 1);
@@ -261,7 +272,7 @@ request:
         )
         .unwrap();
 
-        let set = load_dir(&dir);
+        let set = load_dir(&dir, &decodes());
 
         assert_eq!(set.len(), 1);
         assert!(set.issues().is_empty(), "{:?}", set.issues());
@@ -273,7 +284,7 @@ request:
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        let set = load_dir(&dir);
+        let set = load_dir(&dir, &decodes());
 
         assert!(set.is_empty());
         assert!(set.issues().is_empty(), "{:?}", set.issues());
@@ -285,7 +296,7 @@ request:
         write(&dir, "a.yaml", GOOD);
         write(&dir, "b.yaml", GOOD);
 
-        let set = load_dir(&dir);
+        let set = load_dir(&dir, &decodes());
         assert_eq!(set.len(), 1);
         assert!(set.issues()[0].message.contains("duplicate model name"));
     }
@@ -304,7 +315,7 @@ request:
             ),
         );
 
-        let set = load_dirs(&[&base, &mine]);
+        let set = load_dirs(&[&base, &mine], &decodes());
 
         assert_eq!(set.len(), 1);
         assert_eq!(
@@ -327,7 +338,7 @@ request:
             &GOOD.replace("name: good", "name: other"),
         );
 
-        let set = load_dirs(&[&base, &mine]);
+        let set = load_dirs(&[&base, &mine], &decodes());
 
         assert_eq!(set.len(), 2);
         assert!(set.get("good").is_some());
@@ -344,7 +355,7 @@ request:
         write(&mine, "a.yaml", GOOD);
         write(&mine, "b.yaml", GOOD);
 
-        let set = load_dirs(&[&base, &mine]);
+        let set = load_dirs(&[&base, &mine], &decodes());
 
         assert_eq!(set.len(), 1);
         assert_eq!(set.issues().len(), 1);
@@ -378,7 +389,7 @@ request:
         let dir = temp_dir("staged");
         write(&dir, "staged.yaml", STAGED);
 
-        let set = load_dir(&dir);
+        let set = load_dir(&dir, &decodes());
 
         assert_eq!(set.len(), 2);
         assert_eq!(
@@ -395,7 +406,7 @@ request:
         let dir = temp_dir("staged-default");
         write(&dir, "staged.yaml", STAGED);
 
-        let set = load_dir(&dir);
+        let set = load_dir(&dir, &decodes());
 
         assert_eq!(set.get("staged").unwrap().id(), "staged@dev");
         // And the set says so of the entry, which is how the composer knows
@@ -416,7 +427,7 @@ request:
             &STAGED.replace("default_stage: dev\n", ""),
         );
 
-        let set = load_dir(&dir);
+        let set = load_dir(&dir, &decodes());
 
         assert!(set.is_empty());
         assert_eq!(set.issues().len(), 1);
@@ -438,7 +449,7 @@ request:
             &STAGED.replace("base: https://models.internal", "base: \"not a url\""),
         );
 
-        let set = load_dir(&dir);
+        let set = load_dir(&dir, &decodes());
 
         assert!(set.is_empty());
         assert_eq!(set.issues().len(), 1);
@@ -467,7 +478,7 @@ request:
                 .replace("default_stage: dev\n", ""),
         );
 
-        let set = load_dirs(&[&base, &mine]);
+        let set = load_dirs(&[&base, &mine], &decodes());
 
         assert_eq!(set.len(), 1);
         assert!(set.get("staged@prod").is_none());
@@ -479,7 +490,7 @@ request:
         let dir = temp_dir("syntax");
         write(&dir, "bad.yaml", "name: [unclosed\n");
 
-        let set = load_dir(&dir);
+        let set = load_dir(&dir, &decodes());
         assert!(set.is_empty());
         assert!(set.issues()[0].line.is_some());
     }

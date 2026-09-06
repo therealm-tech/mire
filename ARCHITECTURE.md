@@ -31,7 +31,7 @@ flowchart LR
         up["uploads"]
     end
 
-    files[("config directories<br/>models/ auth/ mcp/ prompts/")]
+    files[("config directories<br/>models/ auth/ mcp/ prompts/ decodes/")]
     disk[("uploads directory")]
     endpoint["Model endpoint"]
     server["MCP server"]
@@ -105,7 +105,11 @@ decode — and returns everything a caller needs to reproduce it elsewhere,
 [`error`](src/decode/error.rs) and [`stream`](src/decode/stream.rs), resolved
 either by cascading [`paths`](src/decode/paths.rs) or by a
 [`script`](src/decode/script.rs). Decoding never fails a call: a miss is a trace
-entry beside the raw body.
+entry beside the raw body. [`decode::registry`](src/decode/registry.rs) holds the
+named shapes a model's `decode.from` builds on — the ones compiled into the
+binary, plus whatever `decodes/` layers over them — and flattens a reference into
+an ordinary cascade while the model loads, so nothing below that point knows a
+reference was ever involved.
 
 **[`agent`](src/agent.rs)** is the turn loop. It owns the stop conditions and the
 named outcomes, and answers the model's tool calls either from a model's own
@@ -285,6 +289,15 @@ that swallows an upstream failure and answers `200` with the complaint in the
 body is precisely the mismatch worth catching, so `decode.error` is read
 regardless of status. The rule runs the other way too: a cascade finding nothing
 under a `2xx` is not a miss, because there was nothing to find.
+
+**A decode describes the model's answer and nothing else.** The endpoint is the
+one piece of software in an exchange that `mire` is pointed at on purpose;
+gateways, identity providers and MCP servers are things it goes through, whose
+error formats it does not own and cannot keep up with. So no decode reads them,
+and what they said reaches the reader as the status, the headers and the raw
+body — shown whole, on every call. The cost is that a `401` from a gateway
+normalises to nothing, which is the right answer: it was never the model
+speaking.
 
 **Simulated tools are the default; real ones are opt-in per file.** A simulated
 tool proves the model emits well-formed calls and knows what to do with a result,

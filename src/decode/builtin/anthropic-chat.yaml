@@ -1,0 +1,26 @@
+# Anthropic's Messages API.
+#
+# The answer is a *list of blocks*, not a string, and the first one is not
+# necessarily the text: thinking is on by default on the current models, so
+# `$.content[0].text` reads a block that has no `text` at all. The filter is what
+# makes this work, and the several text blocks a cited answer produces are
+# concatenated in the order they arrive.
+#
+# Streamed, only the `content_block_delta` frames carry text — `$.delta.text`
+# misses on every other frame, which is the correct answer for them.
+---
+name: anthropic-chat
+kind: chat
+decode:
+  content:
+    - "$.content[?(@.type == 'text')].text"
+  delta:
+    - $.delta.text
+  tool_calls:
+    - "$.content[?(@.type == 'tool_use')]"
+  finish_reason:
+    - $.stop_reason
+  usage:
+    - $.usage
+  error:
+    - $.error

@@ -83,27 +83,14 @@ request:
       ${ stage.knobs }
     }
 
-# One cascade, both shapes. `$.choices[0]…` is the OpenAI-compatible route and
-# `$.message…` is Ollama's own; neither stage had to bring a decode block of its
-# own, which is the half of a duplicated model file that quietly stops matching.
+# One cascade, both shapes, one line. `openai-chat` is the OpenAI-compatible
+# route and `ollama-native-chat` is Ollama's own; for each field the first one's
+# paths are tried, then the second's, so `@gateway` resolves on the first and
+# `@ollama` on the second — and the trace names which. Neither stage had to bring
+# a decode block of its own, which is the half of a duplicated model file that
+# quietly stops matching.
+#
 decode:
-  content:
-    - $.choices[0].message.content
-    - $.message.content
-  delta:
-    - $.choices[0].delta.content
-    - $.message.content
-  tool_calls:
-    - $.choices[0].message.tool_calls
-    - $.message.tool_calls
-  finish_reason:
-    - $.choices[0].finish_reason
-    - $.done_reason
-  usage:
-    - $.usage
-    - $
-  # `$` rather than `$.error`: a gateway refusing the call puts its sentence in
-  # `error_description`, and pointing one level down hands back the code and
-  # drops the only line that explains it.
-  error:
-    - $
+  from:
+    - openai-chat
+    - ollama-native-chat

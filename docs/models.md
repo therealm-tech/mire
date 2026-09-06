@@ -35,9 +35,39 @@ decode:
   usage:
     - $.usage
 ```
+## Name a shape instead of spelling it out
+
+Most endpoints answer one of a handful of shapes, so those are compiled into
+`mire` and a model reaches for them by name:
+
+```yaml
+decode:
+  from:
+    - openai-chat
+```
+
+| Name | `kind` | The endpoints that answer it |
+| --- | --- | --- |
+| `openai-chat` | `chat` | OpenAI, vLLM, TGI, llama.cpp, LM Studio, Ollama's `/v1`, and the gateways that copied it |
+| `openai-embeddings` | `embedding` | the same crowd, on `/v1/embeddings` |
+| `anthropic-chat` | `chat` | Anthropic's Messages API |
+| `gemini-chat` | `chat` | Google's `generateContent`, on the Gemini API and on Vertex AI |
+| `ollama-native-chat` | `chat` | Ollama's own `/api/chat` |
+| `ollama-native-embeddings` | `embedding` | Ollama's own `/api/embed` |
+
+They are shapes, not vendors: everything OpenAI-compatible is `openai-chat`, and
+Ollama gets two of its own only because it really does serve two different
+answers. A `kind:` that does not match the model's is refused at load rather
+than decoding nothing and looking like a bad endpoint.
+
+Adding your own is a file in `decodes/`, beside `models/` and `prompts/` — see
+[configuration](configuration.md). One that takes a built-in's name displaces it
+for every model, which is how you fix a shipped shape without touching the
+models that use it.
+
 ## Teach it a non-standard endpoint
 
-Not every endpoint answers like OpenAI. Each `decode:` field is a **cascade**:
+Not every endpoint answers like anything. Each `decode:` field is a **cascade**:
 paths are tried in order and the first one that resolves wins, so one model can
 cover several shapes — including an endpoint that changes between versions.
 
@@ -52,16 +82,39 @@ decode:
     - $.stop_reason
 ```
 
-One of those fields is not about the answer at all. `decode.error` points at
-whatever the endpoint says when there is no answer, and what comes back is
+`from:` fills the same cascades, and the two mix. For each field, the paths
+written here come first and each named decode's follow, in the order listed:
+
+```yaml
+decode:
+  from:
+    - openai-chat          # tried first
+    - ollama-native-chat   # then this one
+  content:
+    - $.output.text        # but this one before either
+```
+
+That first list is one model covering both shapes of an endpoint that serves
+them on two routes, and the trace names which one answered — see
+[`config/models/qwen3-staged.yaml`](../config/models/qwen3-staged.yaml).
+
+One `decode:` field is not about the answer at all. `decode.error` points at
+whatever the **endpoint** says when there is no answer, and what comes back is
 normalised the same way everything else is:
 
 ```yaml
 decode:
   error:
-    - $               # read wherever the complaint sits inside the body
-    - $.detail        # a gateway that answers like FastAPI
+    - $.error         # where almost everything puts its complaint
+    - $.detail        # an endpoint that answers like FastAPI
 ```
+
+It reads the model's own refusal and nothing else. A gateway rejecting the
+credential, an identity provider explaining why, an MCP server having a bad day:
+those are not the model talking, `mire` does not own their error formats, and a
+decode that reads them starts asserting things about somebody else's software.
+Their side of the exchange is the status, the headers and the raw body, all of
+which are shown whole.
 
 ```json
 {
@@ -74,10 +127,9 @@ decode:
 }
 ```
 
-`{"error": {"message": …}}`, a bare `{"error": "model not found"}`, a flat
-`{"message": …, "code": 503}` and an OAuth2 `{"error": "invalid_token",
-"error_description": …}` all land in those three fields, and `raw` keeps the node
-verbatim so nothing normalisation did not understand is lost.
+`{"error": {"message": …}}`, a bare `{"error": "model not found"}` and a flat
+`{"message": …, "code": 503}` all land in those three fields, and `raw` keeps the
+node verbatim so nothing normalisation did not understand is lost.
 
 **The status is never consulted.** A gateway that swallows an upstream failure
 and answers `200` with the complaint in the body is exactly the mismatch this
@@ -101,9 +153,11 @@ went wrong:
 ```
 
 That is the fast way to fix a model: look at the raw tree, pick the right path,
-edit the file. See [`config/models/qwen3.yaml`](../config/models/qwen3.yaml) for a
-worked example — one `decode:` block covering two unrelated response shapes, of
-which only the first wins until you point the model at the other endpoint.
+edit the file. See [`config/models/whisper.yaml`](../config/models/whisper.yaml)
+for a cascade written out by hand, because no built-in covers a transcription
+endpoint — and [`config/models/qwen3.yaml`](../config/models/qwen3.yaml) for the
+same idea with two names instead: one model covering two unrelated response
+shapes, of which only the first wins until you point it at the other endpoint.
 
 A model with no `decode:` block at all is valid — that is the normal state of
 an endpoint you have not figured out yet.

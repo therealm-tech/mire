@@ -124,8 +124,9 @@ fn decode_tool_calls(raw: &Value, spec: &DecodeSpec, trace: &mut DecodeTrace) ->
 /// Normalises the two tool-call shapes seen in the wild.
 ///
 /// `OpenAI` nests under `function` and sends `arguments` as a JSON *string*;
-/// Anthropic-style endpoints put `name` and `input` at the top level. Arguments
-/// that arrive as a string are parsed, so assertions can look inside them either way.
+/// Anthropic-style endpoints put `name` and `input` at the top level, and
+/// Google's `functionCall` uses `args`. Arguments that arrive as a string are
+/// parsed, so assertions can look inside them either way.
 pub(crate) fn tool_call_from_value(value: &Value) -> Option<ToolCall> {
     let object = value.as_object()?;
     let function = object.get("function").and_then(Value::as_object);
@@ -140,6 +141,7 @@ pub(crate) fn tool_call_from_value(value: &Value) -> Option<ToolCall> {
         .and_then(|f| f.get("arguments"))
         .or_else(|| object.get("arguments"))
         .or_else(|| object.get("input"))
+        .or_else(|| object.get("args"))
         .or_else(|| object.get("parameters"));
 
     // Whether they arrived as a string decides what a replay sends back, so it

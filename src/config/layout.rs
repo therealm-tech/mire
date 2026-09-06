@@ -37,6 +37,13 @@ pub const MCP: &str = "mcp";
 /// Subdirectory holding one saved prompt per file.
 pub const PROMPTS: &str = "prompts";
 
+/// Subdirectory holding one named decode per file.
+///
+/// The only kind with entries that exist without a file: the shapes every
+/// endpoint answers are compiled into the binary, and this directory layers on
+/// top of them.
+pub const DECODES: &str = "decodes";
+
 /// Every `*.yaml` / `*.yml` file in `dir/<kind>`, sorted by path.
 ///
 /// Sorted so that the order is the directory listing's rather than the

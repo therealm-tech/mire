@@ -29,6 +29,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::auth::{AuthRegistry, SessionStore};
+use crate::decode::registry::DecodeRegistry;
 use crate::issue::LoadIssue;
 use crate::mcp::McpRegistry;
 use crate::model::loader::{self, ModelSet};
@@ -53,6 +54,9 @@ pub struct Config {
     /// Saved prompts the UI can drop in the box, plus the entries that did not
     /// load.
     pub prompts: PromptRegistry,
+    /// Named response shapes a model can build its `decode:` from — the ones
+    /// compiled in, plus whatever the directories add.
+    pub decodes: DecodeRegistry,
 }
 
 impl Config {
@@ -64,6 +68,7 @@ impl Config {
             .chain(self.registry.issues().iter())
             .chain(self.mcp.issues().iter())
             .chain(self.prompts.issues().iter())
+            .chain(self.decodes.issues().iter())
     }
 }
 
@@ -177,11 +182,16 @@ fn read(dirs: &[PathBuf], http: &Client, sessions: &Arc<SessionStore>) -> std::i
         })?;
     }
 
+    // Before the models, because a model's `decode.from` is resolved against
+    // this while it loads.
+    let decodes = DecodeRegistry::load_dirs(dirs);
+
     Ok(Config {
-        models: loader::load_dirs(dirs),
+        models: loader::load_dirs(dirs, &decodes),
         registry: AuthRegistry::load_dirs(dirs, http, sessions),
         mcp: McpRegistry::load_dirs(dirs, http),
         prompts: PromptRegistry::load_dirs(dirs),
+        decodes,
     })
 }
 
@@ -239,7 +249,13 @@ mod tests {
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("mire-config-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        for kind in [layout::MODELS, layout::AUTH, layout::MCP, layout::PROMPTS] {
+        for kind in [
+            layout::MODELS,
+            layout::AUTH,
+            layout::MCP,
+            layout::PROMPTS,
+            layout::DECODES,
+        ] {
             std::fs::create_dir_all(dir.join(kind)).unwrap();
         }
         dir
@@ -251,6 +267,22 @@ mod tests {
 
     const MODEL: &str =
         "name: late\nkind: chat\nurl: https://models.internal/late\nrequest:\n  template: '{}'\n";
+
+    /// The `config/` directory this repository ships is documentation people
+    /// copy, and it is the only configuration most readers will ever see load.
+    /// A model naming a decode that no longer exists, or an example gone stale
+    /// against a field rename, is a broken first impression rather than a
+    /// failing test — unless this runs.
+    #[test]
+    fn the_shipped_configuration_directory_loads_without_issues() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("config");
+
+        let config = read(&[dir], &Client::new(), &Arc::new(SessionStore::default())).unwrap();
+
+        let issues: Vec<String> = config.issues().map(ToString::to_string).collect();
+        assert!(issues.is_empty(), "{issues:#?}");
+        assert!(!config.models.is_empty());
+    }
 
     #[test]
     fn a_reload_picks_up_a_new_model() {

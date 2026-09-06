@@ -1,0 +1,26 @@
+# Ollama's own `/api/chat`, which is not the OpenAI shape it also serves on
+# `/v1/chat/completions`.
+#
+# Three differences worth knowing before you go looking for a bug: the message is
+# at the top level rather than inside a `choices` array, the stop reason is
+# called `done_reason`, and the token counters sit beside everything else instead
+# of under a `usage` object — which is what `$` is doing there.
+#
+# Streamed, this endpoint sends one whole object per line and keeps the text in
+# `message`, so `delta` and `content` are the same path.
+---
+name: ollama-native-chat
+kind: chat
+decode:
+  content:
+    - $.message.content
+  delta:
+    - $.message.content
+  tool_calls:
+    - $.message.tool_calls
+  finish_reason:
+    - $.done_reason
+  usage:
+    - $
+  error:
+    - $.error

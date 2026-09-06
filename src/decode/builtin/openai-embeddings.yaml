@@ -1,0 +1,13 @@
+# The OpenAI-compatible embedding response: one object per input under `data`,
+# each carrying its vector. vLLM, TEI, llama.cpp and Ollama's `/v1/embeddings`
+# all answer this.
+---
+name: openai-embeddings
+kind: embedding
+decode:
+  vectors:
+    - $.data[*].embedding
+  usage:
+    - $.usage
+  error:
+    - $.error
