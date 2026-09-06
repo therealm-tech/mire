@@ -92,6 +92,13 @@ pub struct McpExchange {
     pub status: u16,
     /// Whether the answer arrived as an event stream rather than one object.
     pub streaming: bool,
+    /// Response headers, masked.
+    ///
+    /// The half a request-only record cannot answer. `Mcp-Session-Id` is issued
+    /// here and nowhere else, and a gateway that refuses a handshake usually says
+    /// which one it is in a header rather than in the body.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub response_headers: BTreeMap<String, String>,
     /// The response body, masked. Empty when nothing came back.
     pub response: String,
     /// Round trip, in milliseconds.

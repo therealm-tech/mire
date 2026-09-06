@@ -759,6 +759,7 @@ impl McpClient {
             request: scrub.text(&body.to_string()),
             status: 0,
             streaming: false,
+            response_headers: BTreeMap::new(),
             response: String::new(),
             latency_ms: 0,
             error: None,
@@ -805,11 +806,17 @@ impl McpClient {
             .get(SESSION_HEADER)
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
+        // Read before the body: `text()` consumes the response, headers and all.
+        let response_headers = record
+            .as_ref()
+            .map(|_| scrub.headers(&readable(response.headers())))
+            .unwrap_or_default();
         let text = response.text().await.unwrap_or_default();
 
         if let Some(mut record) = record.take() {
             record.status = status.as_u16();
             record.streaming = streaming;
+            record.response_headers = response_headers;
             record.response = scrub.text(&text);
             record.latency_ms = latency_ms;
             self.file(record);

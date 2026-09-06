@@ -454,10 +454,13 @@ export const mcpExchangeSchema = z.object({
   revision: z.string(),
   /** A notification carries no `id` and expects no answer. */
   notification: z.boolean(),
+  /** What went out. The response's own are `responseHeaders`. */
   headers: z.record(z.string(), z.string()),
   request: z.string(),
   status: z.number(),
   streaming: z.boolean(),
+  /** What came back. Absent when nothing did. */
+  responseHeaders: z.record(z.string(), z.string()).default({}),
   response: z.string(),
   latencyMs: z.number(),
   error: z.string().optional(),
@@ -511,6 +514,8 @@ export const hookRecordSchema = z.object({
   /** The uploads it sent. Absent when it sent none. */
   files: z.array(attachmentSchema).default([]),
   status: z.number(),
+  /** What came back. Absent when nothing did. */
+  responseHeaders: z.record(z.string(), z.string()).default({}),
   response: z.string(),
   latencyMs: z.number(),
   error: z.string().optional(),

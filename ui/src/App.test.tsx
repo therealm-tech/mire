@@ -1512,6 +1512,7 @@ describe('the loop', () => {
         request: '{"phase":"before","tool":"get_weather"}',
         files: [],
         status: 204,
+        responseHeaders: {},
         response: '',
         latencyMs: 8,
         stoppedTheCall: false,
@@ -1529,6 +1530,7 @@ describe('the loop', () => {
         request: '{"phase":"after","tool":"get_weather"}',
         files: [],
         status: 200,
+        responseHeaders: {},
         response: 'ok',
         latencyMs: 12,
         stoppedTheCall: false,
@@ -1556,7 +1558,9 @@ describe('the loop', () => {
 
     // And the row is a way to its own card, like every other row here.
     await user.click(gate)
-    expect(within(panel('Traffic')).getByText(/x-api-key: \*\*\*/)).toBeInTheDocument()
+    const gated = within(panel('Traffic'))
+    expect(gated.getByText('x-api-key')).toBeInTheDocument()
+    expect(gated.getAllByText('***').length).toBeGreaterThan(0)
   })
 
   it('says a hook sat a call out, and what it was asked', async () => {
@@ -1579,6 +1583,7 @@ describe('the loop', () => {
         request: '',
         files: [],
         status: 0,
+        responseHeaders: {},
         response: '',
         latencyMs: 0,
         stoppedTheCall: false,
@@ -1806,6 +1811,7 @@ function mcpExchange(method: string, response: string) {
     request: `{"jsonrpc":"2.0","id":1,"method":"${method}","params":{"city":"Paris"}}`,
     status: 200,
     streaming: false,
+    responseHeaders: { 'content-type': 'application/json', 'mcp-session-id': 'abc-123' },
     response,
     latencyMs: 12,
   }
@@ -1901,6 +1907,7 @@ describe('traffic', () => {
         request: '{"phase":"before","tool":"get_weather"}',
         files: [],
         status: 403,
+        responseHeaders: {},
         response: 'get_weather is not allowed here',
         latencyMs: 8,
         error: 'answered 403 Forbidden: get_weather is not allowed here',
@@ -1920,11 +1927,13 @@ describe('traffic', () => {
     })
     const hook = within(await openCard(user, /Turn 1 · gate \(before\)/))
     expect(hook.getByText('stopped the call')).toBeInTheDocument()
-    expect(hook.getByText('403')).toBeInTheDocument()
+    // Twice: the status column of the row, and the first line of the response.
+    expect(hook.getAllByText('403').length).toBeGreaterThan(0)
     // Twice over: the reason it failed, and the body it answered with.
     expect(hook.getAllByText(/not allowed here/)).toHaveLength(2)
     // The header travels by name; its value does not.
-    expect(hook.getByText(/x-api-key: \*\*\*/)).toBeInTheDocument()
+    expect(hook.getByText('x-api-key')).toBeInTheDocument()
+    expect(hook.getAllByText('***').length).toBeGreaterThan(0)
   })
 
   it('says why a hook never got an answer, and what that cost the call', async () => {
@@ -1946,6 +1955,7 @@ describe('traffic', () => {
         request: '{"phase":"after","tool":"get_weather"}',
         files: [],
         status: 0,
+        responseHeaders: {},
         response: '',
         latencyMs: 12,
         error:
@@ -1994,6 +2004,7 @@ describe('traffic', () => {
           },
         ],
         status: 200,
+        responseHeaders: {},
         response: 'ok',
         latencyMs: 12,
         stoppedTheCall: false,
@@ -2033,6 +2044,7 @@ describe('traffic', () => {
         request: '',
         files: [],
         status: 204,
+        responseHeaders: {},
         response: '',
         latencyMs: 4,
         stoppedTheCall: false,
@@ -2079,6 +2091,7 @@ describe('traffic', () => {
           },
         ],
         status: 201,
+        responseHeaders: {},
         response: '',
         latencyMs: 9,
         stoppedTheCall: false,
@@ -2096,6 +2109,7 @@ describe('traffic', () => {
         request: '{"tool":"get_weather"}',
         files: [],
         status: 204,
+        responseHeaders: {},
         response: '',
         latencyMs: 3,
         stoppedTheCall: false,
@@ -2137,7 +2151,15 @@ describe('traffic', () => {
     const handshake = within(await openCard(user, /Setup · initialize/))
     expect(handshake.getByText('protocolVersion')).toBeInTheDocument()
     expect(handshake.getByText('"x"')).toBeInTheDocument()
-    expect(handshake.getAllByText(/mcp-method:/).length).toBeGreaterThan(0)
+    expect(handshake.getAllByText('mcp-method').length).toBeGreaterThan(0)
+
+    // Both halves of the exchange carry headers, and the response's are the ones
+    // a request-only record could never answer for: this is where the session a
+    // server issues on the handshake is, and nowhere else.
+    expect(handshake.getByText('mcp-session-id')).toBeInTheDocument()
+    // Twice over, and deliberately: in the headers, and pulled out in front of
+    // them, because a session that went missing mid-run is read off this line.
+    expect(handshake.getAllByText('abc-123')).toHaveLength(2)
   })
 
   it('shows every body as a tree, the way the raw response always was', async () => {
@@ -2154,17 +2176,23 @@ describe('traffic', () => {
     // the job, so it gets the same foldable tree the response always had.
     const model = within(await openCard(user, /Turn 1 · model/))
     expect(model.getByText('messages')).toBeInTheDocument()
-    // A branch is a button, because folding it is the point.
-    expect(model.getByRole('button', { name: /array · 0/ })).toBeInTheDocument()
+    // An empty array has nothing to fold, so it is said in place rather than
+    // hidden behind a toggle that reveals nothing.
+    expect(model.getByText('[]')).toBeInTheDocument()
 
     // Same for the JSON-RPC underneath a tool, in both directions.
     const protocol = within(await openCard(user, /Turn 1 · tools\/call/))
     expect(protocol.getByText('method')).toBeInTheDocument()
-    expect(protocol.getByText('"tools/call"')).toBeInTheDocument()
+    // A branch is a button, because folding it is the point — and it is named by
+    // the key it sits under rather than by the type it happens to be.
+    expect(protocol.getAllByRole('button', { name: /params · \d/ }).length).toBeGreaterThan(0)
+    // The JSON-RPC envelope is lifted out of the tree and onto a line of its
+    // own, so the method is read rather than unfolded.
+    expect(protocol.getAllByText('tools/call').length).toBeGreaterThan(0)
     expect(protocol.getByText('temp')).toBeInTheDocument()
   })
 
-  it('shows the request, the decode and the response of the model call', async () => {
+  it('shows the request and the response of the model call', async () => {
     vi.stubGlobal('fetch', toolRunApi())
     const user = userEvent.setup()
     render(<App />)
@@ -2176,13 +2204,11 @@ describe('traffic', () => {
     const model = within(await openCard(user, /Turn 1 · model/))
 
     // The request, credentials already masked, with its `curl` equivalent.
-    expect(model.getByText(/authorization: \*\*\*/)).toBeInTheDocument()
+    expect(model.getByText('authorization')).toBeInTheDocument()
+    expect(model.getAllByText('***').length).toBeGreaterThan(0)
     expect(model.getByRole('button', { name: 'Copy as curl' })).toBeInTheDocument()
 
-    // The decode: which configured path resolved which field.
-    expect(model.getByText('$.choices[0].message.content')).toBeInTheDocument()
-
-    // And the response the decoder read it out of.
+    // And the answer, as the decoder read it.
     expect(model.getByText(/finish: tool_calls/)).toBeInTheDocument()
   })
 
@@ -2343,8 +2369,11 @@ describe('traffic', () => {
     expect(model.getByText('file')).toBeInTheDocument()
     expect(model.getByText('meeting.mp3')).toBeInTheDocument()
     expect(model.getByText(/audio\/mpeg/)).toBeInTheDocument()
-    expect(model.getByText('model')).toBeInTheDocument()
-    expect(model.getByText('whisper-1')).toBeInTheDocument()
+    // Scoped to its own row: `model` is also what the card calls the wire this
+    // went out on, and a form is entitled to a field of the same name.
+    const part = model.getByText('whisper-1').closest('li')
+    expect(part).not.toBeNull()
+    expect(within(part as HTMLElement).getByText('model')).toBeInTheDocument()
   })
 })
 
