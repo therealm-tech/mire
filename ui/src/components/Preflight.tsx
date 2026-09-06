@@ -1,5 +1,5 @@
-import type { Preflight as PreflightState } from '../preflight'
-import { Badge, Button } from './primitives'
+import type { Preflight as PreflightState, Row } from '../preflight'
+import { Badge, Button, INPUT_CLASSES } from './primitives'
 
 /**
  * What the next call would do, above the box you would do it from.
@@ -9,47 +9,47 @@ import { Badge, Button } from './primitives'
  * half — where it goes, who it goes as, what it will set up first — said before
  * it happens rather than reconstructed from a trace afterwards.
  *
- * When something would refuse the call it says so here, with the button that
- * fixes it. The alternative is what this replaces: press **Send**, read a `409`,
- * work out which of two identities it was about, and go and find the row.
+ * One shape says all of it: a badge, what the line is about, what there is to
+ * say, and the button that fixes it. An identity that is signed in and one that
+ * is not are that same line with a different badge, so the page does not
+ * rearrange itself around a sign-in — which is what a panel folded away behind
+ * a button, and a red list of sentences replacing it, both did.
  */
 export function Preflight({
   state,
-  authOpen,
   mcpOpen,
   showMcp,
+  token,
   signingIn,
+  onToken,
   onSignIn,
-  onOpenAuth,
+  onSignOut,
   onOpenMcp,
 }: {
   state: PreflightState
-  authOpen: boolean
   mcpOpen: boolean
   /** False on a run that will not speak to a server — see `usesMcp` in `App`. */
   showMcp: boolean
+  /** What has been typed into this tab, for the row that asks for a credential. */
+  token: string
   signingIn: string | null
-  onSignIn: (provider: string) => void
-  onOpenAuth: () => void
+  onToken: (token: string) => void
+  onSignIn: (provider: string, prompt?: string) => void
+  onSignOut: (provider: string) => void
   onOpenMcp: () => void
 }) {
-  const blocked = state.blockers.length > 0
-
   return (
     <section
-      className={`rounded-lg border px-3 py-2 text-xs ${
-        blocked ? 'border-bad/40 bg-bad-soft' : 'border-line bg-panel'
-      }`}
+      className="rounded-lg border border-line bg-panel px-3 py-2 text-xs"
       aria-label="What the next call will do"
     >
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <Badge tone={blocked ? 'bad' : 'good'}>{blocked ? 'blocked' : 'ready'}</Badge>
-
+        {/*
+          Where the call goes, and nothing about how it is going to turn out: a
+          verdict here was a second badge over the top of the lines below, which
+          carry it already and say which of them it is about.
+        */}
         <span className="min-w-0 truncate font-mono text-muted">{state.url}</span>
-
-        <span className="text-faint">
-          as <span className="font-medium text-muted">{state.identity}</span>
-        </span>
 
         {state.servers.length > 0 ? (
           <span className="text-faint">
@@ -58,49 +58,53 @@ export function Preflight({
           </span>
         ) : null}
 
-        {/*
-          The details are one click away rather than permanently open: they are a
-          thing you read once and then stop reading, and they were costing the
-          composer the top of the screen every time. Two questions, so two
-          buttons — who the call goes out as, and which servers it sets up first.
-        */}
-        <span className="ml-auto flex items-center gap-1">
-          {showMcp ? (
+        {showMcp ? (
+          <span className="ml-auto">
             <Button aria-expanded={mcpOpen} onClick={onOpenMcp}>
               {mcpOpen ? 'Hide MCP' : 'MCP'}
             </Button>
-          ) : null}
-          <Button aria-expanded={authOpen} onClick={onOpenAuth}>
-            {authOpen ? 'Hide auth' : 'Auth'}
-          </Button>
-        </span>
+          </span>
+        ) : null}
       </div>
 
-      {state.blockers.length > 0 ? (
-        <ul className="mt-2 space-y-1.5">
-          {state.blockers.map((blocker) => (
-            <li key={blocker.message} className="flex flex-wrap items-center gap-2">
-              <span className="text-bad">{blocker.message}</span>
-              {blocker.signIn === undefined ? null : (
-                <Button
-                  variant="primary"
-                  disabled={signingIn !== null}
-                  onClick={() => {
-                    // `blocker.signIn` is checked above; the closure needs it again.
-                    if (blocker.signIn) {
-                      onSignIn(blocker.signIn)
-                    }
-                  }}
-                >
-                  {signingIn === blocker.signIn
-                    ? 'Waiting for the browser…'
-                    : `Sign in to ${blocker.signIn}`}
-                </Button>
-              )}
-            </li>
-          ))}
-        </ul>
-      ) : null}
+      <ul className="mt-2 space-y-1.5">
+        {state.rows.map((row) => (
+          <li
+            key={row.key}
+            className="flex flex-wrap items-center gap-2 border-line border-t pt-1.5"
+          >
+            <Badge tone={row.tone}>{row.label}</Badge>
+            {/*
+              A provider called `anonymous`, in the state called `anonymous`:
+              the badge has already said it, and saying it twice reads as a
+              stutter rather than as two facts.
+            */}
+            {row.subject === row.label ? null : (
+              <span className="font-medium text-sm">{row.subject}</span>
+            )}
+            {/* Empty on a row the badge has already said the whole of. */}
+            {row.detail ? (
+              <span className={row.blocks && !row.prompts ? 'text-bad' : 'text-faint'}>
+                {row.detail}
+              </span>
+            ) : null}
+
+            {row.prompts ? (
+              <input
+                type="password"
+                value={token}
+                autoComplete="off"
+                aria-label={`Credential for ${row.subject}`}
+                onChange={(event) => onToken(event.target.value)}
+                placeholder="paste the credential"
+                className={`${INPUT_CLASSES} w-64 max-w-full font-mono`}
+              />
+            ) : null}
+
+            <Action row={row} signingIn={signingIn} onSignIn={onSignIn} onSignOut={onSignOut} />
+          </li>
+        ))}
+      </ul>
 
       {state.notes.length > 0 ? (
         <ul className="mt-1.5 space-y-0.5">
@@ -112,5 +116,56 @@ export function Preflight({
         </ul>
       ) : null}
     </section>
+  )
+}
+
+/**
+ * The button a row ends on, when it has one.
+ *
+ * A failed sign-in gets two: pressing the same one again usually replays the
+ * identity provider's own session and so replays the same failure, and `prompt`
+ * is what forces it to stop and ask.
+ */
+function Action({
+  row,
+  signingIn,
+  onSignIn,
+  onSignOut,
+}: {
+  row: Row
+  signingIn: string | null
+  onSignIn: (provider: string, prompt?: string) => void
+  onSignOut: (provider: string) => void
+}) {
+  const fix = row.fix
+  if (fix === undefined) {
+    return null
+  }
+
+  if (fix.kind === 'sign-out') {
+    return (
+      <span className="ml-auto">
+        <Button onClick={() => onSignOut(fix.provider)}>Sign out</Button>
+      </span>
+    )
+  }
+
+  const waiting = signingIn === fix.provider
+
+  return (
+    <span className="ml-auto flex items-center gap-1">
+      {fix.retry ? (
+        <Button disabled={signingIn !== null} onClick={() => onSignIn(fix.provider, 'login')}>
+          Ask for credentials
+        </Button>
+      ) : null}
+      <Button
+        variant="primary"
+        disabled={signingIn !== null}
+        onClick={() => onSignIn(fix.provider)}
+      >
+        {waiting ? 'Waiting for the browser…' : fix.retry ? 'Try again' : 'Sign in'}
+      </Button>
+    </span>
   )
 }

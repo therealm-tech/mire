@@ -1089,6 +1089,12 @@ async fn the_auth_listing_always_offers_anonymous() {
     assert_eq!(providers[0]["name"], "anonymous");
     assert_eq!(providers[1]["name"], "gateway");
     assert_eq!(providers[1]["needsValue"], false);
+    // And where from, by name: the UI says it rather than leaving an empty
+    // variable and a misspelt one to look identical.
+    assert_eq!(providers[1]["valueSource"]["from"], "env");
+    assert_eq!(providers[1]["valueSource"]["name"], "MODEL_TOKEN");
+    // Nothing to read for the built-in, so the field is simply absent.
+    assert!(providers[0]["valueSource"].is_null());
     // Where the credential may go, said on the wire: the UI stops offering it
     // against a model pointing anywhere else.
     assert_eq!(providers[1]["allowedHosts"][0], "models.internal");

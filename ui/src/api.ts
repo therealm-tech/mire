@@ -105,6 +105,17 @@ export const sessionViewSchema = z.object({
   canRefresh: z.boolean(),
 })
 
+/**
+ * Where the server reads a provider's credential.
+ *
+ * The name of the source, never its content — `MODEL_TOKEN` and a path are not
+ * secrets, and they are what tells an empty variable apart from the wrong one.
+ */
+export const valueSourceSchema = z.object({
+  from: z.enum(['env', 'file']),
+  name: z.string(),
+})
+
 export const authDescriptorSchema = z.object({
   /** How the provider is addressed: `name`, or `name@stage`. */
   id: z.string(),
@@ -113,6 +124,8 @@ export const authDescriptorSchema = z.object({
   stage: z.string().optional(),
   kind: z.enum(['anonymous', 'token', 'oidc', 'oidc_browser']),
   needsValue: z.boolean(),
+  /** Absent where there is nothing to read: `anonymous`, a browser flow, and the `needsValue` case. */
+  valueSource: valueSourceSchema.optional(),
   needsLogin: z.boolean(),
   /** Where this credential may be sent. Empty means anywhere. */
   allowedHosts: z.array(z.string()),
@@ -584,6 +597,7 @@ export type ModelsResponse = z.infer<typeof modelsResponseSchema>
 export type Prompt = z.infer<typeof promptSchema>
 export type PromptsResponse = z.infer<typeof promptsResponseSchema>
 export type AuthDescriptor = z.infer<typeof authDescriptorSchema>
+export type ValueSource = z.infer<typeof valueSourceSchema>
 export type AuthResponse = z.infer<typeof authResponseSchema>
 export type McpDescriptor = z.infer<typeof mcpDescriptorSchema>
 export type McpResponse = z.infer<typeof mcpResponseSchema>

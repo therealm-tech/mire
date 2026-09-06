@@ -497,17 +497,11 @@ async function openMcp(user: ReturnType<typeof userEvent.setup>, ...names: strin
 }
 
 /**
- * Unfolds the auth detail.
- *
- * It is shut unless something needs acting on, so a test that reads the panel
- * has to open it — the same click the page asks for. Already-open is not a
- * failure: a model blocked on a field opens it on arrival.
+ * The preflight bar, which is where everything about the next call is said —
+ * the identity included, now that there is no panel to unfold.
  */
-async function openAuth(user: ReturnType<typeof userEvent.setup>) {
-  const toggle = await screen.findByRole('button', { name: /^(Auth|Hide auth)$/ })
-  if (toggle.textContent === 'Auth') {
-    await user.click(toggle)
-  }
+function bar(): HTMLElement {
+  return screen.getByLabelText('What the next call will do')
 }
 
 beforeEach(() => {
@@ -546,17 +540,15 @@ describe('App', () => {
     expect(await screen.findByRole('button', { name: /^chat/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /embed/ })).toBeInTheDocument()
 
-    await openAuth(user)
-
     // `chat` declares no `auth:`, which resolves to the anonymous provider —
-    // shown, and said out loud rather than left to be inferred from a blank.
-    // `toHaveTextContent`, because the sentence is split around a `<span>`.
-    expect(within(screen.getByTestId('model-auth')).getByText('anonymous')).toBeInTheDocument()
-    expect(screen.getByTestId('model-auth')).toHaveTextContent('no auth: in this model')
+    // said on the bar rather than left to be inferred from a blank, and without
+    // a button to press first.
+    expect(within(bar()).getByText('anonymous')).toBeInTheDocument()
+    expect(bar()).toHaveTextContent('no auth: in this model')
 
     // Following the model, because that is where the identity is declared.
     await user.click(screen.getByRole('button', { name: /as-me/ }))
-    expect(within(screen.getByTestId('model-auth')).getByText('me')).toBeInTheDocument()
+    expect(within(bar()).getByText('me')).toBeInTheDocument()
   })
 
   it('prompts for a credential only when the provider needs one', async () => {
@@ -602,9 +594,10 @@ describe('App', () => {
 
     await user.click(await screen.findByRole('button', { name: /guarded/ }))
 
-    // The identity is the model's. Nothing in the panel switches it — the only
-    // buttons here are the ones that fetch a session or drop it.
-    const buttons = within(panel('Auth'))
+    // The identity is the model's. Nothing on the bar switches it — the only
+    // buttons here are the ones that fetch a session, drop it, or open the
+    // servers.
+    const buttons = within(bar())
       .queryAllByRole('button')
       .map((button) => button.textContent ?? '')
     expect(buttons.filter((label) => /^(anonymous|pasted|gateway|me)$/.test(label))).toEqual([])
@@ -630,10 +623,10 @@ describe('App', () => {
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: /pinned/ }))
-    await openAuth(user)
 
     expect(screen.getByText('out of allowed_hosts')).toBeInTheDocument()
-    expect(screen.getByText(/refused before anything goes out/)).toBeInTheDocument()
+    // Where it may go; where it would have gone is the URL a line above.
+    expect(bar()).toHaveTextContent(/allowed_hosts: /)
 
     await user.click(screen.getByRole('button', { name: /guarded/ }))
     expect(screen.queryByText('out of allowed_hosts')).not.toBeInTheDocument()
@@ -656,7 +649,7 @@ describe('App', () => {
 
     // `guarded` authenticates the model with `pasted`; none of that reaches the
     // servers, which answer to their own entries.
-    expect(within(screen.getByTestId('model-auth')).getByText('pasted')).toBeInTheDocument()
+    expect(within(bar()).getByText('pasted')).toBeInTheDocument()
 
     // Named outright, and the browser provider it names has no session — so a
     // tool call would be refused before anything went out.
@@ -681,33 +674,33 @@ describe('App', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    // Nothing until somebody says so: the servers are declared, and the bar says
-    // the run reaches none of them rather than leaving it to be discovered in
-    // the traffic afterwards.
+    // Nothing until somebody says so: the servers are declared, and the bar
+    // counts what the run reaches, which is none of them. What being off means
+    // is the block's own business, on the card that holds the switch.
     await user.click(await screen.findByRole('button', { name: /guarded/ }))
     const bar = () => screen.getByLabelText('What the next call will do')
-    expect(bar()).toHaveTextContent(/2 declared in mcp\/, none switched on/)
-    expect(screen.queryByText(/answer 409 until/)).not.toBeInTheDocument()
+    expect(bar()).not.toHaveTextContent('MCP server')
+    expect(within(bar()).queryByText('not signed in')).not.toBeInTheDocument()
 
-    // Switched on, both are the run's business — and with them the `409` one of
-    // their identities is promising.
+    // Switched on, both are the run's business — and with them the identity one
+    // of them wants, which nobody has fetched.
     await openMcp(user, 'dev', 'keyed')
     expect(bar()).toHaveTextContent('2 MCP servers')
-    expect(screen.getByText(/answer 409 until/)).toBeInTheDocument()
+    expect(within(bar()).getByText('not signed in')).toBeInTheDocument()
 
     // A budget of one turn changes none of that. One turn against a real server
     // is a fair question — does the model ask for the tool it was shown? — so the
     // servers stay, and so does the 409 standing between it and an answer.
     await oneTurn()
     expect(bar()).toHaveTextContent('2 MCP servers')
-    expect(screen.getByText(/answer 409 until/)).toBeInTheDocument()
+    expect(within(bar()).getByText('not signed in')).toBeInTheDocument()
 
     // Switching them off is what takes them out, which is the control that says
     // so: no discovery, no listing, and no 409 to be blocked by.
     await user.click(screen.getByRole('switch', { name: 'dev' }))
     await user.click(screen.getByRole('switch', { name: 'keyed' }))
     expect(bar()).not.toHaveTextContent('2 MCP')
-    expect(screen.queryByText(/answer 409 until/)).not.toBeInTheDocument()
+    expect(within(bar()).queryByText('not signed in')).not.toBeInTheDocument()
   })
 
   it('offers no MCP block when mcp/ declares none', async () => {
@@ -775,7 +768,9 @@ describe('App', () => {
     await user.click(screen.getByRole('switch', { name: 'dev' }))
     expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('1 MCP server')
     expect(dev().queryByText(/Out of this run/)).not.toBeInTheDocument()
-    expect(screen.getByText(/answer 409 until/)).toBeInTheDocument()
+    expect(
+      within(screen.getByLabelText('What the next call will do')).getByText('not signed in'),
+    ).toBeInTheDocument()
 
     // And back out, because a switch that only goes one way is a trap.
     await user.click(screen.getByRole('switch', { name: 'dev' }))
@@ -2266,7 +2261,6 @@ describe('browser login', () => {
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: /^chat/ }))
-    await openAuth(user)
     expect(screen.queryByRole('button', { name: 'Sign in' })).not.toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: /as-me/ }))
@@ -2317,7 +2311,6 @@ describe('browser login', () => {
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: /as-me/ }))
-    await openAuth(user)
     await user.click(screen.getByRole('button', { name: 'Sign in' }))
 
     const login = await waitFor(() => {
@@ -2335,12 +2328,8 @@ describe('browser login', () => {
     expect(popup.location.href).toBe('https://idp.example/authorize?state=abc')
 
     // Scoped: `dev` authenticates with `me` too, and every chat model is
-    // offered `dev` — so the session shows on that row as well.
-    await waitFor(
-      () =>
-        expect(within(screen.getByTestId('model-auth')).getByText('gleroy')).toBeInTheDocument(),
-      { timeout: 4000 },
-    )
+    // offered `dev` — so the session shows on that card as well.
+    await waitFor(() => expect(bar()).toHaveTextContent('gleroy'), { timeout: 4000 })
   })
 
   it('shows why a login failed and offers to force a fresh prompt', async () => {
@@ -2390,16 +2379,15 @@ describe('browser login', () => {
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: /as-me/ }))
-    await openAuth(user)
 
-    // The reason survives the tab that closed, which is the whole point. Scoped
-    // to the model's row: `dev` reaches for `me` as well, and shows the same
-    // failure against the tool calls it would refuse.
-    const model = within(screen.getByTestId('model-auth'))
-    expect(model.getByText(/refused the login/)).toBeInTheDocument()
-    expect(model.getByRole('button', { name: 'Try again' })).toBeInTheDocument()
+    // The reason survives the tab that closed, which is the whole point — and
+    // it lands on the same line the sign-in was offered from, so nothing moves.
+    expect(within(bar()).getByText(/refused the login/)).toBeInTheDocument()
+    expect(within(bar()).getByRole('button', { name: 'Try again' })).toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: /asking for credentials/ }))
+    // Pressing the same button replays the identity provider's own session, and
+    // with it the same failure; this is the one that forces it to ask.
+    await user.click(screen.getByRole('button', { name: 'Ask for credentials' }))
     await waitFor(() => expect(prompts).toContain('login'))
   })
 
@@ -2451,9 +2439,8 @@ describe('browser login', () => {
     )
     expect(logins.some((url) => url.endsWith('/api/auth/me/login'))).toBe(true)
 
-    // The session lands, so the row stops asking for one and says who it got
-    // instead — with the way back out, since this row is the only place that
-    // identity is on screen.
+    // The session lands, so the card stops asking for one and says who it got
+    // instead, with the way back out.
     const dev = within(screen.getByTestId('mcp-dev'))
     await waitFor(
       () => expect(dev.getByRole('button', { name: 'Sign out of me' })).toBeInTheDocument(),
@@ -2464,7 +2451,7 @@ describe('browser login', () => {
 
     // And the model still calls as what the model says. A server needing a
     // session is not an opinion about the model's identity.
-    expect(within(screen.getByTestId('model-auth')).getByText('pasted')).toBeInTheDocument()
+    expect(within(bar()).getByText('pasted')).toBeInTheDocument()
   })
 
   it('shows the session and lets you drop it', async () => {
@@ -2497,21 +2484,19 @@ describe('browser login', () => {
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: /as-me/ }))
-    await openAuth(user)
-    // The model's row, not `dev`'s: both authenticate with `me`, and this test
-    // is about the one the model names.
-    const model = () => within(screen.getByTestId('model-auth'))
-    expect(model().getByText('gleroy')).toBeInTheDocument()
-    expect(model().getByText('expires in 4 min')).toBeInTheDocument()
-    expect(model().getByText(/granted: openid profile/)).toBeInTheDocument()
+    // The bar, not `dev`'s card: both authenticate with `me`, and this test is
+    // about the one the model names. Who, for how long and with what — one line.
+    expect(bar()).toHaveTextContent('gleroy')
+    expect(bar()).toHaveTextContent('expires in 4 min')
+    expect(bar()).toHaveTextContent('openid profile')
 
-    await user.click(model().getByRole('button', { name: 'Sign out' }))
+    await user.click(within(bar()).getByRole('button', { name: 'Sign out' }))
 
     expect(await screen.findByRole('button', { name: 'Sign in' })).toBeInTheDocument()
-    expect(model().queryByText('gleroy')).not.toBeInTheDocument()
+    expect(bar()).not.toHaveTextContent('gleroy')
   })
 
-  it('drops a session from the MCP row that is the only place it shows', async () => {
+  it('drops a session from the card of the server that wanted it', async () => {
     const logouts: string[] = []
     let signedIn = true
     vi.stubGlobal(
@@ -2542,7 +2527,8 @@ describe('browser login', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    // `guarded` calls the model as `pasted`, so `me` appears nowhere but here.
+    // `guarded` calls the model as `pasted`, so `me` is here because `dev` wants
+    // it and for no other reason — and it is signed out from the same card.
     await user.click(await screen.findByRole('button', { name: /guarded/ }))
     await openMcp(user, 'dev')
     const dev = within(screen.getByTestId('mcp-dev'))
@@ -2940,9 +2926,11 @@ describe('preflight', () => {
     await screen.findByRole('button', { name: /^chat/ })
     const bar = screen.getByLabelText('What the next call will do')
 
-    expect(within(bar).getByText('ready')).toBeInTheDocument()
+    // Nothing is wrong, so there is no verdict badge: the bar says where the
+    // call goes and who it goes as, and stays quiet about being fine.
+    expect(within(bar).queryByText('blocked')).not.toBeInTheDocument()
     expect(within(bar).getByText('https://models.internal/v1/chat/completions')).toBeInTheDocument()
-    expect(bar).toHaveTextContent('as anonymous')
+    expect(within(bar).getByText('anonymous')).toBeInTheDocument()
   })
 
   it('counts the servers a run would set up first', async () => {
@@ -2992,35 +2980,36 @@ describe('preflight', () => {
     await user.click(await screen.findByRole('button', { name: /as-me/ }))
     await openMcp(user, 'dev')
     const bar = screen.getByLabelText('What the next call will do')
-    expect(within(bar).getByText('blocked')).toBeInTheDocument()
-    expect(bar).toHaveTextContent('Nobody is signed in to me')
 
     // Two refusals, both of them `me`: the model call, and the tool calls to
-    // `dev`. Two lines rather than one, because they are two different things
-    // this run would fail at — and the same button fixes both.
-    expect(bar).toHaveTextContent(/Tool calls to dev answer 409/)
+    // `dev`. One line, because there is one identity missing and one button
+    // that fetches it — and the line names what is waiting on it.
+    // One line, not two: the model calls as `me` and `dev` wants `me`, and one
+    // sign-in is the whole of the fix.
+    expect(within(bar).getByText('not signed in')).toBeInTheDocument()
 
-    // The fix is on the bar rather than three panels away.
-    await user.click(
-      within(bar).getAllByRole('button', { name: 'Sign in to me' })[0] as HTMLElement,
-    )
+    // The fix is on the line that reports it rather than three panels away.
+    await user.click(within(bar).getByRole('button', { name: 'Sign in' }))
     await waitFor(() => expect(logins).toHaveLength(1))
     expect(logins[0]).toContain('/api/auth/me/login')
   })
 
-  it('opens the auth detail by itself when the fix is a field inside it', async () => {
+  it('asks for a credential on the line that refuses the call without it', async () => {
     const user = userEvent.setup()
     render(<App />)
 
     // `guarded` names `pasted`, whose value only this tab can supply — so the
-    // panel holding the box is already open rather than folded away.
+    // box is on the bar, where the refusal is, rather than behind a button.
     await user.click(await screen.findByRole('button', { name: /guarded/ }))
-    expect(await screen.findByPlaceholderText('paste the credential')).toBeInTheDocument()
+    const field = await screen.findByPlaceholderText('paste the credential')
+    expect(bar()).toContainElement(field)
+    expect(bar()).toHaveTextContent('no value')
 
-    await user.type(screen.getByPlaceholderText('paste the credential'), 'sk-test')
-    expect(screen.getByLabelText('What the next call will do')).not.toHaveTextContent(
-      'has no value',
-    )
+    // The field stays put through every keystroke; the badge is what moves.
+    await user.type(field, 'sk-test')
+    expect(bar()).not.toHaveTextContent('no value')
+    expect(bar()).toHaveTextContent('in this tab')
+    expect(screen.getByPlaceholderText('paste the credential')).toHaveValue('sk-test')
   })
 })
 
@@ -3540,8 +3529,10 @@ describe('a model that requires a file', () => {
 
     const send = await screen.findByRole('button', { name: 'Send' })
     expect(send).toBeDisabled()
-    // Said on the bar, in the same place every other refusal is said.
-    expect(screen.getByText(/describe-image needs a file/)).toBeInTheDocument()
+    // Said next to the button that fixes it, rather than on the bar: what the
+    // request carries is the composer's subject.
+    expect(screen.getByText(/built around a file/)).toBeInTheDocument()
+    expect(bar()).not.toHaveTextContent('file')
 
     // Whatever the mock stores is what comes back, and any file clears the
     // blocker: the model asked for one, not for a particular one.
@@ -3549,7 +3540,7 @@ describe('a model that requires a file', () => {
     await screen.findByText('report.pdf')
 
     await waitFor(() => expect(send).toBeEnabled())
-    expect(screen.queryByText(/needs a file/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/built around a file/)).not.toBeInTheDocument()
   })
 
   it('holds it shut on a model with no box either', async () => {
@@ -3568,7 +3559,7 @@ describe('a model that requires a file', () => {
     // file is the only thing left holding it — and it does.
     expect(await screen.findByRole('button', { name: 'Send' })).toBeDisabled()
     expect(screen.queryByLabelText('Message')).not.toBeInTheDocument()
-    expect(screen.getByText(/whisper needs a file/)).toBeInTheDocument()
+    expect(screen.getByText(/built around a file/)).toBeInTheDocument()
   })
 
   /**

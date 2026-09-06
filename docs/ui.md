@@ -6,33 +6,64 @@ editor's — and it holds no logic of its own: it shows what the API returns.
 - **What the next call will do**, above the box you would make it from. Where it
   goes, who it goes as, and which MCP servers it would set up first — the
   "known signal in" half, said before it happens rather than reconstructed from a
-  trace afterwards. When something would refuse the call it says so there and
-  offers the way out: every blocker it lists is a refusal `mire` is already known
-  to make — an identity or a server no file declares, a credential outside its
-  `allowed_hosts` or missing from this tab, a browser session nobody has fetched.
-  It says nothing about whether the endpoint is up. That is the question you came
-  to ask, and answering it here would be answering it by guessing.
-- **Auth, folded away until it is wanted, and read-only.** The identity is the
-  model's, declared in its `auth:` next to the URL it authenticates against,
-  so the panel shows it rather than offering alternatives — what you read in the
-  file is what went out, and the UI never puts an `auth` of its own on the wire.
-  To ask the same endpoint as somebody else, copy the model and change one
-  line; that copy is a thing you can name, keep and re-run, which a click never
-  was. A model with no `auth:` says so and resolves to `anonymous`, where a
-  `401` shows up green with a note that the route is protected, because that is
-  a pass. A model naming a credential whose `allowed_hosts` excludes its own
-  URL is flagged outright — every call it makes is refused before anything goes
-  out.
+  trace afterwards. It says nothing about whether the endpoint is up. That is the
+  question you came to ask, and answering it here would be answering it by
+  guessing.
 
-  It opens from **Auth** on the bar above, and by itself when the way out of a
-  blocker is a field inside it. What stays interactive is what no file could
-  hold: a credential typed into this tab, and a browser session somebody has to
-  go and fetch — **Sign in**, then who you are and a countdown.
+  Under the address, **one line per thing there is to say about this call**,
+  always the same four parts: a badge, what the line is about, what there is to
+  say, and — where there is one — the button that fixes it. **The badge is the
+  sentence**, and what follows it is only ever what a badge cannot hold: a name,
+  a path, a host, a countdown. The badge carries the verdict, so an identity that is signed in and one that is not are the same line
+  in the same place, and watching one become the other moves nothing on the page.
+  Every red badge is a refusal `mire` is already known to make: an identity or a
+  server no file declares, a credential outside its `allowed_hosts` or missing
+  from this tab, a browser session nobody has fetched. There is no verdict over
+  the top of them — the line that is red is the answer, and it says which of them
+  it is about, which a word above the address never did.
+
+  What the request *carries* is not here. A `requires_upload:` model with nothing
+  attached is refused just as squarely, but the file that fixes it is picked two
+  buttons along on the composer, so that is where it is said — beside **Attach**,
+  with **Send** shut until it is pressed.
+- **The identity, on one of those lines.** It is the model's, declared in its
+  `auth:` next to the URL it authenticates against, so the line shows it rather
+  than offering alternatives — what you read in the file is what went out, and
+  the UI never puts an `auth` of its own on the wire. To ask the same endpoint as
+  somebody else, copy the model and change one line; that copy is a thing you can
+  name, keep and re-run, which a click never was.
+
+  The badge says which of the nine states it is in, and most of them stop there.
+  `anonymous` sends nothing at all, which is what makes a `401` from it a
+  *passing* result rather than a failure — and it carries a word only when the
+  model declares no `auth:`, because an identity nobody chose and one somebody
+  did are worth telling apart. `token` and `workload` carry the `env:` or the
+  `file:` the server reads on every call: an empty variable and a misspelt
+  variable name are the same `401` until one of them is named, and the name is
+  not the value. `out of allowed_hosts` carries the hosts it may be sent to,
+  against the URL a line above. Those two and `undeclared` are repaired in a file
+  rather than here, so they carry no button.
+
+  The rest is what no file could hold, and it is asked for on the line that would
+  otherwise only report it: `no value` carries the box to paste a credential into
+  — it stays there once something is typed, and the badge turns to `in this tab`
+  — while `not signed in` carries **Sign in**, and `signed in` carries who you
+  are, a countdown and the granted scopes, with the way back out. A sign-in that
+  failed carries the reason, and a second button that forces the identity
+  provider to stop reusing its own session and ask.
 
   The identity a *server* authenticates with is not here. It is a separate
   question answered in a separate file — the model's comes from the model, a
   server's from `mcp/`, and neither follows the other — so it is asked on the
-  card of the server it is about, in the block below.
+  card of the server it is about, in the block below. The browser identities that
+  run's servers need are still here, because it is this run that would fail
+  without them: **one line per identity**, in the same three states and with the
+  same buttons, folded into the model's own line when it is the same identity.
+  Which server wanted it is not said — it is the same identity either way, and
+  three servers and a model wanting one missing session is one line and one
+  button, because that is what it takes to fix all four. The line stays once
+  somebody has signed in, saying who: an answer you can only have while it is
+  still wrong is not much of an answer.
 - **Conversation**, for chat models. A transcript: your question on the right,
   the answer on the left, the tools the run called in between, and a composer at
   the bottom. `Enter` sends, `Shift`+`Enter` starts a line. There is one button,
@@ -75,10 +106,9 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   somebody's real server, so a run reaches one because you said so here and never
   because a file was sitting in `mcp/`. A server left off is not set up — nothing
   discovered, nothing listed, no credential fetched, its tools not offered, and
-  the refusal it was causing gone with it. The card stays, saying so, and while a
-  run reaches nothing the bar above [says that
-  outright](mcp.md#choosing-what-a-run-reaches) rather than leaving it to be
-  discovered in an empty trace.
+  the refusal it was causing gone with it. The card stays, [saying
+  so](mcp.md#choosing-what-a-run-reaches); the bar above counts what the run
+  reaches, and a run that reaches nothing counts to nothing there.
 
   A server declaring [stages](configuration.md#stages) is one card all the same,
   with a button per stage and a dot on the one a bare name means — the same shape

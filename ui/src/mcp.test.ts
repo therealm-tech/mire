@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { McpDescriptor } from './api'
-import { activeServers, group, pick, serverNames } from './mcp'
+import { activeServers, group, pick } from './mcp'
 
 function server(id: string, over: Partial<McpDescriptor> = {}): McpDescriptor {
   return {
@@ -64,11 +64,5 @@ describe('activeServers', () => {
 
   it('ignores a switched-on name nothing declares any more', () => {
     expect(activeServers([server('search')], ['deleted', 'search'], {})).toEqual(['search'])
-  })
-})
-
-describe('serverNames', () => {
-  it('names files, so a staged one is counted once', () => {
-    expect(serverNames([...STAGED, server('search')])).toEqual(['files', 'search'])
   })
 })

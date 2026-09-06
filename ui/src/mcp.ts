@@ -62,8 +62,3 @@ export function activeServers(
     .filter((entry) => on.includes(entry.name))
     .map((entry) => pick(entry, stages).id)
 }
-
-/** Every declared server, by the name of the file that declared it. */
-export function serverNames(servers: McpDescriptor[]): string[] {
-  return group(servers).map((entry) => entry.name)
-}

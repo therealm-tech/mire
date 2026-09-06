@@ -855,6 +855,17 @@ function Composer({
         </Button>
 
         {/*
+          Beside the button that fixes it, because that is the whole of the fix.
+          Not on the bar above: what the request carries is this box's subject,
+          and the bar's is where the call goes and who it goes as.
+        */}
+        {needsUpload ? (
+          <span className="text-bad text-xs">
+            This model is built around a file. Attach one, and Send comes back.
+          </span>
+        ) : null}
+
+        {/*
           Only while there is something to stop. A permanently disabled Stop
           would be a second button competing with the one that does something.
         */}
