@@ -1,0 +1,27 @@
+# Google's `generateContent`, on the Gemini API and on Vertex AI — the same body
+# either way, so one entry covers both.
+#
+# A third shape, sharing nothing with the two above: the answer is nested under
+# `candidates`, the stop reason is `camelCase`, and the token counters live in
+# `usageMetadata` under names nobody else uses.
+#
+# `parts[*].text` selects only the parts that have text, so a function call in
+# the same answer is skipped here and read by `tool_calls` instead. Streamed —
+# `streamGenerateContent?alt=sse` — each frame carries this same shape, which is
+# why `delta` and `content` are the same path.
+---
+name: gemini-chat
+kind: chat
+decode:
+  content:
+    - $.candidates[0].content.parts[*].text
+  delta:
+    - $.candidates[0].content.parts[*].text
+  tool_calls:
+    - "$.candidates[0].content.parts[?(@.functionCall)].functionCall"
+  finish_reason:
+    - $.candidates[0].finishReason
+  usage:
+    - $.usageMetadata
+  error:
+    - $.error

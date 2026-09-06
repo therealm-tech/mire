@@ -12,6 +12,7 @@ pub mod chat;
 pub mod embedding;
 pub mod error;
 pub mod paths;
+pub mod registry;
 pub mod script;
 pub mod stream;
 
@@ -100,11 +101,13 @@ pub struct Usage {
 impl Usage {
     /// Reads the common spellings out of a usage object.
     ///
-    /// Covers `prompt_tokens` / `input_tokens` / `prompt_eval_count` and
-    /// `completion_tokens` / `output_tokens` / `eval_count`, and computes the
-    /// total when the endpoint omits it. The `*_count` pair is Ollama's native
-    /// API, where those fields sit at the top level rather than under `usage` —
-    /// point the `usage` path at `$` for that one.
+    /// Covers `prompt_tokens` / `input_tokens` / `prompt_eval_count` /
+    /// `promptTokenCount` and `completion_tokens` / `output_tokens` /
+    /// `eval_count` / `candidatesTokenCount`, and computes the total when the
+    /// endpoint omits it. The `*_count` pair is Ollama's native API, where those
+    /// fields sit at the top level rather than under `usage` — point the `usage`
+    /// path at `$` for that one. The `*TokenCount` trio is Google's, under
+    /// `usageMetadata`.
     #[must_use]
     pub fn from_value(raw: &serde_json::Value) -> Self {
         let read = |keys: &[&str]| keys.iter().find_map(|key| raw.get(*key)?.as_u64());
@@ -114,6 +117,7 @@ impl Usage {
             "input_tokens",
             "prompt_eval_count",
             "promptTokens",
+            "promptTokenCount",
         ]);
         let completion_tokens = read(&[
             "completion_tokens",
@@ -121,8 +125,9 @@ impl Usage {
             "generated_tokens",
             "eval_count",
             "completionTokens",
+            "candidatesTokenCount",
         ]);
-        let total_tokens = read(&["total_tokens", "totalTokens"])
+        let total_tokens = read(&["total_tokens", "totalTokens", "totalTokenCount"])
             .or_else(|| Some(prompt_tokens? + completion_tokens?));
 
         Self {

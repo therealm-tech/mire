@@ -1,0 +1,22 @@
+# The OpenAI-compatible chat completion, and by far the most common answer on the
+# wire: OpenAI itself, vLLM, llama.cpp's server, TGI, LM Studio, Ollama's `/v1`,
+# and every hosted gateway that copied the shape.
+#
+# `delta` is not a duplicate of `content`: streamed, the text moves from
+# `message` to `delta`, one chunk at a time.
+---
+name: openai-chat
+kind: chat
+decode:
+  content:
+    - $.choices[0].message.content
+  delta:
+    - $.choices[0].delta.content
+  tool_calls:
+    - $.choices[0].message.tool_calls
+  finish_reason:
+    - $.choices[0].finish_reason
+  usage:
+    - $.usage
+  error:
+    - $.error

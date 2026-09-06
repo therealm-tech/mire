@@ -134,7 +134,7 @@ docker run --rm --read-only -p 127.0.0.1:8787:8787 \
 | Document | What it covers |
 | --- | --- |
 | [docs/configuration.md](docs/configuration.md) | The options file, configuration directories and how they layer, stages (`dev`/`preprod`/`prod` in one file), containers, notebook path proxies |
-| [docs/models.md](docs/models.md) | Turning a `curl` into a model file: templates, decode cascades, Rhai scripts, `multipart/form-data` endpoints |
+| [docs/models.md](docs/models.md) | Turning a `curl` into a model file: templates, decode cascades and the built-in response shapes, Rhai scripts, `multipart/form-data` endpoints |
 | [docs/auth.md](docs/auth.md) | Credential providers: static tokens, OIDC workload identities, browser logins, `allowed_hosts` |
 | [docs/mcp.md](docs/mcp.md) | Real tool calls: declaring servers, protocol revisions, per-run selection, header templates, hooks, captured variables |
 | [docs/agent-loop.md](docs/agent-loop.md) | The turn loop, simulated tools, stop conditions and named outcomes |

@@ -1,9 +1,9 @@
 # Ollama's native embedding endpoint.
 #
 # The vectors arrive under `$.embeddings` as a list of lists, not under
-# `$.data[*].embedding` — so the OpenAI path is kept first in the cascade
+# `$.data[*].embedding` — so the OpenAI shape is kept first in the cascade
 # precisely to watch it miss and the second one win. Point this same model at
-# `/v1/embeddings` instead and the first path takes over, unchanged.
+# `/v1/embeddings` instead and the first one takes over, unchanged.
 #
 # No `auth:`: this one goes straight at Ollama, so it calls as `anonymous` —
 # which is what makes the auth panel read differently here than on `qwen3`.
@@ -20,16 +20,17 @@ request:
       "input": {{ input | tojson }}
     }
 
+# Two shapes, named rather than spelled out. `openai-embeddings` puts one object
+# per input under `data`; `ollama-native-embeddings` reads the bare list of lists.
+# Both are compiled into `mire` — nothing to install, and a `decodes/` file of
+# your own displaces either one by name.
+#
+# The second one also brings the error path, and it is worth knowing where it
+# points: Ollama's whole complaint is a string — `{"error": "model 'nomic' not
+# found, try pulling it first"}` — and a string is a message, so nothing more is
+# needed. Asking a chat model to embed lands exactly there, which is the mistake
+# this turns into a sentence instead of an empty vector list.
 decode:
-  vectors:
-    - $.data[*].embedding
-    - $.embeddings
-  usage:
-    - $.usage
-    - $
-  # Ollama's whole error is a string — `{"error": "model 'nomic' not found, try
-  # pulling it first"}` — and a string is a message, so nothing more is needed
-  # here. Asking a chat model to embed lands exactly here, which is the mistake
-  # this line turns into a sentence instead of an empty vector list.
-  error:
-    - $.error
+  from:
+    - openai-embeddings
+    - ollama-native-embeddings

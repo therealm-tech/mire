@@ -1,0 +1,15 @@
+# Ollama's own `/api/embed`: the vectors arrive as a bare list of lists under
+# `embeddings`, not as one object per input under `data`.
+#
+# Its whole error is a string — `{"error": "model 'x' not found, try pulling it
+# first"}` — and a string is already a message, so nothing more is needed.
+---
+name: ollama-native-embeddings
+kind: embedding
+decode:
+  vectors:
+    - $.embeddings
+  usage:
+    - $
+  error:
+    - $.error

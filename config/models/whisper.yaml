@@ -108,11 +108,12 @@ decode:
   content:
     - $.text
     - $.result.text
-  # `$` rather than `$.error`, for the same reason qwen3.yaml gives: a gateway
-  # refusing the call puts its sentence in `error_description`, and pointing one
-  # level down hands back the code and drops the only line that explains it.
+  # What the *transcriber* says when it will not transcribe — a file it cannot
+  # read, a model it has not got. A gateway refusing the call before it ever gets
+  # here is not decoded, deliberately: that is not this endpoint talking, and its
+  # status, headers and raw body are shown whole anyway.
   error:
-    - $
+    - $.error
 
 # A diariser is the same file with different fields. pyannote-style services
 # usually want the audio plus a JSON blob of options, which is what `type:` on a
