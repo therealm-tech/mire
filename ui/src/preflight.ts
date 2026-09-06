@@ -69,9 +69,9 @@ export function preflight({
   providers,
   servers,
   token,
-  usesMcp,
   uploads = 0,
-  mcpOff = [],
+  mcpActive = [],
+  mcpDeclared = [],
 }: {
   model: ModelSummary
   /** The resolved model identity, `undefined` when the model names one that is not declared. */
@@ -81,23 +81,27 @@ export function preflight({
   /** What has been typed into this tab, for a provider that has to be asked. */
   token: string
   /**
-   * Servers switched off for the next run, which this run does not set up.
+   * The servers this run sets up, by id — one per `mcp/` file, at the stage that
+   * is picked.
    *
-   * They are out of the picture entirely: no discovery, no listing, no sign-in —
-   * so nothing about them can block a call they are not part of. It is still said out loud, in a note: a run reaching
-   * fewer servers than `mcp/` declares is a fact about the run, and finding
-   * out by reading the traffic afterwards is finding out too late.
+   * Worked out by the caller rather than here, because the MCP block has already
+   * worked it out to draw itself and two readings of "which servers is this run
+   * about" would be two things that can disagree. Empty on an embedding model,
+   * which has no loop to call a tool from: reporting "tool calls answer 409"
+   * about a run that makes none would be painting the bar red over a call that
+   * is going to go through.
    */
-  mcpOff?: string[]
+  mcpActive?: string[]
   /**
-   * Whether this run will speak to a server at all.
+   * Every server `mcp/` declares, by name, on a run that could reach one.
    *
-   * False on an embedding model, which has no loop to call a tool from. Their
-   * credentials are then not blockers of anything: reporting "tool calls answer
-   * 409" about a run that makes none would be painting the bar red over a call
-   * that is going to go through.
+   * Only to say when a run reaches none of them: nothing is on until somebody
+   * switches it on, so "the model is offered no live tool" is the ordinary state
+   * and finding that out by reading the traffic afterwards is finding out too
+   * late. Empty where there is no loop to call a tool from, which is a run with
+   * nothing to say on the subject rather than one that left something out.
    */
-  usesMcp: boolean
+  mcpDeclared?: string[]
   /**
    * How many files this tab has attached.
    *
@@ -110,12 +114,6 @@ export function preflight({
 }): Preflight {
   const blockers: Blocker[] = []
   const notes: string[] = []
-  // Every declared server is offered to every chat model, so the registry is
-  // the whole list — minus the ones this run has switched off, and minus all of
-  // them where there is no loop to call a tool from.
-  const names = servers.map((server) => server.id)
-  const declared = usesMcp ? names.filter((name) => !mcpOff.includes(name)) : []
-  const off = usesMcp ? names.filter((name) => mcpOff.includes(name)) : []
 
   // Said first, because it is the one blocker fixed by a button on the composer
   // rather than by anything in the auth panel — and on a transcriber it is the
@@ -151,7 +149,7 @@ export function preflight({
     }
   }
 
-  for (const server of servers.filter(({ id }) => declared.includes(id))) {
+  for (const server of servers.filter(({ id }) => mcpActive.includes(id))) {
     const name = server.id
     // The named provider and the ones its header templates read: any of them
     // being a browser flow with no session is a `409` on the first tool call.
@@ -169,11 +167,9 @@ export function preflight({
     }
   }
 
-  if (off.length > 0) {
+  if (mcpDeclared.length > 0 && mcpActive.length === 0) {
     notes.push(
-      `Switched off for this run: ${off.join(', ')} — not set up, and ${
-        off.length === 1 ? 'its tools are' : 'their tools are'
-      } not offered to the model.`,
+      `No MCP server in this run: ${mcpDeclared.length} declared in mcp/, none switched on — the model is offered no live tool.`,
     )
   }
 
@@ -184,7 +180,7 @@ export function preflight({
   return {
     url: model.url,
     identity: provider?.id ?? model.auth ?? 'unknown',
-    servers: declared,
+    servers: mcpActive,
     blockers,
     notes,
   }

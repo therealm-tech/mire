@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { AuthDescriptor, McpDescriptor, ModelSummary } from './api'
+import { activeServers, serverNames } from './mcp'
 import { preflight, reaches } from './preflight'
 
 const MODEL: ModelSummary = {
@@ -33,22 +34,30 @@ function run(overrides: {
   /** A chat model with servers unless a test says otherwise. */
   usesMcp?: boolean
   uploads?: number
-  mcpOff?: string[]
+  /** The servers switched on. Nothing is, unless a test says so. */
+  mcpOn?: string[]
 }) {
   const provider =
     'provider' in overrides && overrides.provider === undefined
       ? undefined
       : { ...PROVIDER, ...overrides.provider }
 
+  // The two MCP lists the way `App` works them out, from the same helpers: the
+  // bar reports the run the panel is drawing, and a second reading here would be
+  // a second thing to keep in step.
+  const servers = overrides.servers ?? []
+  const on = overrides.mcpOn ?? []
+  const usesMcp = overrides.usesMcp ?? true
+
   return preflight({
     model: { ...MODEL, ...overrides.model },
     provider,
     providers: overrides.providers ?? (provider ? [provider] : []),
-    servers: overrides.servers ?? [],
+    servers,
     token: overrides.token ?? '',
-    usesMcp: overrides.usesMcp ?? true,
     uploads: overrides.uploads ?? 0,
-    mcpOff: overrides.mcpOff ?? [],
+    mcpActive: usesMcp ? activeServers(servers, on, {}) : [],
+    mcpDeclared: usesMcp ? serverNames(servers) : [],
   })
 }
 
@@ -67,6 +76,7 @@ const TWO_SERVERS: McpDescriptor[] = [
   {
     id: 'files',
     name: 'files',
+    isDefault: true,
     url: 'https://a',
     auth: 'me',
     tools: [],
@@ -76,6 +86,7 @@ const TWO_SERVERS: McpDescriptor[] = [
   {
     id: 'search',
     name: 'search',
+    isDefault: true,
     url: 'https://b',
     auth: 'me',
     tools: [],
@@ -157,6 +168,7 @@ describe('preflight', () => {
       {
         id: 'named',
         name: 'named',
+        isDefault: true,
         url: 'https://a',
         auth: 'me',
         tools: [],
@@ -166,6 +178,7 @@ describe('preflight', () => {
       {
         id: 'templated',
         name: 'templated',
+        isDefault: true,
         url: 'https://b',
         tools: [],
         headers: [],
@@ -173,7 +186,7 @@ describe('preflight', () => {
       },
     ]
 
-    const state = run({ providers: [PROVIDER, human], servers })
+    const state = run({ providers: [PROVIDER, human], servers, mcpOn: ['named', 'templated'] })
     expect(state.blockers).toHaveLength(2)
     expect(state.blockers.every((blocker) => blocker.signIn === 'me')).toBe(true)
 
@@ -184,74 +197,65 @@ describe('preflight', () => {
         { ...human, session: { expiresInS: 600, canRefresh: true, subject: 'gleroy' } },
       ],
       servers,
+      mcpOn: ['named', 'templated'],
     })
     expect(signedIn.blockers).toEqual([])
   })
 
-  it('offers every declared server to a model that says nothing about them', () => {
-    // There is no per-model opt-in left to read: `mcp/` declares a server
-    // and every chat model is offered it.
-    const state = run({
-      servers: [
-        { id: 'files', name: 'files', url: 'https://a', tools: [], headers: [], usesAuth: [] },
-        { id: 'search', name: 'search', url: 'https://b', tools: [], headers: [], usesAuth: [] },
-      ],
-    })
+  it('reaches no server until one is switched on, and says as much', () => {
+    // Declaring a server in `mcp/` makes it available, not live: a tool call
+    // really runs somewhere, so the run reaches one because somebody said so.
+    const idle = run({ servers: TWO_SERVERS })
+    expect(idle.servers).toEqual([])
+    expect(idle.blockers).toEqual([])
+    expect(idle.notes[0]).toContain('2 declared in mcp/')
+
+    const state = run({ servers: TWO_SERVERS, mcpOn: ['files', 'search'] })
     expect(state.servers).toEqual(['files', 'search'])
+    // Nothing left out, so nothing to report.
+    expect(state.notes).toEqual([])
   })
 
   it('leaves the servers out entirely on a run that will not speak to them', () => {
-    const overrides = { providers: [PROVIDER, HUMAN], servers: TWO_SERVERS }
+    const overrides = {
+      providers: [PROVIDER, HUMAN],
+      servers: TWO_SERVERS,
+      mcpOn: ['files', 'search'],
+    }
 
     // With the servers in the run both are its business, and both want a session.
     expect(run(overrides).blockers).toHaveLength(2)
 
     // On an embedding model neither is. There is no loop, so a credential it
-    // never uses cannot refuse it — and the bar stays green, correctly.
+    // never uses cannot refuse it — and the bar stays green, correctly. Nothing
+    // is noted either: a run with no loop has not left a server out, it has no
+    // business with one.
     const loopless = run({ ...overrides, usesMcp: false })
     expect(loopless.blockers).toEqual([])
     expect(loopless.servers).toEqual([])
+    expect(loopless.notes).toEqual([])
   })
 
-  it('drops a server switched off, and says so rather than quietly shrinking', () => {
+  it('carries only the blockers of the servers this run actually reaches', () => {
     const overrides = { providers: [PROVIDER, HUMAN], servers: TWO_SERVERS }
 
-    // Both want a session nobody has: two refusals, both of them about servers
-    // this run would set up.
-    expect(run(overrides).blockers).toHaveLength(2)
-
-    // Switched off, and with it the refusal it was causing: an unticked server is
-    // one this run never discovers, lists or signs in to.
-    const narrowed = run({ ...overrides, mcpOff: ['search'] })
+    // Both want a session nobody has, and only the one switched on can refuse
+    // this call: a server left off is never discovered, listed or signed in to.
+    const narrowed = run({ ...overrides, mcpOn: ['files'] })
     expect(narrowed.servers).toEqual(['files'])
     expect(narrowed.blockers).toHaveLength(1)
     expect(narrowed.blockers[0]?.signIn).toBe('me')
-    expect(narrowed.notes[0]).toContain('search')
+    // Something is on, so the note about reaching nothing has nothing to say.
+    expect(narrowed.notes).toEqual([])
 
-    // All of them off — what the composer's **None** button asks for. Nothing to
-    // set up, nothing to refuse it, and the note is what keeps that from looking
-    // like an installation with no servers at all.
-    const none = run({ ...overrides, mcpOff: ['search', 'files'] })
-    expect(none.servers).toEqual([])
-    expect(none.blockers).toEqual([])
-    expect(none.notes[0]).toContain('files')
+    expect(run({ ...overrides, mcpOn: ['files', 'search'] }).blockers).toHaveLength(2)
   })
 
-  it('ignores a switched-off name that nothing declares any more', () => {
-    // `mcpOff` outlives a reload, and so outlives the entry it was about. A name
-    // deleted from `mcp/` is simply not in the picture — not a server this
-    // run reports having left out.
-    const state = run({ servers: TWO_SERVERS, mcpOff: ['deleted'] })
-    expect(state.servers).toEqual(['files', 'search'])
-    expect(state.notes).toEqual([])
-  })
-
-  it('says nothing about servers switched off on a run that reaches none anyway', () => {
-    // A run with no loop already leaves every server out, so a note listing the ones
-    // somebody unticked would be reporting a distinction this run does not have.
-    const loopless = run({ servers: TWO_SERVERS, mcpOff: ['files'], usesMcp: false })
-    expect(loopless.servers).toEqual([])
-    expect(loopless.notes).toEqual([])
+  it('ignores a switched-on name that nothing declares any more', () => {
+    // `mcpOn` outlives a reload, and so outlives the entry it was about. A name
+    // deleted from `mcp/` is simply not in the picture.
+    const state = run({ servers: TWO_SERVERS, mcpOn: ['deleted', 'files'] })
+    expect(state.servers).toEqual(['files'])
   })
 
   it('counts a missing decode block as a note rather than a refusal', () => {

@@ -29,6 +29,7 @@ import { EmbeddingPanel } from './components/EmbeddingPanel'
 import { EmbeddingRequest } from './components/EmbeddingRequest'
 import { Failure } from './components/Failure'
 import { Mark } from './components/Mark'
+import { McpPanel } from './components/McpPanel'
 import { ModelList } from './components/ModelList'
 import { Preflight } from './components/Preflight'
 import { Badge, Button, Panel, Spinner } from './components/primitives'
@@ -47,6 +48,7 @@ import {
 } from './conversation'
 import { download, exportFilename, runExport } from './export'
 import { logger } from './logger'
+import { activeServers, serverNames } from './mcp'
 import { useMediaQuery } from './media'
 import { preflight } from './preflight'
 import { usePersisted } from './storage'
@@ -174,18 +176,22 @@ export function App() {
   // loop that silently streamed would be a loop that silently stopped calling
   // tools.
   const [streaming, setStreaming] = usePersisted('stream', z.boolean(), false)
-  // `null` is auto: every server settles its own revision the way it always did.
-  const [mcpProtocol, setMcpProtocol] = usePersisted<string | null>(
-    'mcpProtocol',
-    z.string().nullable(),
-    null,
+  // The servers switched on, and nothing is on to begin with. A tool call is the
+  // one thing `mire` does that has effects outside this process — it really runs,
+  // on somebody's real server — so a run reaches one because somebody said so in
+  // this tab, never because a file was sitting in `mcp/`. Names are `mcp/`'s, so
+  // this is global to the tab; a file's name rather than a stage's id, because
+  // switching a server on is a statement about the server and it survives
+  // changing which stage of it you were asking.
+  const [mcpOn, setMcpOn] = usePersisted<string[]>('mcpOn', z.array(z.string()), [])
+  // The stage last picked, per server name — the same memory as `stages` below,
+  // for the same reason: a staged server is two endpoints, and coming back to
+  // one is coming back to the stage the question was about.
+  const [mcpStages, setMcpStages] = usePersisted<Record<string, string>>(
+    'mcpStages',
+    z.record(z.string(), z.string()),
+    {},
   )
-  // The servers switched off, rather than the ones left on: `mcp/` is a file
-  // somebody edits, and remembering the *on* set would quietly leave a server
-  // added this morning out of every run until somebody noticed. Names are
-  // `mcp/`'s and so global to the tab — which is also all they can be now
-  // that every declared server is offered to every model.
-  const [mcpOff, setMcpOff] = usePersisted<string[]>('mcpOff', z.array(z.string()), [])
   // The stage last picked, per model name. Coming back to a model is coming back
   // to the endpoint you were asking, which is rarely its default one: the whole
   // reason to have stages is that `prod` is where the question was. A name whose
@@ -206,6 +212,9 @@ export function App() {
   // The auth detail, which is a thing you read once. Shut by default so the box
   // you actually came to type in starts near the top of the page.
   const [authOpen, setAuthOpen] = useState(false)
+  // The servers, the same way and for the same reason: read when it is the
+  // question, folded away when it is not.
+  const [mcpOpen, setMcpOpen] = useState(false)
   const [stopped, setStopped] = useState(false)
   // Laptop or phone. The list is a column on one and a disclosure on the other,
   // which is two different sets of controls rather than two stylesheets.
@@ -337,33 +346,39 @@ export function App() {
   const hasPrompt = model?.hasPrompt !== false
 
   /**
-   * Whether the declared MCP servers are part of the run that is about to happen.
+   * Whether this run has MCP servers to decide about at all.
    *
-   * Every send goes through the loop, so a declared server is in the picture
-   * whatever the turn budget: one turn against a real server is a fair question —
-   * does the model ask for the tool `tools/list` showed it? — and `max turns` is
-   * not the place to answer it. Leaving them out is what the **Servers** boxes
-   * are for, one at a time or all of them at once.
+   * Not whether it reaches any — that is each switch's answer, and they start
+   * off. Every send goes through the loop, so a server that is on is in the
+   * picture whatever the turn budget: one turn against a real server is a fair
+   * question — does the model ask for the tool `tools/list` showed it? — and
+   * `max turns` is not the place to answer it.
    *
-   * Only on a chat model, though: `kind: embedding` has no loop to be in, and
-   * the server refuses one outright.
+   * Only on a chat model: `kind: embedding` has no loop to be in, and the server
+   * refuses one outright. False also with an empty `mcp/`, where there is
+   * nothing to open a block on.
    */
   const usesMcp = model?.kind === 'chat' && (mcp?.servers.length ?? 0) > 0
 
-  /** Every declared server, which is what a chat model is offered. */
-  const declaredMcp = useMemo(() => (mcp ? mcp.servers.map((server) => server.id) : []), [mcp])
+  /**
+   * Every declared server, by the name of the file that declared it.
+   *
+   * One name per file rather than per stage: the block shows one card per file,
+   * and the switch on it is about the file.
+   */
+  const declaredMcp = useMemo(() => (mcp ? serverNames(mcp.servers) : []), [mcp])
 
   /**
-   * The servers this run will actually set up.
+   * The servers this run will actually set up, by id.
    *
-   * Every declared one, minus whatever the composer has switched off — and empty
-   * when the run speaks to none of them at all. Everything that describes the run
-   * reads this rather than the registry: the bar above the box, the identities in
-   * the auth panel, and the list that goes out with the request.
+   * One id per file — the stage that is picked, and only that one — minus
+   * whatever is switched off, and empty when the run speaks to none of them at
+   * all. Everything that describes the run reads this rather than the registry:
+   * the bar above the box, and the list that goes out with the request.
    */
   const activeMcp = useMemo(
-    () => (usesMcp ? declaredMcp.filter((name) => !mcpOff.includes(name)) : []),
-    [usesMcp, declaredMcp, mcpOff],
+    () => (usesMcp && mcp ? activeServers(mcp.servers, mcpOn, mcpStages) : []),
+    [usesMcp, mcp, mcpOn, mcpStages],
   )
 
   /** What the next call would do, and what would stop it. */
@@ -376,47 +391,33 @@ export function App() {
             providers: auth.providers,
             servers: mcp.servers,
             token,
-            usesMcp,
             uploads: attachments.length,
-            mcpOff,
+            mcpActive: activeMcp,
+            mcpDeclared: usesMcp ? declaredMcp : [],
           })
         : null,
-    [model, provider, auth, mcp, token, usesMcp, attachments, mcpOff],
+    [model, provider, auth, mcp, token, attachments, activeMcp, usesMcp, declaredMcp],
   )
 
   /** Puts one server in or out of the next run. */
   const toggleMcp = useCallback(
     (name: string, on: boolean) => {
-      setMcpOff((current) => {
-        if (on) {
+      setMcpOn((current) => {
+        if (!on) {
           return current.filter((entry) => entry !== name)
         }
         return current.includes(name) ? current : [...current, name]
       })
     },
-    [setMcpOff],
+    [setMcpOn],
   )
 
-  /**
-   * Every server in, or every server out, in one go.
-   *
-   * With every declared server offered to every model there can be a good few
-   * of them, and the two questions worth a single click are the extremes: "what
-   * does the loop do with none of these?" and "put them all back". Ticking six
-   * boxes twice to ask that is how you stop asking it.
-   *
-   * Only the declared ones are touched. `mcpOff` is remembered across reloads and
-   * a server that has since been deleted from `mcp/` has no business being
-   * revived — or dropped — by a button about the ones that are there.
-   */
-  const toggleAllMcp = useCallback(
-    (on: boolean) => {
-      setMcpOff((current) => {
-        const untouched = current.filter((name) => !declaredMcp.includes(name))
-        return on ? untouched : [...untouched, ...declaredMcp]
-      })
+  /** Which stage of one server the next run uses. */
+  const pickMcpStage = useCallback(
+    (name: string, stage: string) => {
+      setMcpStages((current) => ({ ...current, [name]: stage }))
     },
-    [setMcpOff, declaredMcp],
+    [setMcpStages],
   )
 
   // One kind of blocker is fixed by a field inside the panel rather than by a
@@ -588,19 +589,12 @@ export function App() {
       if (attachments.length > 0) {
         body.uploads = attachments.map((file) => file.id)
       }
-      // Left out while every server is on, for the same reason: `mcp/`
-      // already says which ones, and a copy travelling alongside is a second
-      // thing that can disagree with it. Sent the moment one is switched off —
-      // including as an empty list, which is a run reaching none of them and not
-      // the same as saying nothing.
-      if (activeMcp.length !== declaredMcp.length) {
+      // Always said, `[]` included. Leaving the field out asks for every server
+      // `mcp/` declares, and this tab never means that: what a run reaches is
+      // what somebody switched on, so the request carries it rather than
+      // inheriting a default that would quietly set up the lot.
+      if (usesMcp) {
         body.mcpServers = activeMcp
-      }
-      // Left out entirely on auto: the field's absence is what tells the server
-      // to settle the revision itself, and sending a value it worked out anyway
-      // would be a second opinion nobody asked for.
-      if (mcpProtocol !== null) {
-        body.mcpProtocol = mcpProtocol
       }
 
       runAgent(
@@ -690,18 +684,7 @@ export function App() {
         })
         .finally(settle)
     },
-    [
-      model,
-      token,
-      attachments,
-      maxIterations,
-      streaming,
-      mcpProtocol,
-      activeMcp,
-      declaredMcp,
-      begin,
-      settle,
-    ],
+    [model, token, attachments, maxIterations, streaming, usesMcp, activeMcp, begin, settle],
   )
 
   const send = useCallback(() => runLoop(ask()), [runLoop, ask])
@@ -919,24 +902,47 @@ export function App() {
             <Preflight
               state={ready}
               authOpen={authOpen}
+              mcpOpen={mcpOpen}
+              showMcp={usesMcp}
               signingIn={signingIn}
               onSignIn={signIn}
               onOpenAuth={() => setAuthOpen((open) => !open)}
+              onOpenMcp={() => setMcpOpen((open) => !open)}
             />
           ) : null}
 
           {authOpen ? (
             <AuthPanel
               auth={auth}
-              mcp={mcp}
-              names={activeMcp}
               model={model}
               provider={provider}
               token={token}
               signingIn={signingIn}
               loginError={loginError}
-              showMcp={usesMcp}
               onToken={setToken}
+              onLogin={signIn}
+              onLogout={signOut}
+            />
+          ) : null}
+
+          {/*
+            Its own block, opened from its own button on the bar: which servers a
+            run reaches, at which stage, and as whom is one question about the
+            call that is about to happen, and it is not the one **Auth** answers.
+            Shut by default like the other, because a run that reaches no server
+            has nothing here to read.
+          */}
+          {usesMcp && mcpOpen ? (
+            <McpPanel
+              servers={mcp.servers}
+              providers={auth.providers}
+              on={mcpOn}
+              stages={mcpStages}
+              disabled={busy}
+              signingIn={signingIn}
+              loginError={loginError}
+              onToggle={toggleMcp}
+              onStage={pickMcpStage}
               onLogin={signIn}
               onLogout={signOut}
             />
@@ -955,11 +961,6 @@ export function App() {
               maxIterations={maxIterations}
               streaming={streaming}
               error={callError ? callError.body : null}
-              revisions={mcp.revisions}
-              mcpProtocol={usesMcp ? mcpProtocol : null}
-              mcpServers={usesMcp ? declaredMcp : []}
-              mcpOff={mcpOff}
-              showProtocol={usesMcp}
               attachments={attachments}
               attaching={attaching}
               needsUpload={needsUpload}
@@ -967,9 +968,6 @@ export function App() {
               onPrompt={setPrompt}
               onMaxIterations={setMaxIterations}
               onStreaming={setStreaming}
-              onMcpProtocol={setMcpProtocol}
-              onMcpServer={toggleMcp}
-              onMcpServers={toggleAllMcp}
               onAttach={attach}
               onDetach={detach}
               onSend={send}

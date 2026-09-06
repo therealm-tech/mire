@@ -50,6 +50,10 @@ pub struct McpDescriptor {
     /// Stage this reading of the file belongs to, absent when it declares none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stage: Option<String>,
+    /// The file's `default_stage:`, and `true` for a file that declares no
+    /// stages at all. The stage a bare `name` reaches, and the one a UI opens
+    /// on when nobody has picked another.
+    pub is_default: bool,
     /// The endpoint, so the UI can show what it is about to talk to.
     pub url: String,
     /// Auth provider it authenticates with, if any.
@@ -230,10 +234,7 @@ impl McpRegistry {
             // the file with it rather than leaving a picker with a hole in it.
             let built = match staged
                 .into_iter()
-                .map(|entry| {
-                    build(path, entry.value, entry.stage.as_deref())
-                        .map(|(server, descriptor)| (entry.default, server, descriptor))
-                })
+                .map(|entry| build(path, entry.value, entry.stage.as_deref(), entry.default))
                 .collect::<Result<Vec<_>, LoadIssue>>()
             {
                 Ok(built) => built,
@@ -258,7 +259,7 @@ impl McpRegistry {
             }
             self.descriptors.retain(|existing| existing.name != name);
 
-            for (default, server, descriptor) in built {
+            for (server, descriptor) in built {
                 debug!(
                     id = %descriptor.id,
                     url = %server.url,
@@ -266,7 +267,7 @@ impl McpRegistry {
                     capture = server.capture.len(),
                     "MCP server registered"
                 );
-                if default {
+                if descriptor.is_default {
                     self.defaults.insert(name.clone(), descriptor.id.clone());
                 }
                 self.clients
@@ -329,6 +330,7 @@ fn build(
     path: &Path,
     config: ServerConfig,
     stage: Option<&str>,
+    default: bool,
 ) -> Result<(McpServer, McpDescriptor), LoadIssue> {
     let id = stage::id(&config.name, stage);
     let issue = |message: String| LoadIssue::new(path, format!("MCP server `{id}`: {message}"));
@@ -355,7 +357,7 @@ fn build(
         hooks,
         capture: config.capture,
     };
-    let descriptor = describe_server(&server, &config.name, stage, config.headers.keys());
+    let descriptor = describe_server(&server, &config.name, stage, default, config.headers.keys());
     Ok((server, descriptor))
 }
 
@@ -703,12 +705,14 @@ fn describe_server<'a>(
     server: &McpServer,
     name: &str,
     stage: Option<&str>,
+    default: bool,
     declared: impl Iterator<Item = &'a String>,
 ) -> McpDescriptor {
     McpDescriptor {
         id: server.name.clone(),
         name: name.to_owned(),
         stage: stage.map(ToOwned::to_owned),
+        is_default: default,
         url: server.url.to_string(),
         auth: server.auth.clone(),
         tools: server.tools.clone(),
@@ -832,6 +836,30 @@ stages:
         assert_eq!(prod.url, "https://mcp.internal/mcp");
         assert_eq!(prod.name, "files");
         assert_eq!(prod.stage.as_deref(), Some("prod"));
+        // Which of the two a bare `files` reaches, said on the entry rather than
+        // left for a caller to work out: a listing sorted by id opens on
+        // `files@local` here and on the wrong stage in the next file along.
+        assert!(!prod.is_default);
+        assert!(
+            registry
+                .descriptors()
+                .iter()
+                .any(|descriptor| descriptor.id == "files@local" && descriptor.is_default)
+        );
+    }
+
+    /// A file that declares no stage is its own default: the id is the name, and
+    /// a UI grouping by name has one entry to open on.
+    #[test]
+    fn an_unstaged_server_is_the_default_reading_of_itself() {
+        let dir = write("unstaged", "name: files\nurl: https://mcp.internal/mcp\n");
+
+        let registry = McpRegistry::load(&dir, &Client::new());
+
+        let files = &registry.descriptors()[0];
+        assert_eq!(files.id, "files");
+        assert!(files.stage.is_none());
+        assert!(files.is_default);
     }
 
     #[test]

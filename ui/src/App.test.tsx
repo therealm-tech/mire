@@ -146,6 +146,7 @@ const MCP = {
     {
       id: 'dev',
       name: 'dev',
+      isDefault: true,
       url: 'http://127.0.0.1:11436/mcp',
       auth: 'me',
       tools: ['get_weather'],
@@ -155,15 +156,46 @@ const MCP = {
     {
       id: 'keyed',
       name: 'keyed',
+      isDefault: true,
       url: 'https://files.internal/mcp',
       tools: [],
       headers: ['x-api-key'],
       usesAuth: ['gateway'],
     },
   ],
-  // What this build speaks, newest first, as the server reports it. The UI keeps
-  // no list of its own.
-  revisions: ['2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26'],
+  issues: [],
+}
+
+/**
+ * One file declaring the same server twice, which is what stages are.
+ *
+ * Listed the way the registry lists them — by id — so the default is not
+ * whichever sorts first, and a panel that opened on `servers[0]` would open on
+ * the wrong endpoint.
+ */
+const STAGED_MCP = {
+  servers: [
+    {
+      id: 'files@prod',
+      name: 'files',
+      stage: 'prod',
+      isDefault: false,
+      url: 'https://files.internal/mcp',
+      tools: [],
+      headers: [],
+      usesAuth: [],
+    },
+    {
+      id: 'files@sandbox',
+      name: 'files',
+      stage: 'sandbox',
+      isDefault: true,
+      url: 'https://sandbox.internal/mcp',
+      tools: [],
+      headers: [],
+      usesAuth: [],
+    },
+  ],
   issues: [],
 }
 
@@ -414,7 +446,7 @@ function mockApi(routes: Record<string, unknown>) {
 }
 
 /** Records every `api/agent` body, so a test can assert what went out. */
-function recordingApi(answers: string[]) {
+function recordingApi(answers: string[], mcp: unknown = MCP) {
   const sent: Array<Record<string, unknown>> = []
   let turn = 0
 
@@ -427,7 +459,7 @@ function recordingApi(answers: string[]) {
       return Promise.resolve(Response.json(AUTH))
     }
     if (url.endsWith('api/mcp')) {
-      return Promise.resolve(Response.json(MCP))
+      return Promise.resolve(Response.json(mcp))
     }
     if (url.endsWith('api/prompts')) {
       return Promise.resolve(Response.json(PROMPTS))
@@ -442,6 +474,26 @@ function recordingApi(answers: string[]) {
   })
 
   return { fetchMock, sent }
+}
+
+/**
+ * Unfolds the MCP block, and puts the named servers in the run.
+ *
+ * Nothing is on until somebody says so — a tool call really runs somewhere — so
+ * a test about what a run does with a server has to say it, in the two gestures
+ * the page asks for. Already-open and already-on are not failures.
+ */
+async function openMcp(user: ReturnType<typeof userEvent.setup>, ...names: string[]) {
+  const toggle = await screen.findByRole('button', { name: /^(MCP|Hide MCP)$/ })
+  if (toggle.textContent === 'MCP') {
+    await user.click(toggle)
+  }
+  for (const name of names) {
+    const control = screen.getByRole('switch', { name })
+    if (!(control as HTMLInputElement).checked) {
+      await user.click(control)
+    }
+  }
 }
 
 /**
@@ -591,10 +643,12 @@ describe('App', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    // Every declared server is offered to every chat model, so this panel is
-    // about the installation rather than about the model in front of you.
+    // Every declared server is reachable by every chat model, so this block is
+    // about the installation rather than about the model in front of you — and
+    // it opens from its own button rather than from **Auth**, which answers the
+    // other identity question.
     await user.click(await screen.findByRole('button', { name: /^chat/ }))
-    await openAuth(user)
+    await openMcp(user, 'dev', 'keyed')
     expect(screen.getByRole('heading', { name: 'MCP servers' })).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: /guarded/ }))
@@ -627,57 +681,44 @@ describe('App', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    // Both declared servers, their identities, and the revision to reach them in
-    // — all of it about the run that is about to happen.
+    // Nothing until somebody says so: the servers are declared, and the bar says
+    // the run reaches none of them rather than leaving it to be discovered in
+    // the traffic afterwards.
     await user.click(await screen.findByRole('button', { name: /guarded/ }))
-    expect(screen.getByRole('heading', { name: 'MCP servers' })).toBeInTheDocument()
-    expect(screen.getByLabelText('Protocol')).toBeInTheDocument()
-    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('2 MCP servers')
+    const bar = () => screen.getByLabelText('What the next call will do')
+    expect(bar()).toHaveTextContent(/2 declared in mcp\/, none switched on/)
+    expect(screen.queryByText(/answer 409 until/)).not.toBeInTheDocument()
+
+    // Switched on, both are the run's business — and with them the `409` one of
+    // their identities is promising.
+    await openMcp(user, 'dev', 'keyed')
+    expect(bar()).toHaveTextContent('2 MCP servers')
     expect(screen.getByText(/answer 409 until/)).toBeInTheDocument()
 
     // A budget of one turn changes none of that. One turn against a real server
     // is a fair question — does the model ask for the tool it was shown? — so the
     // servers stay, and so does the 409 standing between it and an answer.
     await oneTurn()
-    expect(screen.getByRole('heading', { name: 'MCP servers' })).toBeInTheDocument()
-    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('2 MCP servers')
+    expect(bar()).toHaveTextContent('2 MCP servers')
     expect(screen.getByText(/answer 409 until/)).toBeInTheDocument()
 
     // Switching them off is what takes them out, which is the control that says
     // so: no discovery, no listing, and no 409 to be blocked by.
-    const servers = within(screen.getByRole('group', { name: 'Servers' }))
-    await user.click(servers.getByRole('button', { name: 'None' }))
-    expect(screen.getByLabelText('What the next call will do')).not.toHaveTextContent('2 MCP')
+    await user.click(screen.getByRole('switch', { name: 'dev' }))
+    await user.click(screen.getByRole('switch', { name: 'keyed' }))
+    expect(bar()).not.toHaveTextContent('2 MCP')
     expect(screen.queryByText(/answer 409 until/)).not.toBeInTheDocument()
   })
 
-  it('offers the revisions the server says it speaks, and negotiates by default', async () => {
-    const user = userEvent.setup()
-    render(<App />)
-
-    await user.click(await screen.findByRole('button', { name: /guarded/ }))
-    const protocol = screen.getByLabelText('Protocol')
-
-    // The list comes from `GET /api/mcp` rather than from a copy kept here, so
-    // it cannot offer a revision this build was never taught.
-    expect(
-      within(protocol)
-        .getAllByRole('option')
-        .map((option) => option.textContent),
-    ).toEqual(['auto', '2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26'])
-    expect(protocol).toHaveValue('')
-    expect(screen.getByText(/Negotiated per server/)).toBeInTheDocument()
-  })
-
-  it('offers neither a server nor a revision when mcp/ declares none', async () => {
-    // Nothing to speak to, nothing to choose. It is the registry that decides
-    // this now: with a server declared, every chat model is offered it.
+  it('offers no MCP block when mcp/ declares none', async () => {
+    // Nothing to speak to, nothing to switch on. It is the registry that decides
+    // this: with a server declared, every chat model is offered it.
     vi.stubGlobal(
       'fetch',
       mockApi({
         'api/models': MODELS,
         'api/auth': AUTH,
-        'api/mcp': { servers: [], revisions: MCP.revisions, issues: [] },
+        'api/mcp': { servers: [], issues: [] },
         'api/prompts': PROMPTS,
       }),
     )
@@ -685,69 +726,64 @@ describe('App', () => {
     render(<App />)
 
     await screen.findByRole('button', { name: /^chat/ })
-    expect(screen.queryByLabelText('Protocol')).not.toBeInTheDocument()
-    expect(screen.queryByRole('group', { name: 'Servers' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^MCP$/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'MCP servers' })).not.toBeInTheDocument()
     expect(screen.getByLabelText('What the next call will do')).not.toHaveTextContent('MCP server')
   })
 
-  it('states the chosen revision on the wire and says nothing on auto', async () => {
-    const { fetchMock, sent } = recordingApi(['pong', 'pong'])
+  it('never states a revision on the wire, which mcp/ settles', async () => {
+    const { fetchMock, sent } = recordingApi(['pong'])
     vi.stubGlobal('fetch', fetchMock)
 
     const user = userEvent.setup()
     render(<App />)
 
+    // The revision a server is spoken to is `protocol_version:` in `mcp/`,
+    // per server, settled on first use. There is nothing in the tab to disagree
+    // with it, and nothing on the wire either.
     await user.click(await screen.findByRole('button', { name: /guarded/ }))
-    // First, because a stream speaks to no server: the selector is inert until
-    // the run is one that can call a tool.
-    await user.selectOptions(screen.getByLabelText('Protocol'), '2025-03-26')
+    await openMcp(user, 'dev')
     await user.click(screen.getByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(1))
 
-    expect(sent[0]?.mcpProtocol).toBe('2025-03-26')
-
-    // Back to auto, and the field goes away entirely: its absence is what tells
-    // the server to settle the revision itself.
-    await user.selectOptions(screen.getByLabelText('Protocol'), '')
-    await user.type(screen.getByRole('textbox', { name: /message/i }), 'again')
-    await user.click(screen.getByRole('button', { name: 'Send' }))
-    await waitFor(() => expect(sent).toHaveLength(2))
-
-    expect(sent[1]).not.toHaveProperty('mcpProtocol')
+    expect(sent[0]).not.toHaveProperty('mcpProtocol')
   })
 
-  it('takes a server out of the run when it is switched off, and puts it back', async () => {
+  it('puts a server in the run when it is switched on, and takes it back out', async () => {
     const user = userEvent.setup()
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: /guarded/ }))
+    await openMcp(user)
 
-    // Every declared server, all on: `mcp/`'s word, unedited.
+    // Every declared server, none of them on: `mcp/` says what exists, and this
+    // tab says what the next run reaches.
     expect(
-      within(screen.getByRole('group', { name: 'Servers' }))
-        .getAllByRole('checkbox')
+      within(panel('MCP servers'))
+        .getAllByRole('switch')
         .map((box) => (box as HTMLInputElement).checked),
-    ).toEqual([true, true])
-    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('2 MCP servers')
+    ).toEqual([false, false])
 
-    // `dev` off: out of the bar, out of the auth panel — and with it the `409`
-    // its unsigned-in provider was promising, because this run never asks.
-    await user.click(screen.getByRole('checkbox', { name: 'dev' }))
+    // The card of a server that is out says what that means. One that vanished
+    // from the page would be one you have to remember exists.
+    const dev = () => within(screen.getByTestId('mcp-dev'))
+    expect(dev().getByText(/Out of this run/)).toBeInTheDocument()
+    expect(dev().queryByRole('button', { name: /Sign in to me/ })).not.toBeInTheDocument()
+
+    // `dev` on: on the bar, and with it the `409` its unsigned-in provider was
+    // promising all along, because now this run asks.
+    await user.click(screen.getByRole('switch', { name: 'dev' }))
     expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('1 MCP server')
-    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent(
-      /Switched off for this run: dev/,
-    )
-    expect(screen.queryByTestId('mcp-dev')).not.toBeInTheDocument()
-    expect(screen.getByTestId('mcp-keyed')).toBeInTheDocument()
-    expect(screen.queryByText(/answer 409 until/)).not.toBeInTheDocument()
+    expect(dev().queryByText(/Out of this run/)).not.toBeInTheDocument()
+    expect(screen.getByText(/answer 409 until/)).toBeInTheDocument()
 
-    // And back, because a switch that only goes one way is a trap.
-    await user.click(screen.getByRole('checkbox', { name: 'dev' }))
-    expect(screen.getByTestId('mcp-dev')).toBeInTheDocument()
-    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('2 MCP servers')
+    // And back out, because a switch that only goes one way is a trap.
+    await user.click(screen.getByRole('switch', { name: 'dev' }))
+    expect(dev().getByText(/Out of this run/)).toBeInTheDocument()
+    expect(screen.queryByText(/answer 409 until/)).not.toBeInTheDocument()
   })
 
-  it('names the servers on the wire only once one is off', async () => {
+  it('always names the servers on the wire, an empty list included', async () => {
     const { fetchMock, sent } = recordingApi(['pong', 'pong', 'pong'])
     vi.stubGlobal('fetch', fetchMock)
 
@@ -758,83 +794,88 @@ describe('App', () => {
     await user.click(screen.getByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(1))
 
-    // All on: `mcp/` already says which, and a copy alongside it is a
-    // second thing that can disagree with the file.
-    expect(sent[0]).not.toHaveProperty('mcpServers')
+    // None on, and said so rather than left out: the field's absence asks for
+    // every server `mcp/` declares, which is never what this tab means.
+    expect(sent[0]?.mcpServers).toEqual([])
 
-    await user.click(screen.getByRole('checkbox', { name: 'keyed' }))
+    await openMcp(user, 'dev')
     await user.type(screen.getByRole('textbox', { name: /message/i }), 'again')
     await user.click(screen.getByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(2))
 
     expect(sent[1]?.mcpServers).toEqual(['dev'])
 
-    // Every one off is a list of none, not a silence: saying nothing would be
-    // asking for both.
-    await user.click(screen.getByRole('checkbox', { name: 'dev' }))
+    await user.click(screen.getByRole('switch', { name: 'keyed' }))
     await user.type(screen.getByRole('textbox', { name: /message/i }), 'and again')
     await user.click(screen.getByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(3))
 
-    expect(sent[2]?.mcpServers).toEqual([])
+    expect(sent[2]?.mcpServers).toEqual(['dev', 'keyed'])
   })
 
-  it('switches every server off and back on in one press', async () => {
-    const { fetchMock, sent } = recordingApi(['pong', 'pong'])
+  it('sets up one stage of a staged server, and names the one it took', async () => {
+    const { fetchMock, sent } = recordingApi(['pong', 'pong', 'pong'], STAGED_MCP)
     vi.stubGlobal('fetch', fetchMock)
 
     const user = userEvent.setup()
     render(<App />)
 
-    await user.click(await screen.findByRole('button', { name: /guarded/ }))
+    await user.click(await screen.findByRole('button', { name: /^chat/ }))
+    await openMcp(user, 'files')
 
-    const servers = () => within(screen.getByRole('group', { name: 'Servers' }))
-    // Every one already on, so there is nothing for **All** to do — and it says
-    // so rather than disappearing and having to be found again later.
-    expect(servers().getByRole('button', { name: 'All' })).toBeDisabled()
-
-    await user.click(servers().getByRole('button', { name: 'None' }))
-    expect(
-      servers()
-        .getAllByRole('checkbox')
-        .every((box) => !(box as HTMLInputElement).checked),
-    )
-    expect(servers().getByRole('button', { name: 'None' })).toBeDisabled()
-    expect(screen.getByLabelText('What the next call will do')).not.toHaveTextContent('MCP server')
+    // One card for the file, not one per stage: two stages are two answers to
+    // the same question, and a run takes one of them — which is exactly what a
+    // model's stages are.
+    const files = () => within(screen.getByTestId('mcp-files'))
+    expect(screen.getAllByRole('switch')).toHaveLength(1)
+    expect(files().getByText('https://sandbox.internal/mcp')).toBeInTheDocument()
+    expect(files().getByRole('button', { name: /sandbox/ })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('files@sandbox')
 
     await user.click(screen.getByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(1))
-    expect(sent[0]?.mcpServers).toEqual([])
+    // One of the two declarations, named: `mcp/`'s word alone would set up both.
+    expect(sent[0]?.mcpServers).toEqual(['files@sandbox'])
 
-    // And all the way back, which is the other half of the pair being worth a
-    // button at all.
-    await user.click(servers().getByRole('button', { name: 'All' }))
-    expect(
-      servers()
-        .getAllByRole('checkbox')
-        .every((box) => (box as HTMLInputElement).checked),
-    )
-    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('2 MCP servers')
+    // The other stage is another endpoint, with its own address and its own
+    // session — so picking it changes what the card says as well as what goes
+    // out.
+    await user.click(files().getByRole('button', { name: 'prod' }))
+    expect(files().getByText('https://files.internal/mcp')).toBeInTheDocument()
+    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('files@prod')
 
     await user.type(screen.getByRole('textbox', { name: /message/i }), 'again')
     await user.click(screen.getByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(2))
-    expect(sent[1]).not.toHaveProperty('mcpServers')
+    expect(sent[1]?.mcpServers).toEqual(['files@prod'])
+
+    // Switched off, the stages go with it: there is no run for one to be the
+    // stage of, and the pick is remembered for when there is.
+    await user.click(screen.getByRole('switch', { name: 'files' }))
+    expect(files().getByRole('button', { name: 'prod' })).toBeDisabled()
+
+    await user.type(screen.getByRole('textbox', { name: /message/i }), 'and again')
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(sent).toHaveLength(3))
+    expect(sent[2]?.mcpServers).toEqual([])
   })
 
   it('leaves the servers out of an embedding model, which has no loop to be in', async () => {
     const user = userEvent.setup()
     render(<App />)
 
-    // Every declared server is offered to every *chat* model. `kind:
+    // Every declared server is reachable by every *chat* model. `kind:
     // embedding` has no agent loop for one to be part of, whatever the turn
     // budget this tab remembers from the model that was on before.
     await user.click(await screen.findByRole('button', { name: /^chat/ }))
-    await openAuth(user)
+    await openMcp(user, 'dev')
     expect(screen.getByRole('heading', { name: 'MCP servers' })).toBeInTheDocument()
 
+    // The block and the button that opens it, both gone: there is no loop for a
+    // tool call to be part of, so there is nothing here to decide.
     await user.click(screen.getByRole('button', { name: /embed/ }))
     expect(screen.queryByRole('heading', { name: 'MCP servers' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^MCP$/ })).not.toBeInTheDocument()
     expect(screen.getByLabelText('What the next call will do')).not.toHaveTextContent('MCP server')
   })
 
@@ -2404,6 +2445,7 @@ describe('browser login', () => {
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: /guarded/ }))
+    await openMcp(user, 'dev')
     await user.click(
       within(screen.getByTestId('mcp-dev')).getByRole('button', { name: /Sign in to me/ }),
     )
@@ -2502,6 +2544,7 @@ describe('browser login', () => {
 
     // `guarded` calls the model as `pasted`, so `me` appears nowhere but here.
     await user.click(await screen.findByRole('button', { name: /guarded/ }))
+    await openMcp(user, 'dev')
     const dev = within(screen.getByTestId('mcp-dev'))
     expect(dev.getByText('gleroy')).toBeInTheDocument()
 
@@ -2888,7 +2931,7 @@ describe('preflight', () => {
       mockApi({
         'api/models': MODELS,
         'api/auth': AUTH,
-        'api/mcp': { servers: [], revisions: MCP.revisions, issues: [] },
+        'api/mcp': { servers: [], issues: [] },
         'api/prompts': PROMPTS,
       }),
     )
@@ -2907,6 +2950,7 @@ describe('preflight', () => {
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: /guarded/ }))
+    await openMcp(user, 'dev', 'keyed')
     expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('2 MCP servers')
   })
 
@@ -2946,6 +2990,7 @@ describe('preflight', () => {
 
     // `as-me` calls as a human, and nobody is signed in.
     await user.click(await screen.findByRole('button', { name: /as-me/ }))
+    await openMcp(user, 'dev')
     const bar = screen.getByLabelText('What the next call will do')
     expect(within(bar).getByText('blocked')).toBeInTheDocument()
     expect(bar).toHaveTextContent('Nobody is signed in to me')

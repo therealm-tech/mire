@@ -14,12 +14,12 @@ url: https://mcp.internal/mcp
 auth: keycloak-workload
 ```
 
-That is the whole opt-in. Every server declared there is offered to every
-`kind: chat` model — there is no second list to keep in step, and a server
-added to this file is reachable from the model you were already running.
-Declaring it is the deliberate act, because a tool call here really runs
-somewhere; leaving one out of a single run is what the composer's **Servers** row
-and `mcpServers:` are [for](#switching-one-off-for-a-run).
+That declares it, and declaring is all it does. Every server in that directory is
+reachable by every `kind: chat` model — there is no second list to keep in step —
+but **nothing is live until a run says so**: a tool call here really runs, on
+somebody's real server, so which servers a run reaches is the switch on its card
+in the **MCP servers** block and `mcpServers:` on the request
+[decide](#choosing-what-a-run-reaches), and they start at none.
 
 At the start of a run, `mire` asks each server what it offers, declares those
 tools to the model, and when the model calls one, **calls it for real**. The
@@ -108,75 +108,74 @@ own tenant header. Same revision either way, and not the same fact — `settled`
 rather than a label: each settles on first use and holds its own session, so
 nothing one of them agreed is assumed by the other.
 
-### Or choose it per run
+### Or state it on the request
 
-Editing a file, restarting and putting it back is a lot of ceremony for one
-question. The **Protocol** dropdown in the composer — next to **max turns**,
-because both are parameters of the run — asks it directly, and `POST /api/agent`
-takes the same thing:
+`mcp/` is where a pin belongs, and the UI has nothing that disagrees with it: a
+revision is a property of the server, not of the tab that happens to be asking.
+`POST /api/agent` still takes one, for a caller scripting the question "does this
+endpoint still work on `2025-03-26`?" without editing the file:
 
 ```json
 { "model": "chat", "prompt": "weather in Paris?", "mcpProtocol": "2025-03-26" }
 ```
 
-The dropdown is there for a chat model only, and so is the endpoint that reads
-it: an embedding call opens no connection to a server, so there is no revision
-for it to be spoken in.
+The field is read on a chat run only: an embedding call opens no connection to a
+server, so there is no revision for it to be spoken in.
 
-`auto` — the default, and the field simply left out — is the negotiation as
-described above, with `protocol_version:` still in charge where a server declares
-one. Naming a revision overrides both, for that run and no other: it applies to
-every server the model reaches (one trace speaking two revisions is a result
-nobody can attribute), it is stated rather than probed for, and it leaves the
-revision every other caller is speaking exactly where it was. `mcp/` remains
-the place for a pin you want to keep. A revision this build does not speak is a
-`422` before anything is sent, and `GET /api/mcp` lists the ones it does.
+Left out — which is what the UI always does — each server settles its own as
+described above, with `protocol_version:` in charge where the file declares one.
+Naming a revision overrides both, for that request and no other: it applies to
+every server the run reaches (one trace speaking two revisions is a result nobody
+can attribute), it is stated rather than probed for, and it leaves the revision
+every other caller is speaking exactly where it was. A revision this build does
+not speak is a `422` before anything is sent, and `GET /api/mcp` lists the ones
+it does.
 
 A session that the server has forgotten — a restart, an expiry, a different
 replica — comes back as a `404` to a request that carried one. `mire` handshakes
 again and replays the call once, so you see the listing rather than the
 plumbing. Twice in a row is reported, because at that point it is not plumbing.
 
-## Switching one off for a run
+## Choosing what a run reaches
 
-Which servers exist at all is `mcp/`'s business: declaring one is opt-in,
-never implied, because a tool call here really runs somewhere. Which of them
-**this** run reaches is a different question, and it comes up constantly — does
-the model still get there without the search tool, is that server the thing that
-has been failing for ten minutes, what does the loop do when the tool it wants is
-not there. All three used to be a config edit, a run, and a config edit back.
+Which servers exist at all is `mcp/`'s business. Which of them **this** run
+reaches is a different question, and it comes up constantly — does the model
+still get there without the search tool, is that server the thing that has been
+failing for ten minutes, what does the loop do when the tool it wants is not
+there. All three used to be a config edit, a run, and a config edit back.
 
-The **Servers** row in the composer, above **Protocol**, is one checkbox per
-declared server, plus **All** and **None** for the whole list at once. Untick one
-and this run does not set it up: nothing is discovered, nothing is listed, no
-credential is fetched, and its tools are not offered to the model.
-`POST /api/agent` takes the same thing:
+The **MCP servers** block — behind **MCP** on the bar above the box — is one card
+per file in `mcp/`, each with a switch, and **every one of them starts off**. A
+tool call really runs somewhere, so a run reaches a server because somebody said
+so in this tab, never because a file was sitting in a directory. A server left
+off is not set up: nothing is discovered, nothing is listed, no credential is
+fetched, and its tools are not offered to the model. `POST /api/agent` takes the
+same thing:
 
 ```json
 { "model": "chat", "prompt": "weather in Paris?", "mcpServers": ["files"] }
 ```
 
-Leave the field out — the default — and the run reaches every declared server,
-which is what the file says. Send a list and it reaches those, `[]` included: a
-loop with nothing set up, offered the model's own simulated `tools:` and
-nothing else. That empty list is not the same as saying nothing, on purpose —
-"none of them" is an answer, and it should not be spelled the same way as
-"whatever the file says". It is also one press of **None**, which is why the pair
-of buttons is there: the interesting extreme is worth asking for in one gesture
-rather than six.
+Send a list and the run reaches those, `[]` included: a loop with nothing set up,
+offered the model's own simulated `tools:` and nothing else. That empty list is
+not the same as saying nothing, on purpose — "none of them" is an answer, and it
+should not be spelled the same way as "whatever the file says". Leave the field
+out and the run does reach every declared server, which is the API's default and
+never the UI's: the block always sends what it was switched on to, `[]` and
+all.
 
 **It only ever narrows.** Naming a server `mcp/` does not declare is a `404`
 (`unknown_mcp_server`) before anything is sent — a typo, not a server this
 request gets to invent. The file stays the authority on what exists, and the
-checkbox decides what this run actually did.
+switch decides what this run actually did.
 
-Switching one off takes its blockers with it. A server whose browser identity
-nobody has signed in to would have refused the first tool call with a `409`; off,
-it is not in the run, so the preflight bar goes green and the sign-in it was
-asking for disappears from the auth panel. What stays is a line naming what was
-left out, because a run reaching fewer servers than `mcp/` declares is a fact
-you want in front of you rather than one to reconstruct from the traffic
-afterwards.
+A server that is off carries none of its blockers. One whose browser identity
+nobody has signed in to would refuse the first tool call with a `409`; off, it is
+not in the run, so the bar stays green and the sign-in it wants is not on its
+card either. The card stays, saying what being off means — and while a run
+reaches nothing at all the bar says so outright, because "the model is offered no
+live tool" is the thing you want in front of you rather than reconstructed from
+an empty trace afterwards.
 
 ## A token that does not fit
 
@@ -764,11 +763,11 @@ stages:
     tenant: acme
 ```
 
-Both readings are offered to every `kind: chat` model, as `files@local` and
-`files@prod` — so the Servers row shows two boxes, and `mcpServers: ["files@prod"]`
-leaves the other out of a run. They negotiate their revision and hold their
-session separately, which is what keeps a `local` session from travelling to the
-`prod` endpoint.
+Both readings are declared, as `files@local` and `files@prod`, and a run takes
+one of them: the block shows `files` on one card with a button per stage, and the
+call carries `mcpServers: ["files@prod"]` for the one that is pressed. They
+negotiate their revision and hold their session separately, which is what keeps a
+`local` session from travelling to the `prod` endpoint.
 
 Note the two syntaxes standing side by side in `headers:`: `${ stage.tenant }` is
 resolved once, when the file loads, and `{{ env.API_KEY }}` on the line below it

@@ -29,22 +29,10 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   hold: a credential typed into this tab, and a browser session somebody has to
   go and fetch — **Sign in**, then who you are and a countdown.
 
-  Under it, in its own section, the same panel lists the identities the
-  **MCP servers** this run would set up will use. A separate question answered in
-  a separate file: the model's identity comes from the model, a server's from
-  `mcp/`, and neither follows the other. Each row names the provider (or
-  `anonymous`), says when it comes from a header template rather than `auth:`,
-  and warns when it is a browser provider nobody has signed in to — that call
-  answers `409 not_signed_in` and sends nothing, so the **Sign in** button for it
-  is on the row itself. Once somebody has been through, the row says who, and
-  carries the **Sign out** that drops that identity again — a server's provider
-  is often not the model's, so this row is the only place it appears.
-
-  That whole section is there for a chat model and gone for an embedding one,
-  which has no loop for a tool call to be part of. A server unticked in
-  **Servers** leaves it the same way and for a better-aimed reason: this run does
-  not reach it, so it needs nothing from you — no discovery, no listing, no
-  sign-in, and no refusal on the bar above about a credential it never uses.
+  The identity a *server* authenticates with is not here. It is a separate
+  question answered in a separate file — the model's comes from the model, a
+  server's from `mcp/`, and neither follows the other — so it is asked on the
+  card of the server it is about, in the block below.
 - **Conversation**, for chat models. A transcript: your question on the right,
   the answer on the left, the tools the run called in between, and a composer at
   the bottom. `Enter` sends, `Shift`+`Enter` starts a line. There is one button,
@@ -61,13 +49,6 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   whole-bodied single turn are both a tick away — and the box is **off by
   default**, at every turn count. More on what that costs a loop in
   [streaming](streaming.md).
-  **Servers** is a checkbox per server in `mcp/` — one per stage, for a server
-  that declares them:
-  untick one and this run does not set it up, does not sign in to it and is not
-  offered its tools — the file still declares it, and the run
-  [says so](mcp.md#switching-one-off-for-a-run) rather than shrinking quietly. **All**
-  and **None** ask the same of the whole list in one press, which is what makes
-  "what does the loop do with none of these?" a question rather than six clicks.
   While a run is in flight, **Stop** drops the request where it stands and
   whatever had arrived stays on the page — a stream cut off after four tokens
   produced four tokens, and that is a finding rather than a mess to clear up.
@@ -78,6 +59,36 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   picked by name and dropped in the box — nothing is sent, and what the text
   becomes on the wire is still the model's template's decision. More
   [below](#saving-a-prompt).
+- **MCP servers**, opened from **MCP** on the bar, for a chat model — an
+  embedding one has no loop for a tool call to be part of, so the button goes
+  with the block. One card per file in `mcp/`, carrying the whole of what this
+  run does with that server: a switch for whether it is in the run at all, the
+  address it would reach, the identity it would go out as (or `anonymous`, and
+  whether it comes from a header template rather than `auth:`), and the
+  **Sign in** that identity needs when it is a browser provider nobody has
+  fetched a session for — that call answers `409 not_signed_in` and sends
+  nothing, so the button is on the card rather than somewhere else. Once somebody
+  has been through, the card says who, and carries the **Sign out** that drops
+  that identity again.
+
+  **Every switch starts off**, and that is the point: a tool call really runs, on
+  somebody's real server, so a run reaches one because you said so here and never
+  because a file was sitting in `mcp/`. A server left off is not set up — nothing
+  discovered, nothing listed, no credential fetched, its tools not offered, and
+  the refusal it was causing gone with it. The card stays, saying so, and while a
+  run reaches nothing the bar above [says that
+  outright](mcp.md#choosing-what-a-run-reaches) rather than leaving it to be
+  discovered in an empty trace.
+
+  A server declaring [stages](configuration.md#stages) is one card all the same,
+  with a button per stage and a dot on the one a bare name means — the same shape
+  the model list uses, for the same reason. Two stages are two endpoints, with
+  their own address, their own session and their own negotiated revision, and a
+  run takes **one** of them: what the card shows is the stage that is pressed,
+  and the call carries the `name@stage` the button stands for. The revision they
+  are spoken in is not asked here — it is `protocol_version:` in `mcp/`, per
+  server, and a run does not get to differ from the file. More in
+  [MCP](mcp.md).
 - **Input**, for embedding models. One text per line, a run count, and a
   checkbox for the full vectors. There is no second turn of an embedding, so
   there is no conversation and no loop.
@@ -107,11 +118,10 @@ username, the granted scopes and a countdown.
 
 **The tab remembers a little, and never that.** Which model you were on and the
 stage you were asking it at, what you had half typed, how many turns you allow,
-which revision you pinned, which MCP servers you switched off — small settings
-whose loss is pure annoyance, kept in the browser's own storage. The stage is
-remembered per model, so coming back to one comes back to where the question was
-rather than to its default; a stage the file no longer declares is simply the
-default again. The credential is not among them, and neither is
+which MCP servers you switched on and at which stage you were asking them —
+small settings whose loss is pure annoyance, kept in the browser's own storage. The stage is remembered per model and per server, so
+coming back to one comes back to where the question was rather than to its
+default; a stage the file no longer declares is simply the default again. The credential is not among them, and neither is
 the conversation or the traffic: a session's bodies are unbounded, and the first
 oversized run would start throwing quota errors at a tool whose job is to be
 dependable while other things fail. Storage that is missing or full is a browser
