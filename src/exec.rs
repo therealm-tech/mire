@@ -20,8 +20,8 @@ use crate::decode::embedding::{CheckOutcome, EmbeddingChecks, Vectors};
 use crate::decode::error::DecodedError;
 use crate::decode::stream::{Delta, Frame, FrameParser, Framing, Resolved, StreamView};
 use crate::decode::{
-    Completion, DecodeTrace, Decoded, EmbeddingResult, HttpMeta, chat, embedding, error, script,
-    stream,
+    Completion, DecodeTrace, Decoded, EmbeddingResult, HttpMeta, Usage, chat, embedding, error,
+    script, stream,
 };
 use crate::message::{Message, ToolCall};
 use crate::model::{DecodeSpec, HttpMethod, Model, ModelKind};
@@ -551,11 +551,13 @@ struct StreamAccumulator<'a> {
     ttft_ms: Option<u64>,
     text: String,
     tool_calls: Vec<ToolCall>,
+    finish_reason: Option<String>,
+    usage: Option<Usage>,
     resolved: Resolved,
     body: String,
     last: Option<Value>,
-    /// Set by the `[DONE]` sentinel. A stop reason in the final chunk also counts
-    /// as a clean end, but that is only knowable once decoding runs.
+    /// Set by the `[DONE]` sentinel. A stop reason in any chunk also counts as a
+    /// clean end, but that is only knowable once decoding runs.
     sentinel: bool,
 }
 
@@ -581,6 +583,8 @@ impl<'a> StreamAccumulator<'a> {
             ttft_ms: None,
             text: String::new(),
             tool_calls: Vec::new(),
+            finish_reason: None,
+            usage: None,
             resolved: Resolved::default(),
             body: String::new(),
             last: None,
@@ -645,6 +649,25 @@ impl<'a> StreamAccumulator<'a> {
                     self.tool_calls.extend(calls);
                 }
 
+                // The stop reason and the counters, from every chunk for the
+                // same reason and a worse symptom. Anthropic sends both in a
+                // `message_delta` and then closes on an empty `message_stop`, so
+                // reading the tail alone finds neither — and with no stop reason
+                // and no `[DONE]` to go on, a stream that ended perfectly well is
+                // reported as one the connection cut short.
+                //
+                // The last chunk that answers wins, which is the endpoint's final
+                // word where every shape puts it and still the right answer where
+                // one shape does not.
+                if let Some(reason) = chat::read_finish_reason(&value, self.spec, &mut self.trace) {
+                    self.resolved.finish_reason = true;
+                    self.finish_reason = Some(reason);
+                }
+                if let Some(usage) = chat::read_usage(&value, self.spec, &mut self.trace) {
+                    self.resolved.usage = true;
+                    self.usage = Some(usage);
+                }
+
                 self.last = Some(value);
             }
             Frame::Done => self.sentinel = true,
@@ -660,14 +683,14 @@ impl<'a> StreamAccumulator<'a> {
 
         let last = self.last.take();
 
-        let mut completion = match &last {
-            Some(last) => chat::decode_tail(last, self.spec, &mut self.trace),
-            None => Completion::default(),
+        // Every field is an aggregate: nothing here comes from a path read
+        // against one privileged chunk, so nothing in the trace claims it did.
+        let completion = Completion {
+            content: (!self.text.is_empty()).then(|| std::mem::take(&mut self.text)),
+            tool_calls: std::mem::take(&mut self.tool_calls),
+            finish_reason: self.finish_reason.take(),
+            usage: self.usage.take(),
         };
-        // The aggregates are the answer. Neither comes from a path in the final
-        // chunk, so nothing in the trace claims it did.
-        completion.content = (!self.text.is_empty()).then(|| std::mem::take(&mut self.text));
-        completion.tool_calls = std::mem::take(&mut self.tool_calls);
 
         // An endpoint that refuses a streamed call refuses it in one shot: the
         // error body arrives as a single frame, which is the last one there is.
@@ -677,9 +700,10 @@ impl<'a> StreamAccumulator<'a> {
 
         stream::record_miss(self.spec, self.resolved, &mut self.trace);
 
-        // Two ways to end on purpose: the sentinel, or a final chunk that says
-        // why it stopped. Anything else and the connection merely went quiet,
-        // which is what a proxy cutting a long generation looks like.
+        // Two ways to end on purpose: the sentinel, or a chunk that said why it
+        // stopped — any of them, not the last one. Anything else and the
+        // connection merely went quiet, which is what a proxy cutting a long
+        // generation looks like.
         self.view.terminated = self.sentinel || completion.finish_reason.is_some();
 
         Streamed {

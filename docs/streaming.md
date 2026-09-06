@@ -97,13 +97,14 @@ event: turn
 data: {"event":"turn","index":1,…}
 ```
 
-**One thing to know before you tick it.** Tool calls are not reassembled from a
-stream. `mire` decodes a streamed answer from its *last* chunk, and OpenAI splits
-a call's arguments across chunks — stitching those back together is guesswork
-this tool would rather not do on your behalf. So against such an endpoint a turn
-that really did ask for a tool comes back looking like a turn that asked for
-nothing, and the loop stops on `noToolCalls` at turn one. That is the endpoint's
-behaviour made visible rather than a setting to fix, and it is why the box is off
-by default: **untick it to test tool calling**, whatever **max turns** says. An endpoint that puts the whole
-call in its final chunk streams and loops perfectly well, which is precisely the
-sort of difference between two backends this tool exists to surface.
+**One thing to know before you tick it.** A tool call *split across chunks* is
+not reassembled. Every cascade runs on every chunk, so an endpoint that sends a
+call whole — in the closing chunk or any other — streams and loops exactly as it
+does unstreamed. The `OpenAI` shape fragments a call's arguments across chunks
+instead, and stitching those back together is guesswork this tool would rather
+not do on your behalf: against that endpoint a turn that really did ask for a
+tool comes back looking like a turn that asked for nothing, and the loop stops on
+`noToolCalls` at turn one. That is the endpoint's behaviour made visible rather
+than a setting to fix, and it is why the box is off by default: **untick it to
+test tool calling**, whatever **max turns** says. Which of the two an endpoint is
+happens to be precisely the sort of difference this tool exists to surface.
