@@ -28,7 +28,6 @@ function embedding(overrides: Partial<Embedding>): Embedding {
     vectors: [vector(0, 0, 0)],
     checks: {
       count: { status: 'pass' },
-      dimensions: { status: 'pass' },
       finite: { status: 'pass' },
       nonZeroNorm: { status: 'pass' },
       determinism: { status: 'skipped', reason: 'send `repeat: 2` to check this' },

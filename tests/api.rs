@@ -299,7 +299,7 @@ decode:
 ///
 /// Built by substitution rather than `format!`: a `MiniJinja` template inside a
 /// format string needs four braces to mean two, and that way lies madness.
-fn embedding_model(url: &str, expect_dimensions: Option<usize>) -> String {
+fn embedding_model(url: &str) -> String {
     const TEMPLATE: &str = r#"
 name: embed
 kind: embedding
@@ -313,12 +313,7 @@ decode:
   usage: ["$.usage"]
 "#;
 
-    let mut model = TEMPLATE.replace("__URL__", url);
-    if let Some(value) = expect_dimensions {
-        use std::fmt::Write;
-        let _ = writeln!(model, "expect:\n  dimensions: {value}");
-    }
-    model
+    TEMPLATE.replace("__URL__", url)
 }
 
 /// An OpenAI-shaped embeddings response with `count` vectors of `width`.
@@ -1275,7 +1270,7 @@ async fn an_embedding_response_is_summarised_and_checked() {
 
     let harness = Harness::start(&[(
         "models/embed.yaml",
-        embedding_model(&format!("{}/v1/embeddings", server.uri()), Some(1024)),
+        embedding_model(&format!("{}/v1/embeddings", server.uri())),
     )])
     .await;
 
@@ -1296,7 +1291,6 @@ async fn an_embedding_response_is_summarised_and_checked() {
 
     let checks = &decoded["checks"];
     assert_eq!(checks["count"]["status"], "pass");
-    assert_eq!(checks["dimensions"]["status"], "pass");
     assert_eq!(checks["finite"]["status"], "pass");
     assert_eq!(checks["nonZeroNorm"]["status"], "pass");
     // Determinism needs a second run, and says so instead of silently passing.
@@ -1319,7 +1313,7 @@ async fn a_vector_is_never_rendered_whole_unless_asked_for() {
 
     let harness = Harness::start(&[(
         "models/embed.yaml",
-        embedding_model(&format!("{}/v1/embeddings", server.uri()), None),
+        embedding_model(&format!("{}/v1/embeddings", server.uri())),
     )])
     .await;
 
@@ -1387,7 +1381,7 @@ async fn base64_vectors_decode_to_the_same_shape() {
 
     let harness = Harness::start(&[(
         "models/embed.yaml",
-        embedding_model(&format!("{}/v1/embeddings", server.uri()), Some(4)),
+        embedding_model(&format!("{}/v1/embeddings", server.uri())),
     )])
     .await;
 
@@ -1402,7 +1396,6 @@ async fn base64_vectors_decode_to_the_same_shape() {
         decoded["dimensions"],
         json!({"kind": "uniform", "value": 4})
     );
-    assert_eq!(decoded["checks"]["dimensions"]["status"], "pass");
     assert_eq!(decoded["full"][0], json!([1.0, 0.0, 0.0, 0.0]));
 }
 
@@ -1416,7 +1409,7 @@ async fn a_deterministic_endpoint_passes_the_repeat_check() {
 
     let harness = Harness::start(&[(
         "models/embed.yaml",
-        embedding_model(&format!("{}/v1/embeddings", server.uri()), None),
+        embedding_model(&format!("{}/v1/embeddings", server.uri())),
     )])
     .await;
 
@@ -1453,7 +1446,7 @@ async fn a_replica_serving_something_else_fails_the_repeat_check() {
 
     let harness = Harness::start(&[(
         "models/embed.yaml",
-        embedding_model(&format!("{}/v1/embeddings", server.uri()), None),
+        embedding_model(&format!("{}/v1/embeddings", server.uri())),
     )])
     .await;
 
@@ -1474,7 +1467,7 @@ async fn a_replica_serving_something_else_fails_the_repeat_check() {
 }
 
 #[tokio::test]
-async fn a_width_that_does_not_match_the_model_is_reported() {
+async fn an_answer_short_of_an_input_is_reported() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(embedding_response(1, 384)))
@@ -1483,7 +1476,7 @@ async fn a_width_that_does_not_match_the_model_is_reported() {
 
     let harness = Harness::start(&[(
         "models/embed.yaml",
-        embedding_model(&format!("{}/v1/embeddings", server.uri()), Some(1024)),
+        embedding_model(&format!("{}/v1/embeddings", server.uri())),
     )])
     .await;
 
@@ -1492,13 +1485,6 @@ async fn a_width_that_does_not_match_the_model_is_reported() {
         .await;
 
     let checks = &body["response"]["decoded"]["checks"];
-    assert_eq!(checks["dimensions"]["status"], "fail");
-    assert!(
-        checks["dimensions"]["detail"]
-            .as_str()
-            .unwrap()
-            .contains("expected 1024 dimensions, got 384")
-    );
     // Two inputs went out, one answer came back.
     assert_eq!(checks["count"]["status"], "fail");
     assert!(
@@ -1524,7 +1510,7 @@ async fn a_hole_in_a_vector_fails_the_finiteness_check() {
 
     let harness = Harness::start(&[(
         "models/embed.yaml",
-        embedding_model(&format!("{}/v1/embeddings", server.uri()), None),
+        embedding_model(&format!("{}/v1/embeddings", server.uri())),
     )])
     .await;
 
@@ -1561,7 +1547,7 @@ async fn a_multi_vector_endpoint_answers_one_item_per_input() {
 
     let harness = Harness::start(&[(
         "models/embed.yaml",
-        embedding_model(&format!("{}/v1/embeddings", server.uri()), Some(2)),
+        embedding_model(&format!("{}/v1/embeddings", server.uri())),
     )])
     .await;
 
@@ -1580,7 +1566,6 @@ async fn a_multi_vector_endpoint_answers_one_item_per_input() {
     );
     // Two inputs, two answers: the count check is about inputs, not vectors.
     assert_eq!(decoded["checks"]["count"]["status"], "pass");
-    assert_eq!(decoded["checks"]["dimensions"]["status"], "pass");
     assert_eq!(decoded["checks"]["nonZeroNorm"]["status"], "pass");
     // Each summary says which input it belongs to.
     assert_eq!(decoded["vectors"][3]["item"], 1);
@@ -1599,7 +1584,7 @@ async fn one_input_worth_of_token_vectors_is_not_read_as_a_batch() {
 
     let harness = Harness::start(&[(
         "models/embed.yaml",
-        embedding_model(&format!("{}/v1/embeddings", server.uri()), None),
+        embedding_model(&format!("{}/v1/embeddings", server.uri())),
     )])
     .await;
 
@@ -1623,7 +1608,7 @@ async fn a_single_string_input_is_accepted_and_rendered_as_a_list() {
 
     let harness = Harness::start(&[(
         "models/embed.yaml",
-        embedding_model(&format!("{}/v1/embeddings", server.uri()), None),
+        embedding_model(&format!("{}/v1/embeddings", server.uri())),
     )])
     .await;
 
@@ -2848,7 +2833,7 @@ async fn a_tool_can_answer_from_a_script_that_reads_its_arguments() {
 async fn agent_mode_refuses_an_embedding_model_before_streaming_anything() {
     let harness = Harness::start(&[(
         "models/embed.yaml",
-        embedding_model("https://models.internal/v1/embeddings", None),
+        embedding_model("https://models.internal/v1/embeddings"),
     )])
     .await;
 

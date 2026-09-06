@@ -794,15 +794,6 @@ fn exactly_one_tool_response(spec: &ToolSpec) -> Result<(), ValidationError> {
     }
 }
 
-/// Shape the endpoint is expected to produce, checked by assertions.
-#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ExpectSpec {
-    /// Expected vector width. `kind: embedding`.
-    #[serde(default)]
-    pub dimensions: Option<usize>,
-}
-
 /// One model endpoint, as declared in one YAML file.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Validate)]
 #[serde(deny_unknown_fields)]
@@ -871,9 +862,6 @@ pub struct Model {
     #[serde(default)]
     #[validate(nested)]
     pub tools: Vec<ToolSpec>,
-    /// Expected response shape.
-    #[serde(default)]
-    pub expect: ExpectSpec,
     /// Stage this reading of the file belongs to, `None` when it declares none.
     /// Set by the loader, never present in YAML — it is a key of `stages:`, not
     /// a field beside it.

@@ -20,7 +20,6 @@ curl -s localhost:8787/api/call \
   "vectors": [{"index": 0, "item": 0, "position": 0, "dimensions": 768, "norm": 1.0, "sample": [...], "finite": true, "histogram": {...}}],
   "checks": {
     "count": {"status": "pass"},
-    "dimensions": {"status": "pass"},
     "finite": {"status": "pass"},
     "nonZeroNorm": {"status": "pass"},
     "determinism": {"status": "pass"}
@@ -28,9 +27,8 @@ curl -s localhost:8787/api/call \
 }
 ```
 
-`count` and `dimensions` are **derived from the vectors that came back**, never
-read out of the response — an endpoint that claims 768 and returns 384 is
-exactly what this catches. Inconsistent widths surface as
+`count` and `dimensions` are **read off the vectors that came back**, never out
+of what the response claims about itself. Inconsistent widths surface as
 `{"kind": "ragged", "values": [...]}` rather than being averaged away.
 
 `count` is one per **input**, not one per vector: see

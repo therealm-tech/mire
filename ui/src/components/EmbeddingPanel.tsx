@@ -3,7 +3,6 @@ import { Badge, type Tone } from './primitives'
 
 const CHECK_LABELS: Record<keyof Embedding['checks'], string> = {
   count: 'count',
-  dimensions: 'dimensions',
   finite: 'finite values',
   nonZeroNorm: 'non-zero norm',
   determinism: 'determinism',
