@@ -8,6 +8,12 @@
 #
 # Streamed, only the `content_block_delta` frames carry text — `$.delta.text`
 # misses on every other frame, which is the correct answer for them.
+#
+# The stop reason has a streamed spelling too. Whole, it is `$.stop_reason`; in a
+# stream it arrives in the `message_delta` frame as `$.delta.stop_reason`, and
+# the stream then closes on an empty `message_stop`. Both are listed, and the
+# first cannot match a frame the second describes, so the cascade is right either
+# way.
 ---
 name: anthropic-chat
 kind: chat
@@ -20,6 +26,7 @@ decode:
     - "$.content[?(@.type == 'tool_use')]"
   finish_reason:
     - $.stop_reason
+    - $.delta.stop_reason
   usage:
     - $.usage
   error:
