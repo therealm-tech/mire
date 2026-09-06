@@ -32,9 +32,9 @@
 #
 # The two stages are two servers as far as a run is concerned: each settles its
 # own revision on first use and holds its own session, so nothing one of them
-# agreed is assumed by the other. A bare `weather-staged` means `default_stage:`,
-# and one run can take exactly one of them:
-# `mcpServers: ["weather-staged@acme"]`.
+# agreed is assumed by the other. A run takes exactly one — the stage pressed on
+# the card in the UI, or `mcpServers: ["weather-staged@acme"]` on the request. A
+# bare `weather-staged` means `default_stage:`.
 ---
 name: weather-staged
 url: http://127.0.0.1:11436/mcp

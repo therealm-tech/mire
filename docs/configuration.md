@@ -163,7 +163,7 @@ the result is text, which is all a URL with a host substituted into it could be.
 
 ### `name@stage`
 
-An entry that declares stages is addressed as `name@stage` — in the composer, in
+An entry that declares stages is addressed as `name@stage` — in the UI, in
 `POST /api/call`, in an `mcpServers:` list, in another file's `auth:`. A bare
 name is that entry's default stage, which is what makes every file and every
 request written before stages existed mean what it meant. `@` is therefore not

@@ -13,8 +13,6 @@ import {
 } from '../conversation'
 import { Failure } from './Failure'
 import { Markdown } from './Markdown'
-import { McpProtocol } from './McpProtocol'
-import { McpServers } from './McpServers'
 import { Badge, Button, INPUT_CLASSES, Panel } from './primitives'
 import { SavedPrompts } from './SavedPrompts'
 
@@ -52,11 +50,6 @@ export function ChatPanel({
   maxIterations,
   streaming,
   error,
-  revisions,
-  mcpProtocol,
-  mcpServers,
-  mcpOff,
-  showProtocol,
   attachments,
   attaching,
   attachError,
@@ -64,9 +57,6 @@ export function ChatPanel({
   onPrompt,
   onMaxIterations,
   onStreaming,
-  onMcpProtocol,
-  onMcpServer,
-  onMcpServers,
   onAttach,
   onDetach,
   onSend,
@@ -103,14 +93,6 @@ export function ChatPanel({
   /** Whether the run is read chunk by chunk. Orthogonal to the turn count. */
   streaming: boolean
   error: { code: string; message: string; detail?: unknown } | null
-  revisions: string[]
-  mcpProtocol: string | null
-  /** Every MCP server the model names. */
-  mcpServers: string[]
-  /** The ones switched off for the next run. */
-  mcpOff: string[]
-  /** Only a run that will speak to a server has a revision to speak to it in. */
-  showProtocol: boolean
   /** Files already written to `mire`'s upload directory. */
   attachments: UploadedFile[]
   /** A file is on its way up. */
@@ -127,9 +109,6 @@ export function ChatPanel({
   onPrompt: (value: string) => void
   onMaxIterations: (value: number) => void
   onStreaming: (value: boolean) => void
-  onMcpProtocol: (revision: string | null) => void
-  onMcpServer: (name: string, on: boolean) => void
-  onMcpServers: (on: boolean) => void
   onAttach: (files: File[]) => void
   onDetach: (id: string) => void
   onSend: () => void
@@ -231,11 +210,6 @@ export function ChatPanel({
           busy={busy}
           maxIterations={maxIterations}
           streaming={streaming}
-          revisions={revisions}
-          mcpProtocol={mcpProtocol}
-          mcpServers={mcpServers}
-          mcpOff={mcpOff}
-          showProtocol={showProtocol}
           attachments={attachments}
           attaching={attaching}
           attachError={attachError}
@@ -243,9 +217,6 @@ export function ChatPanel({
           onPrompt={onPrompt}
           onMaxIterations={onMaxIterations}
           onStreaming={onStreaming}
-          onMcpProtocol={onMcpProtocol}
-          onMcpServer={onMcpServer}
-          onMcpServers={onMcpServers}
           onAttach={onAttach}
           onDetach={onDetach}
           onSend={onSend}
@@ -697,11 +668,6 @@ function Composer({
   busy,
   maxIterations,
   streaming,
-  revisions,
-  mcpProtocol,
-  mcpServers,
-  mcpOff,
-  showProtocol,
   attachments,
   attaching,
   attachError,
@@ -709,9 +675,6 @@ function Composer({
   onPrompt,
   onMaxIterations,
   onStreaming,
-  onMcpProtocol,
-  onMcpServer,
-  onMcpServers,
   onAttach,
   onDetach,
   onSend,
@@ -724,11 +687,6 @@ function Composer({
   busy: boolean
   maxIterations: number
   streaming: boolean
-  revisions: string[]
-  mcpProtocol: string | null
-  mcpServers: string[]
-  mcpOff: string[]
-  showProtocol: boolean
   attachments: UploadedFile[]
   attaching: boolean
   attachError: { code: string; message: string; detail?: unknown } | null
@@ -743,9 +701,6 @@ function Composer({
   onPrompt: (value: string) => void
   onMaxIterations: (value: number) => void
   onStreaming: (value: boolean) => void
-  onMcpProtocol: (revision: string | null) => void
-  onMcpServer: (name: string, on: boolean) => void
-  onMcpServers: (on: boolean) => void
   onAttach: (files: File[]) => void
   onDetach: (id: string) => void
   onSend: () => void
@@ -961,36 +916,6 @@ function Composer({
           That is the endpoint's behaviour rather than a setting to fix; untick{' '}
           <strong>stream</strong> to test tool calling.
         </p>
-      ) : null}
-
-      {/*
-        A run parameter, so it sits with the other one. It used to live in the
-        auth panel, which is the one thing on the page it is not about. Gone
-        rather than inert on a chat: **max turns** is a cap this run ignores,
-        which is worth showing greyed, but a revision is spoken to a server this
-        run never opens a connection to — there is no run for it to be about.
-      */}
-      {showProtocol ? (
-        <div className="space-y-2">
-          {/*
-            Above the revision, because it decides whether there is a server for
-            a revision to be spoken to at all — and because "which of these am I
-            reaching?" is the coarser question of the two.
-          */}
-          <McpServers
-            names={mcpServers}
-            off={mcpOff}
-            disabled={busy}
-            onToggle={onMcpServer}
-            onToggleAll={onMcpServers}
-          />
-          <McpProtocol
-            revisions={revisions}
-            selected={mcpProtocol}
-            disabled={busy}
-            onSelect={onMcpProtocol}
-          />
-        </div>
       ) : null}
     </div>
   )

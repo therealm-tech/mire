@@ -155,12 +155,14 @@ agent:
   max_duration_ms: 600000
 
 # The tools are not declared here, and neither are the servers they come from.
-# Every server `../mcp/` declares is offered to every `kind: chat` model: they
-# are fetched at the start of the run and **really called**, which is the
+# Every server `../mcp/` declares is reachable by every `kind: chat` model: the
+# ones a run is switched on to are listed at the start of it and **really
+# called**, which is the
 # difference between checking that the model emits well-formed calls and checking
 # that tool calling works. The declarations the model sees come from each server's
 # own `tools/list`, so a schema change there shows up here without touching this
-# file. The Servers row in the composer is where a single run leaves one out.
+# file. The MCP servers block is where a single run says which of them it
+# reaches, starting at none.
 
 # A simulated tool of the same name would win over the server's, which is how you
 # stub exactly one tool of an otherwise live server — and how you check that the

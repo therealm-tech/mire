@@ -149,6 +149,11 @@ export const mcpDescriptorSchema = z.object({
   name: z.string(),
   /** The stage this reading of the file belongs to. */
   stage: z.string().optional(),
+  /**
+   * The file's `default_stage:`, and always true for a file that declares no
+   * stages. The stage a bare `name` reaches, and the one the panel opens on.
+   */
+  isDefault: z.boolean(),
   url: z.string(),
   auth: z.string().optional(),
   tools: z.array(z.string()),
@@ -159,14 +164,6 @@ export const mcpDescriptorSchema = z.object({
 
 export const mcpResponseSchema = z.object({
   servers: z.array(mcpDescriptorSchema),
-  /**
-   * The revisions this build speaks, newest first.
-   *
-   * Read rather than hard-coded: what `mire` can speak is `mire`'s to say, and a
-   * list kept here would offer a revision the server never had the day one is
-   * added or dropped.
-   */
-  revisions: z.array(z.string()),
   issues: z.array(loadIssueSchema),
 })
 
@@ -791,21 +788,16 @@ export interface AgentRequest extends CallRequest {
   /**
    * Which of the declared MCP servers this run may reach.
    *
-   * Left out when every one of them is on, which is what `mcp/` says.
-   * Sending a shorter list narrows the run to those — `[]` included, which is a
-   * loop offering the model no live tool at all. A name `mcp/` does not
+   * Left out, the run reaches every one `mcp/` declares — which the UI never
+   * asks for: it sends the list it was switched on to, `[]` included, that being
+   * a loop offering the model no live tool at all. A name `mcp/` does not
    * declare is a `404`: the opt-in is the declaration, and a tab cannot write
    * one.
+   *
+   * The revision they are spoken in is not here. It is `protocol_version:` in
+   * `mcp/`, per server, and a run does not get to differ from the file.
    */
   mcpServers?: string[]
-  /**
-   * Revision to speak to every MCP server this run touches.
-   *
-   * Left out for `auto`, which is each server settling its own the way it always
-   * did: `protocol_version:` from `mcp/` when it has one, the negotiation
-   * otherwise. Naming one overrides both, for this run alone.
-   */
-  mcpProtocol?: string
 }
 
 /**

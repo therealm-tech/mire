@@ -1,83 +1,53 @@
-import type { AuthResponse, McpResponse, ModelSummary } from '../api'
-import { McpAuth } from './McpAuth'
+import type { AuthResponse, ModelSummary } from '../api'
 import { ModelAuth } from './ModelAuth'
 import { Panel } from './primitives'
 
 /**
- * Who this run goes out as, in full.
+ * Who the model call goes out as.
  *
- * Two questions rather than one, and they are answered in two files: the model's
- * identity comes from the model's `auth:`, a server's from its own entry in
- * `mcp/`, and neither follows the other. What is here is the detail — the
- * one-line answer, and anything that would refuse the call, is in the preflight
- * bar above, which is also what opens this.
+ * One of the two identity questions a run asks, and the only one answered here:
+ * the model's comes from the model's `auth:`, a server's from its own entry in
+ * `mcp/`, and neither follows the other. The second is asked on the card of the
+ * server it is about, in the MCP block, because that is where the sign-in it
+ * needs is worth pressing.
  *
- * The second question is only asked when the run would ask it: an embedding
- * model calls no tool, so no server is its business — and neither is one the
- * composer has switched off, which this run reaches exactly as little.
+ * What is here is the detail — the one-line answer, and anything that would
+ * refuse the call, is in the preflight bar above, which is also what opens this.
  */
 export function AuthPanel({
   auth,
-  mcp,
-  names,
   model,
   provider,
   token,
   signingIn,
   loginError,
-  showMcp,
   onToken,
   onLogin,
   onLogout,
 }: {
   auth: AuthResponse
-  mcp: McpResponse
-  /** The servers this run will set up: the model's, minus the ones switched off. */
-  names: string[]
   model: ModelSummary | undefined
   provider: AuthResponse['providers'][number] | undefined
   token: string
   signingIn: string | null
   loginError: { provider: string; message: string } | null
-  /** False on a run that will not speak to a server — see `usesMcp` in `App`. */
-  showMcp: boolean
   onToken: (token: string) => void
   onLogin: (name: string, prompt?: string) => void
   onLogout: (name: string) => void
 }) {
   return (
     <Panel title="Auth">
-      <div className="space-y-3">
-        <section className="space-y-2">
-          <h3 className="font-semibold text-muted text-xs">Model endpoint</h3>
-          <ModelAuth
-            provider={provider}
-            model={model}
-            issues={auth.issues}
-            token={token}
-            signingIn={signingIn}
-            loginError={loginError}
-            onToken={onToken}
-            onLogin={onLogin}
-            onLogout={onLogout}
-          />
-        </section>
-
-        {showMcp && names.length > 0 ? (
-          <section className="space-y-2 border-line border-t pt-3">
-            <h3 className="font-semibold text-muted text-xs">MCP servers</h3>
-            <McpAuth
-              names={names}
-              servers={mcp.servers}
-              providers={auth.providers}
-              signingIn={signingIn}
-              loginError={loginError}
-              onLogin={onLogin}
-              onLogout={onLogout}
-            />
-          </section>
-        ) : null}
-      </div>
+      <ModelAuth
+        provider={provider}
+        model={model}
+        issues={auth.issues}
+        token={token}
+        signingIn={signingIn}
+        loginError={loginError}
+        onToken={onToken}
+        onLogin={onLogin}
+        onLogout={onLogout}
+      />
     </Panel>
   )
 }

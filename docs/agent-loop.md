@@ -14,13 +14,14 @@ the answer *arrives* is the **stream** box, which is a
 [separate question](streaming.md) with its
 own answer, asked whatever the count.
 
-The servers are not part of that count. A declared server is set up for a chat
+The servers are not part of that count. A server switched on is set up for a chat
 model's run whether it has one turn or twenty — one turn against a real server
 is a fair question, since "does the model ask for the tool `tools/list` showed
-it?" is answerable without ever answering the call. What takes a server out of a
-run is [unticking it](mcp.md#switching-one-off-for-a-run), which leaves the model
-offered the model's own `tools:` and nothing else, and answers the question
-that comes after: what does the loop do when the tool it wants is not there?
+it?" is answerable without ever answering the call. Which servers a run reaches
+is [its own question](mcp.md#choosing-what-a-run-reaches), asked in the **MCP
+servers** block and starting at none: a run with none leaves the model offered
+its own `tools:` and nothing else, which answers the question that comes after —
+what does the loop do when the tool it wants is not there?
 
 The single-shot routes stay where they are useful, on the API rather than behind
 a button. `POST /api/call` and `POST /api/call/stream` never discover, list or

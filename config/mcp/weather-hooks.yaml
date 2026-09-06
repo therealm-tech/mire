@@ -35,10 +35,10 @@
 # one that answers a reading worth filing. Ask for a slow echo and watch both
 # hooks sit the call out, named in the trace rather than silently absent.
 #
-# It is live, like its two neighbours, so a chat run sets this server up as well
-# as `weather`, and the model is offered the same tools twice. Untick the others
-# in the composer's Servers row when the hooks are what you are asking about, so
-# the pipeline fires once and the trace has one story in it.
+# It offers the same tools as its two neighbours, so switching more than one of
+# them on hands the model `get_weather` twice over. Leave the others off in the
+# MCP servers block when the hooks are what you are asking about, so the pipeline
+# fires once and the trace has one story in it.
 
 ---
 name: weather-hooks

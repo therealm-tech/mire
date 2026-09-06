@@ -16,15 +16,22 @@ import { Badge, Button } from './primitives'
 export function Preflight({
   state,
   authOpen,
+  mcpOpen,
+  showMcp,
   signingIn,
   onSignIn,
   onOpenAuth,
+  onOpenMcp,
 }: {
   state: PreflightState
   authOpen: boolean
+  mcpOpen: boolean
+  /** False on a run that will not speak to a server — see `usesMcp` in `App`. */
+  showMcp: boolean
   signingIn: string | null
   onSignIn: (provider: string) => void
   onOpenAuth: () => void
+  onOpenMcp: () => void
 }) {
   const blocked = state.blockers.length > 0
 
@@ -54,11 +61,19 @@ export function Preflight({
         {/*
           The details are one click away rather than permanently open: they are a
           thing you read once and then stop reading, and they were costing the
-          composer the top of the screen every time.
+          composer the top of the screen every time. Two questions, so two
+          buttons — who the call goes out as, and which servers it sets up first.
         */}
-        <Button className="ml-auto" aria-expanded={authOpen} onClick={onOpenAuth}>
-          {authOpen ? 'Hide auth' : 'Auth'}
-        </Button>
+        <span className="ml-auto flex items-center gap-1">
+          {showMcp ? (
+            <Button aria-expanded={mcpOpen} onClick={onOpenMcp}>
+              {mcpOpen ? 'Hide MCP' : 'MCP'}
+            </Button>
+          ) : null}
+          <Button aria-expanded={authOpen} onClick={onOpenAuth}>
+            {authOpen ? 'Hide auth' : 'Auth'}
+          </Button>
+        </span>
       </div>
 
       {state.blockers.length > 0 ? (
