@@ -88,7 +88,7 @@ file — in that order of precedence:
 | --- | --- | --- | --- |
 | `--config` | `CONFIG_FILE` | `~/.config/mire/mire.yaml` | YAML file carrying every option below |
 | `--config-dir` | `CONFIG_DIR` | `./config` | Directories holding `models/`, `auth/`, `mcp/` and `prompts/` |
-| `--uploads` | `UPLOADS_DIR` | `./uploads` | Where **Attach** writes |
+| `--uploads` | `UPLOADS_DIR` | `./uploads` | Where **Upload files** writes |
 | `--host` | `HOST` | `127.0.0.1` | Listen address; widening it is deliberate |
 | `--port` | `PORT` | `8787` | Listen port |
 | `--base-path` | `BASE_PATH` | *(none)* | Path prefix, when a proxy forwards one |

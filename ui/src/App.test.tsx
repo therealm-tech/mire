@@ -389,12 +389,19 @@ async function openCard(
 /**
  * Caps the loop at one turn, which is the whole of what **Chat** used to be.
  *
- * `fireEvent` rather than typing: the box is a controlled number input, so
+ * Two controls, because the cap is off until somebody asks for one: the tick
+ * says this tab has a budget of its own, and the box says what it is.
+ *
+ * `fireEvent` on the box rather than typing: it is a controlled number input, so
  * clearing it and typing a digit would put a `0` through `onChange` on the way,
  * and a run briefly budgeted at nothing is not the state under test.
  */
 async function oneTurn(): Promise<void> {
-  const budget = await screen.findByLabelText(/max turns/)
+  const cap = await screen.findByLabelText('max turns')
+  if (!(cap as HTMLInputElement).checked) {
+    fireEvent.click(cap)
+  }
+  const budget = await screen.findByLabelText('Turn limit')
   fireEvent.change(budget, { target: { value: '1' } })
   await waitFor(() => expect(budget).toHaveValue(1))
 }
@@ -699,32 +706,28 @@ describe('App', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    // Nothing until somebody says so: the servers are declared, and the bar
-    // counts what the run reaches, which is none of them. What being off means
-    // is the block's own business, on the card that holds the switch.
+    // Nothing until somebody says so: the servers are declared, and no run
+    // reaches one — so the identity one of them wants is nothing the bar is
+    // waiting on. What being off means is the block's own business.
     await user.click(await screen.findByRole('button', { name: /guarded/ }))
     const bar = () => screen.getByLabelText('What the next call will do')
-    expect(bar()).not.toHaveTextContent('MCP server')
     expect(within(bar()).queryByText('not signed in')).not.toBeInTheDocument()
 
     // Switched on, both are the run's business — and with them the identity one
     // of them wants, which nobody has fetched.
     await openMcp(user, 'dev', 'keyed')
-    expect(bar()).toHaveTextContent('2 MCP servers')
     expect(within(bar()).getByText('not signed in')).toBeInTheDocument()
 
     // A budget of one turn changes none of that. One turn against a real server
     // is a fair question — does the model ask for the tool it was shown? — so the
     // servers stay, and so does the 409 standing between it and an answer.
     await oneTurn()
-    expect(bar()).toHaveTextContent('2 MCP servers')
     expect(within(bar()).getByText('not signed in')).toBeInTheDocument()
 
     // Switching them off is what takes them out, which is the control that says
     // so: no discovery, no listing, and no 409 to be blocked by.
     await user.click(screen.getByRole('switch', { name: 'dev' }))
     await user.click(screen.getByRole('switch', { name: 'keyed' }))
-    expect(bar()).not.toHaveTextContent('2 MCP')
     expect(within(bar()).queryByText('not signed in')).not.toBeInTheDocument()
   })
 
@@ -746,7 +749,6 @@ describe('App', () => {
     await screen.findByRole('button', { name: /^chat/ })
     expect(screen.queryByRole('button', { name: /^MCP$/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'MCP servers' })).not.toBeInTheDocument()
-    expect(screen.getByLabelText('What the next call will do')).not.toHaveTextContent('MCP server')
   })
 
   it('never states a revision on the wire, which mcp/ settles', async () => {
@@ -783,24 +785,22 @@ describe('App', () => {
         .map((box) => (box as HTMLInputElement).checked),
     ).toEqual([false, false])
 
-    // The card of a server that is out says what that means. One that vanished
-    // from the page would be one you have to remember exists.
+    // A server that is out has nothing on its card to act on: it is never set
+    // up, never listed, and never signed in to, so there is no sign-in either.
     const dev = () => within(screen.getByTestId('mcp-dev'))
-    expect(dev().getByText(/Out of this run/)).toBeInTheDocument()
     expect(dev().queryByRole('button', { name: /Sign in to me/ })).not.toBeInTheDocument()
 
-    // `dev` on: on the bar, and with it the `409` its unsigned-in provider was
-    // promising all along, because now this run asks.
+    // `dev` on: the sign-in appears, and with it the `409` its unsigned-in
+    // provider was promising all along on the bar, because now this run asks.
     await user.click(screen.getByRole('switch', { name: 'dev' }))
-    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('1 MCP server')
-    expect(dev().queryByText(/Out of this run/)).not.toBeInTheDocument()
+    expect(dev().getByRole('button', { name: /Sign in to me/ })).toBeInTheDocument()
     expect(
       within(screen.getByLabelText('What the next call will do')).getByText('not signed in'),
     ).toBeInTheDocument()
 
     // And back out, because a switch that only goes one way is a trap.
     await user.click(screen.getByRole('switch', { name: 'dev' }))
-    expect(dev().getByText(/Out of this run/)).toBeInTheDocument()
+    expect(dev().queryByRole('button', { name: /Sign in to me/ })).not.toBeInTheDocument()
     expect(screen.queryByText(/answer 409 until/)).not.toBeInTheDocument()
   })
 
@@ -851,7 +851,6 @@ describe('App', () => {
     expect(screen.getAllByRole('switch')).toHaveLength(1)
     expect(files().getByText('https://sandbox.internal/mcp')).toBeInTheDocument()
     expect(files().getByRole('button', { name: /sandbox/ })).toHaveAttribute('aria-pressed', 'true')
-    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('files@sandbox')
 
     await user.click(screen.getByRole('button', { name: 'Send' }))
     await waitFor(() => expect(sent).toHaveLength(1))
@@ -863,7 +862,6 @@ describe('App', () => {
     // out.
     await user.click(files().getByRole('button', { name: 'prod' }))
     expect(files().getByText('https://files.internal/mcp')).toBeInTheDocument()
-    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('files@prod')
 
     await user.type(screen.getByRole('textbox', { name: /message/i }), 'again')
     await user.click(screen.getByRole('button', { name: 'Send' }))
@@ -897,7 +895,6 @@ describe('App', () => {
     await user.click(screen.getByRole('button', { name: /embed/ }))
     expect(screen.queryByRole('heading', { name: 'MCP servers' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^MCP$/ })).not.toBeInTheDocument()
-    expect(screen.getByLabelText('What the next call will do')).not.toHaveTextContent('MCP server')
   })
 
   it('switches to the embedding input when an embedding model is selected', async () => {
@@ -938,7 +935,7 @@ describe('describeStop', () => {
   })
 
   it('separates running out of turns from running out of time', () => {
-    expect(describeStop({ outcome: 'maxIterations', limit: 6 }).text).toMatch(/turns/)
+    expect(describeStop({ outcome: 'maxTurns', limit: 6 }).text).toMatch(/turns/)
     expect(describeStop({ outcome: 'deadline', afterMs: 1200 }).text).toMatch(/time/)
   })
 })
@@ -1032,24 +1029,41 @@ describe('the loop', () => {
 
     // One control saying how many turns, and no mode beside it implying a second
     // mechanism: the loop is the mechanism, and this is how far it may run.
-    const budget = await screen.findByLabelText(/max turns/)
-    expect(budget).toBeEnabled()
-    expect(budget).toHaveValue(6)
+    const cap = await screen.findByLabelText('max turns')
+    expect(cap).toBeEnabled()
     expect(screen.queryByLabelText('mode')).not.toBeInTheDocument()
+
+    // Untouched, this tab imposes nothing: the box is there, greyed, showing
+    // what it would cap at — the model's own budget is what bounds the run.
+    expect(cap).not.toBeChecked()
+    expect(screen.getByLabelText('Turn limit')).toBeDisabled()
+
+    // Ticked, it starts on a loop with room to finish rather than on a number
+    // nobody would have picked.
+    fireEvent.click(cap)
+    expect(screen.getByLabelText('Turn limit')).toBeEnabled()
+    expect(screen.getByLabelText('Turn limit')).toHaveValue(6)
 
     // Live at one as at six — a cap of one turn is a run, not a disabled state.
     await oneTurn()
-    expect(screen.getByLabelText(/max turns/)).toBeEnabled()
-    expect(screen.getByLabelText(/max turns/)).toHaveValue(1)
+    expect(screen.getByLabelText('Turn limit')).toBeEnabled()
+    expect(screen.getByLabelText('Turn limit')).toHaveValue(1)
 
     // Emptying the box is not a run of no turns: it snaps to the smallest one
     // there is rather than sending a budget the endpoint never hears about.
-    fireEvent.change(screen.getByLabelText(/max turns/), { target: { value: '' } })
-    expect(screen.getByLabelText(/max turns/)).toHaveValue(1)
+    fireEvent.change(screen.getByLabelText('Turn limit'), { target: { value: '' } })
+    expect(screen.getByLabelText('Turn limit')).toHaveValue(1)
+
+    // Unticked again, the override goes with it — the box only greys — and so
+    // does neither the number nor the row it sits in: unticking says the model
+    // knows better this time, not that the 1 somebody arrived at was a mistake.
+    fireEvent.click(screen.getByLabelText('max turns'))
+    expect(screen.getByLabelText('Turn limit')).toBeDisabled()
+    expect(screen.getByLabelText('Turn limit')).toHaveValue(1)
 
     // There is no second turn of an embedding, so there is nothing to cap.
     await user.click(screen.getByRole('button', { name: /embed/ }))
-    expect(screen.queryByLabelText(/max turns/)).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('max turns')).not.toBeInTheDocument()
   })
 
   it('sends every turn count to the loop, and reads the box for chunks', async () => {
@@ -1095,6 +1109,12 @@ describe('the loop', () => {
     await waitFor(() => expect(urls.some((url) => url.endsWith('api/agent'))).toBe(true))
     expect(bodies.some((body) => (body as { stream?: boolean }).stream === true)).toBe(false)
 
+    // And no budget of this tab's on it either: with the cap off, the run takes
+    // the model's own `agent.default_max_turns`, so the field is simply not there.
+    expect(bodies.some((body) => (body as { maxTurns?: number }).maxTurns !== undefined)).toBe(
+      false,
+    )
+
     // The box is what asks for chunks, and it asks them of the loop: same
     // endpoint, same one button, one flag different.
     await streamOn(user)
@@ -1110,9 +1130,7 @@ describe('the loop', () => {
     await user.type(screen.getByRole('textbox', { name: /message/i }), 'once')
     await user.click(screen.getByRole('button', { name: 'Send' }))
     await waitFor(() =>
-      expect(bodies.some((body) => (body as { maxIterations?: number }).maxIterations === 1)).toBe(
-        true,
-      ),
+      expect(bodies.some((body) => (body as { maxTurns?: number }).maxTurns === 1)).toBe(true),
     )
 
     expect(urls.some((url) => url.endsWith('api/call'))).toBe(false)
@@ -1168,6 +1186,44 @@ describe('the loop', () => {
     await waitFor(() => {
       expect(within(panel('Conversation')).getAllByText('pong')).toHaveLength(1)
     })
+  })
+
+  it('keeps the end of the transcript in sight as the chunks arrive', async () => {
+    const user = userEvent.setup()
+    vi.stubGlobal(
+      'fetch',
+      mockApi({
+        'api/models': MODELS,
+        'api/auth': AUTH,
+        'api/mcp': MCP,
+        'api/prompts': PROMPTS,
+        'api/agent': streamedAgent(answerTurn(200), ['po', 'ng']),
+      }),
+    )
+
+    render(<App />)
+    await streamOn(user)
+
+    // jsdom has no layout, so what is watched is the scroll being asked for
+    // rather than the pixels it moves. From the send onwards: the mount scrolls
+    // an empty transcript too, and that is not the question.
+    const moved = vi.spyOn(Element.prototype, 'scrollTop', 'set')
+    const paged = vi.spyOn(Element.prototype, 'scrollIntoView')
+
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+    await waitFor(() => {
+      expect(within(panel('Conversation')).getAllByText('pong')).toHaveLength(1)
+    })
+
+    // The transcript follows what is being written into it, on its own box.
+    const log = screen.getByRole('log', { name: 'Conversation' })
+    expect(moved.mock.contexts).toContain(log)
+
+    // And only its own box: a scroll that walked up to the document would take
+    // the traffic below out from under whoever was reading it.
+    expect(paged).not.toHaveBeenCalled()
+    moved.mockRestore()
+    paged.mockRestore()
   })
 
   it('says what a streamed loop was refused with rather than dropping the bubble', async () => {
@@ -1233,11 +1289,11 @@ describe('the loop', () => {
 
     // Streaming says how the answer arrives, not how many answers there are, so
     // the cap on the loop is still a cap on this one — at every value it takes.
-    expect(await screen.findByLabelText(/max turns/)).toBeEnabled()
+    expect(await screen.findByLabelText('max turns')).toBeEnabled()
 
     await oneTurn()
-    expect(screen.getByLabelText(/max turns/)).toBeEnabled()
-    expect(screen.getByLabelText(/max turns/)).toHaveValue(1)
+    expect(screen.getByLabelText('Turn limit')).toBeEnabled()
+    expect(screen.getByLabelText('Turn limit')).toHaveValue(1)
   })
 
   it('sends a chat model through the loop and an embedding one straight out', async () => {
@@ -2941,15 +2997,6 @@ describe('preflight', () => {
     expect(within(bar).getByText('anonymous')).toBeInTheDocument()
   })
 
-  it('counts the servers a run would set up first', async () => {
-    const user = userEvent.setup()
-    render(<App />)
-
-    await user.click(await screen.findByRole('button', { name: /guarded/ }))
-    await openMcp(user, 'dev', 'keyed')
-    expect(screen.getByLabelText('What the next call will do')).toHaveTextContent('2 MCP servers')
-  })
-
   it('names what would refuse the call, and starts the login that fixes it', async () => {
     const popup = { location: { href: '' }, closed: false, close: vi.fn() }
     vi.stubGlobal(
@@ -3343,7 +3390,24 @@ describe('coming back to it', () => {
     first.unmount()
 
     render(<App />)
-    expect(await screen.findByLabelText(/max turns/)).toHaveValue(1)
+    expect(await screen.findByLabelText('max turns')).toBeChecked()
+    expect(screen.getByLabelText('Turn limit')).toHaveValue(1)
+  })
+
+  it('reopens uncapped when the cap was off, on the number it was left on', async () => {
+    const first = render(<App />)
+
+    // The two halves are remembered apart. A tab that was letting the model's
+    // own budget stand comes back doing that — a stored number is not consent to
+    // override — and the number is still the one that was settled on.
+    await oneTurn()
+    fireEvent.click(screen.getByLabelText('max turns'))
+    first.unmount()
+
+    render(<App />)
+    expect(await screen.findByLabelText('max turns')).not.toBeChecked()
+    expect(screen.getByLabelText('Turn limit')).toBeDisabled()
+    expect(screen.getByLabelText('Turn limit')).toHaveValue(1)
   })
 
   it('never keeps the credential, whatever else it keeps', async () => {
@@ -3442,7 +3506,7 @@ const UPLOADED = {
 }
 
 /**
- * The file input **Attach** clicks.
+ * The file input **Upload files** clicks.
  *
  * Found in the DOM rather than by role: it is hidden and `aria-hidden`, because
  * assistive technology should be offered the button and not two controls doing
@@ -3621,9 +3685,9 @@ describe('a model that requires a file', () => {
 
     const send = await screen.findByRole('button', { name: 'Send' })
     expect(send).toBeDisabled()
-    // Said next to the button that fixes it, rather than on the bar: what the
-    // request carries is the composer's subject.
-    expect(screen.getByText(/built around a file/)).toBeInTheDocument()
+    // The shut button carries the reason itself, and the bar stays out of it:
+    // what the request carries is the composer's subject, not the bar's.
+    expect(send).toHaveAttribute('title', expect.stringMatching(/built around a file/))
     expect(bar()).not.toHaveTextContent('file')
 
     // Whatever the mock stores is what comes back, and any file clears the
@@ -3632,7 +3696,7 @@ describe('a model that requires a file', () => {
     await screen.findByText('report.pdf')
 
     await waitFor(() => expect(send).toBeEnabled())
-    expect(screen.queryByText(/built around a file/)).not.toBeInTheDocument()
+    expect(send).not.toHaveAttribute('title', expect.stringMatching(/built around a file/))
   })
 
   it('holds it shut on a model with no box either', async () => {
@@ -3649,9 +3713,10 @@ describe('a model that requires a file', () => {
 
     // `has_prompt: false` is what makes **Send** live with an empty box, so the
     // file is the only thing left holding it — and it does.
-    expect(await screen.findByRole('button', { name: 'Send' })).toBeDisabled()
+    const send = await screen.findByRole('button', { name: 'Send' })
+    expect(send).toBeDisabled()
     expect(screen.queryByLabelText('Message')).not.toBeInTheDocument()
-    expect(screen.getByText(/built around a file/)).toBeInTheDocument()
+    expect(send).toHaveAttribute('title', expect.stringMatching(/built around a file/))
   })
 
   /**
@@ -3689,6 +3754,10 @@ describe('attaching a file', () => {
     vi.stubGlobal('fetch', fetchMock)
     render(<App />)
     await screen.findByRole('button', { name: /^chat/ })
+
+    // The button says what pressing it does. The glyph beside the words is
+    // `aria-hidden`, so it is decoration rather than a second name.
+    expect(screen.getByRole('button', { name: 'Upload files' })).toBeInTheDocument()
 
     pick([new File(['a known signal'], 'report.pdf', { type: 'application/pdf' })])
 

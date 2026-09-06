@@ -86,8 +86,6 @@ export interface Row {
 export interface Preflight {
   /** The endpoint it would call. */
   url: string
-  /** The MCP servers it would set up before the first turn. Empty when none are on. */
-  servers: string[]
   /** Everything there is to say about this call, one line each. */
   rows: Row[]
   /** True of the call, but not fatal to it. */
@@ -323,7 +321,6 @@ export function preflight({
 
   return {
     url: model.url,
-    servers: mcpActive,
     rows,
     notes,
   }

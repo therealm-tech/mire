@@ -277,7 +277,7 @@ docker run --rm --read-only -p 127.0.0.1:8787:8787 \
 One static binary on `distroless/static` — a certificate bundle, timezone data,
 `/etc/passwd`, and nothing else. No shell, no package manager, and nothing to
 patch. It runs as UID 65532 and writes nothing, so `--read-only` costs nothing —
-right up until somebody presses **Attach**, which is the one thing here that
+right up until somebody presses **Upload files**, which is the one thing here that
 wants a disk. Give it one, owned by the user the container runs as:
 
 ```sh

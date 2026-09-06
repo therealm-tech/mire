@@ -532,7 +532,7 @@ mod tests {
 #[schemars(extend("example" = serde_json::json!({
     "model": "qwen3",
     "prompt": "What is the weather in Paris?",
-    "maxIterations": 6
+    "maxTurns": 6
 })))]
 pub struct AgentRequest {
     /// Everything a single call needs. `includeVectors`, `repeat` and
@@ -542,10 +542,10 @@ pub struct AgentRequest {
     #[validate(nested)]
     pub call: CallRequest,
 
-    /// Turn budget, overriding the model's `agent.max_iterations`.
+    /// Turn budget, overriding the model's `agent.default_max_turns`.
     #[serde(default)]
     #[validate(range(min = 1, max = 50))]
-    pub max_iterations: Option<u32>,
+    pub max_turns: Option<u32>,
 
     /// Which of the model's MCP servers this run may reach.
     ///
@@ -577,7 +577,7 @@ impl From<AgentRequest> for AgentInput {
     fn from(request: AgentRequest) -> Self {
         Self {
             call: request.call.into(),
-            max_iterations: request.max_iterations,
+            max_turns: request.max_turns,
             mcp_servers: request.mcp_servers,
             mcp_protocol: request.mcp_protocol,
         }

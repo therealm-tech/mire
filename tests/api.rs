@@ -2658,7 +2658,7 @@ async fn the_same_call_twice_is_not_watched_for_unless_asked() {
         "models/agent.yaml",
         agent_model(
             &format!("{}/v1", server.uri()),
-            "agent:\n  max_iterations: 3\n",
+            "agent:\n  default_max_turns: 3\n",
         ),
     )])
     .await;
@@ -2669,7 +2669,7 @@ async fn the_same_call_twice_is_not_watched_for_unless_asked() {
 
     // The default lets it keep going; only the turn budget ends the run.
     let (_, done) = events.last().unwrap();
-    assert_eq!(done["stop"]["outcome"], "maxIterations");
+    assert_eq!(done["stop"]["outcome"], "maxTurns");
     assert_eq!(done["stop"]["limit"], 3);
     assert_eq!(done["turns"].as_array().unwrap().len(), 3);
 }
@@ -2769,7 +2769,7 @@ async fn a_backend_that_never_reports_a_finish_reason_is_called_out_rather_than_
     // Stop only on `finish_reason`, which this endpoint never sends.
     let model = agent_model(
         &format!("{}/v1", server.uri()),
-        "agent:\n  max_iterations: 3\n  stop_when:\n    no_tool_calls: false\n    finish_reason_in: [stop, end_turn]\n",
+        "agent:\n  default_max_turns: 3\n  stop_when:\n    no_tool_calls: false\n    finish_reason_in: [stop, end_turn]\n",
     );
     let harness = Harness::start(&[("models/agent.yaml", model)]).await;
 
@@ -2778,7 +2778,7 @@ async fn a_backend_that_never_reports_a_finish_reason_is_called_out_rather_than_
         .await;
 
     let (_, done) = events.last().unwrap();
-    // Not `maxIterations`: the loop was not slow, it was unfalsifiable.
+    // Not `maxTurns`: the loop was not slow, it was unfalsifiable.
     assert_eq!(done["stop"]["outcome"], "predicateNeverEvaluable");
     assert_eq!(done["stop"]["predicate"], "stop_when.finish_reason_in");
     assert_eq!(done["stop"]["turns"], 3);
@@ -2800,17 +2800,17 @@ async fn the_turn_budget_is_honoured_and_overridable_per_run() {
         "models/agent.yaml",
         agent_model(
             &format!("{}/v1", server.uri()),
-            "agent:\n  max_iterations: 6\n",
+            "agent:\n  default_max_turns: 6\n",
         ),
     )])
     .await;
 
     let (_, events) = harness
-        .agent(json!({"model": "agent", "prompt": "tour de France", "maxIterations": 3}))
+        .agent(json!({"model": "agent", "prompt": "tour de France", "maxTurns": 3}))
         .await;
 
     let (_, done) = events.last().unwrap();
-    assert_eq!(done["stop"]["outcome"], "maxIterations");
+    assert_eq!(done["stop"]["outcome"], "maxTurns");
     assert_eq!(done["stop"]["limit"], 3);
     assert_eq!(done["turns"].as_array().unwrap().len(), 3);
 }
@@ -3613,7 +3613,7 @@ decode:
 agent:
   stop_when:
     no_tool_calls: true
-  max_iterations: 4
+  default_max_turns: 4
 "#
     )
 }
@@ -4293,7 +4293,7 @@ decode:
 agent:
   stop_when:
     no_tool_calls: true
-  max_iterations: 4
+  default_max_turns: 4
 "#
     )
 }
@@ -4392,7 +4392,7 @@ decode:
 agent:
   stop_when:
     no_tool_calls: true
-  max_iterations: 4
+  default_max_turns: 4
 "#
     )
 }
@@ -6935,7 +6935,7 @@ decode:
 agent:
   stop_when:
     no_tool_calls: true
-  max_iterations: 3
+  default_max_turns: 3
 "#
     )
 }
