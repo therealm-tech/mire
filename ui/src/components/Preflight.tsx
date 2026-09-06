@@ -51,13 +51,6 @@ export function Preflight({
         */}
         <span className="min-w-0 truncate font-mono text-muted">{state.url}</span>
 
-        {state.servers.length > 0 ? (
-          <span className="text-faint">
-            · {state.servers.length} MCP {state.servers.length === 1 ? 'server' : 'servers'} (
-            <span className="font-mono">{state.servers.join(', ')}</span>)
-          </span>
-        ) : null}
-
         {showMcp ? (
           <span className="ml-auto">
             <Button aria-expanded={mcpOpen} onClick={onOpenMcp}>

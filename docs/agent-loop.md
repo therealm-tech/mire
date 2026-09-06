@@ -7,8 +7,10 @@ round again. `POST /api/call` runs one turn of exactly the same thing.
 
 Which is why the UI has no mode to pick. **Send** is the loop, whatever the
 model declares, and **max turns** says how far it may go — at **1**, one turn
-of the very same thing, which is one call and one answer. A model that declares
-no tool stops on turn one anyway. So the only question the composer asks about
+of the very same thing, which is one call and one answer. Unticked, which is
+where it starts, the run is bounded by the model's own `agent.default_max_turns`
+rather than by anything the browser remembered. A model that declares no tool
+stops on turn one anyway. So the only question the composer asks about
 turns is *how many*, never *which mechanism*: there has only ever been one. How
 the answer *arrives* is the **stream** box, which is a
 [separate question](streaming.md) with its
@@ -43,7 +45,7 @@ agent:
     no_tool_calls: true          # the default, and almost always what you want
     finish_reason_in: [stop, end_turn]
     repeated_call: true          # off by default: stop on the same call twice
-  max_iterations: 6
+  default_max_turns: 6
   max_duration_ms: 600000
 tools:
   - name: get_weather
@@ -93,13 +95,13 @@ There is no silent loop. The one worth spelling out:
 ```
 
 A model that stops only on `finish_reason`, pointed at an endpoint that never
-reports one, would otherwise run to `max_iterations` and look like a slow agent.
-It is not — the condition could never be evaluated once, and that is what gets
-reported. The others are `stopped` (a predicate held), `maxIterations`,
+reports one, would otherwise run to `default_max_turns` and look like a slow
+agent. It is not — the condition could never be evaluated once, and that is what
+gets reported. The others are `stopped` (a predicate held), `maxTurns`,
 `deadline`, and `repeatedCall` — the model asking for the same tool with the same
 arguments twice, which is a loop rather than progress. That last one is opt-in
 (`stop_when.repeated_call`): re-reading a tool it already called is often a model
-working rather than spinning, and `max_iterations` bounds the run either way.
+working rather than spinning, and `default_max_turns` bounds the run either way.
 
 Try it against the [dev stack](dev-stack.md): `qwen3` fetches `get_weather` from
 the `weather` MCP server and really calls it. On a CPU-only Ollama a two-turn run takes about

@@ -65,7 +65,7 @@ Four models come with it:
 - **`whisper`** — the odd one out, and the reason `whisper` is in the stack at
   all: an endpoint that does not read a JSON document. The audio goes out as a
   form part and the knobs beside it, which is [a request built a third
-  way](models.md#when-the-endpoint-takes-a-form-not-json). Attach an audio file, press
+  way](models.md#when-the-endpoint-takes-a-form-not-json). Upload an audio file, press
   **Send**, and read the parts in **Traffic**. The pyannote variant is written
   out in a comment beside it.
 

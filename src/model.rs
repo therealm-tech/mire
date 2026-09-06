@@ -696,7 +696,7 @@ pub struct StopWhen {
     pub finish_reason_in: Vec<String>,
     /// Stop when the model asks for the same tool with the same arguments
     /// twice. Off unless asked for: a model that re-reads a tool it already
-    /// called is often working, not looping, and `max_iterations` already
+    /// called is often working, not looping, and `default_max_turns` already
     /// bounds the run.
     #[serde(default)]
     pub repeated_call: bool,
@@ -721,10 +721,10 @@ pub struct AgentSpec {
     /// When to stop looping.
     #[serde(default)]
     pub stop_when: StopWhen,
-    /// Hard cap on turns.
-    #[serde(default = "default_max_iterations")]
+    /// Hard cap on turns, and the budget a run takes when it asks for none.
+    #[serde(default = "default_max_turns")]
     #[validate(range(min = 1, max = 100))]
-    pub max_iterations: u32,
+    pub default_max_turns: u32,
     /// Hard cap on wall-clock time for the whole loop.
     #[serde(default)]
     pub max_duration_ms: Option<u64>,
@@ -906,7 +906,7 @@ fn default_timeout_ms() -> u64 {
     DEFAULT_TIMEOUT_MS
 }
 
-fn default_max_iterations() -> u32 {
+fn default_max_turns() -> u32 {
     10
 }
 
@@ -934,7 +934,7 @@ agent:
   stop_when:
     no_tool_calls: true
     finish_reason_in: [stop, end_turn]
-  max_iterations: 10
+  default_max_turns: 10
 tools:
   - name: get_weather
     schema:

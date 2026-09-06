@@ -68,36 +68,27 @@ export function McpPanel({
   onLogout: (name: string) => void
 }) {
   const groups = group(servers)
-  const reached = groups.filter((entry) => on.includes(entry.name)).map((entry) => entry.name)
-  const summary =
-    reached.length === 0
-      ? 'Nothing is set up, and the model is offered no live tool. Switch one on to put it in the next run.'
-      : `In this run: ${reached.join(', ')} — their tools are offered to the model, and a call to one really runs.`
 
   return (
     <Panel title="MCP servers">
-      <div className="space-y-3">
-        <ul className="space-y-1.5">
-          {groups.map((entry) => (
-            <Server
-              key={entry.name}
-              entry={entry}
-              active={pick(entry, stages)}
-              on={on.includes(entry.name)}
-              providers={providers}
-              disabled={disabled}
-              signingIn={signingIn}
-              loginError={loginError}
-              onToggle={onToggle}
-              onStage={onStage}
-              onLogin={onLogin}
-              onLogout={onLogout}
-            />
-          ))}
-        </ul>
-
-        <p className="border-line border-t pt-3 text-[11px] text-faint">{summary}</p>
-      </div>
+      <ul className="space-y-1.5">
+        {groups.map((entry) => (
+          <Server
+            key={entry.name}
+            entry={entry}
+            active={pick(entry, stages)}
+            on={on.includes(entry.name)}
+            providers={providers}
+            disabled={disabled}
+            signingIn={signingIn}
+            loginError={loginError}
+            onToggle={onToggle}
+            onStage={onStage}
+            onLogin={onLogin}
+            onLogout={onLogout}
+          />
+        ))}
+      </ul>
     </Panel>
   )
 }
@@ -212,18 +203,6 @@ function Server({
             ))}
           </div>
         </fieldset>
-      )}
-
-      {/*
-        Out of the run, so nothing here is worth acting on: no discovery, no
-        listing, no sign-in, and no `409` to be blocked by. Said out loud rather
-        than left to the greyed switch — a server that is quietly absent from a
-        trace is the thing this panel exists to stop.
-      */}
-      {on ? null : (
-        <p className="mt-1.5 text-[11px] text-faint">
-          Out of this run: never set up, never listed, and its tools are not offered to the model.
-        </p>
       )}
 
       {on

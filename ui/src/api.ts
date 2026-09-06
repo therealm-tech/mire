@@ -401,7 +401,7 @@ const stopOutcomeSchema = z.discriminatedUnion('outcome', [
       z.object({ predicate: z.literal('finishReason'), value: z.string() }),
     ]),
   }),
-  z.object({ outcome: z.literal('maxIterations'), limit: z.number() }),
+  z.object({ outcome: z.literal('maxTurns'), limit: z.number() }),
   z.object({ outcome: z.literal('deadline'), afterMs: z.number() }),
   z.object({ outcome: z.literal('repeatedCall'), tool: z.string(), atTurn: z.number() }),
   z.object({
@@ -798,7 +798,8 @@ export function call(body: CallRequest, signal?: AbortSignal): Promise<CallOutco
 
 /** One agent run. Mirrors `AgentRequest` on the server. */
 export interface AgentRequest extends CallRequest {
-  maxIterations?: number
+  /** This run's turn budget. Left out, the model's `default_max_turns` applies. */
+  maxTurns?: number
   /**
    * Which of the declared MCP servers this run may reach.
    *

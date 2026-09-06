@@ -359,7 +359,7 @@ export function describeStop(stop: StopOutcome): { tone: Tone; text: string } {
       return stop.reason.predicate === 'noToolCalls'
         ? { tone: 'good', text: 'Stopped: the model asked for no more tools.' }
         : { tone: 'good', text: `Stopped: finish reason "${stop.reason.value}".` }
-    case 'maxIterations':
+    case 'maxTurns':
       return { tone: 'warn', text: `Ran out of turns after ${stop.limit}.` }
     case 'deadline':
       return { tone: 'warn', text: `Ran out of time after ${stop.afterMs} ms.` }

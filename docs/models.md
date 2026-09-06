@@ -307,8 +307,8 @@ url: http://127.0.0.1:9000/v1/audio/transcriptions
 
 `true` is the default and every other model takes it. `false` does two things
 and no more: the message box and the saved-prompt picker go away, and **Send**
-goes out with an empty conversation instead of waiting. **Attach**, **stream**,
-**max turns**, the servers, the traffic and the `401` replay are all unchanged —
+goes out with an empty conversation instead of waiting. **Upload files**,
+**stream**, **max turns**, the servers, the traffic and the `401` replay are all unchanged —
 this is a statement about the composer, not about the wire.
 
 "Instead of waiting" is about the box only. A model also declaring

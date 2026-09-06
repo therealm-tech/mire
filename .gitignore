@@ -5,7 +5,7 @@
 /ui/node_modules
 /ui/dist
 
-# Where `Attach` writes, when nothing points it elsewhere. Somebody else's files.
+# Where `Upload files` writes, when nothing points it elsewhere. Somebody else's files.
 /uploads
 
 .DS_Store

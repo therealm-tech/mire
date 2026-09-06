@@ -167,8 +167,15 @@ export function App() {
 
   // The loop's budget, and the only thing that says how many turns a send is:
   // `1` is a single turn of the same mechanism, 6 is a loop with room to finish.
-  // There is nothing beside it, because there is nothing else to ask.
-  const [maxIterations, setMaxIterations] = usePersisted('maxTurns', z.number(), 6)
+  // There is no mode beside it, because there is nothing else to ask.
+  //
+  // Two values rather than a nullable one, because they answer two questions
+  // that outlive each other: whether this tab caps the run at all, and what the
+  // number is when it does. Untick it, go away, come back, tick it again — the
+  // 12 you had settled on is still there, which a `null` would have thrown away
+  // twice over.
+  const [capTurns, setCapTurns] = usePersisted('capTurns', z.boolean(), false)
+  const [maxTurns, setMaxTurns] = usePersisted('maxTurns', z.number(), 6)
   // Off by default. Streaming is a second thing to get right — the framing, the
   // deltas, the endpoint actually chunking at all — and a first run should fail
   // for one reason at a time. It is also where tool calls stop reassembling, so a
@@ -412,7 +419,7 @@ export function App() {
   // a credential the server will refuse, and being refused is how you find out
   // that it does; this one has no call in it at all — a `requires_upload:` model
   // with nothing attached renders a request around a file that is not there — so
-  // **Send** is shut until **Attach** has been pressed. Worked out here rather
+  // **Send** is shut until **Upload files** has been pressed. Worked out here rather
   // than read off the bar: it is about what the request carries, which is the
   // composer's subject and not the bar's.
   const needsUpload = model?.requiresUpload === true && attachments.length === 0
@@ -565,7 +572,12 @@ export function App() {
       const body: AgentRequest = {
         model: model.id,
         messages: sent,
-        maxIterations,
+      }
+      // Only when this tab caps it. Left out, the budget is the model's own
+      // `default_max_turns`, and an override nobody asked for is not one the
+      // request carries.
+      if (capTurns) {
+        body.maxTurns = maxTurns
       }
       // Sent either way rather than only when on: `POST /api/agent` reads a
       // whole answer by default, and the template is told what the run asked
@@ -672,7 +684,7 @@ export function App() {
         })
         .finally(settle)
     },
-    [model, token, attachments, maxIterations, streaming, usesMcp, activeMcp, begin, settle],
+    [model, token, attachments, capTurns, maxTurns, streaming, usesMcp, activeMcp, begin, settle],
   )
 
   const send = useCallback(() => runLoop(ask()), [runLoop, ask])
@@ -936,7 +948,8 @@ export function App() {
               prompt={prompt}
               prompts={prompts}
               hasPrompt={hasPrompt}
-              maxIterations={maxIterations}
+              capTurns={capTurns}
+              maxTurns={maxTurns}
               streaming={streaming}
               error={callError ? callError.body : null}
               attachments={attachments}
@@ -945,7 +958,8 @@ export function App() {
               missingSignIn={missingSignIn}
               attachError={attachError ? attachError.body : null}
               onPrompt={setPrompt}
-              onMaxIterations={setMaxIterations}
+              onCapTurns={setCapTurns}
+              onMaxTurns={setMaxTurns}
               onStreaming={setStreaming}
               onAttach={attach}
               onDetach={detach}

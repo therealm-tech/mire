@@ -47,7 +47,8 @@ export function ChatPanel({
   prompt,
   prompts,
   hasPrompt,
-  maxIterations,
+  capTurns,
+  maxTurns,
   streaming,
   error,
   attachments,
@@ -56,7 +57,8 @@ export function ChatPanel({
   needsUpload,
   missingSignIn,
   onPrompt,
-  onMaxIterations,
+  onCapTurns,
+  onMaxTurns,
   onStreaming,
   onAttach,
   onDetach,
@@ -87,10 +89,20 @@ export function ChatPanel({
    */
   hasPrompt: boolean
   /**
+   * Whether the budget below is this run's, or the model's own is.
+   *
+   * Off, nothing about turns goes out and the model's `default_max_turns` bounds
+   * the run.
+   */
+  capTurns: boolean
+  /**
    * The turn budget, which is also what says whether there is a loop at all:
    * `1` is one turn with no second one to answer a tool call in.
+   *
+   * Kept whether or not it is in force, so unticking the cap is not the same as
+   * forgetting the number somebody had settled on.
    */
-  maxIterations: number
+  maxTurns: number
   /** Whether the run is read chunk by chunk. Orthogonal to the turn count. */
   streaming: boolean
   error: { code: string; message: string; detail?: unknown } | null
@@ -110,7 +122,8 @@ export function ChatPanel({
   /** An identity this run needs has no browser session behind it. */
   missingSignIn: boolean
   onPrompt: (value: string) => void
-  onMaxIterations: (value: number) => void
+  onCapTurns: (on: boolean) => void
+  onMaxTurns: (value: number) => void
   onStreaming: (value: boolean) => void
   onAttach: (files: File[]) => void
   onDetach: (id: string) => void
@@ -126,18 +139,27 @@ export function ChatPanel({
   // `mire`'s own — neither call leaves the process — so there is nothing to
   // learn by pressing **Send** and being told what is already on the page.
   const refusal = needsUpload
-    ? 'This model is built around a file. Attach one, and Send comes back.'
+    ? 'This model is built around a file. Upload one, and Send comes back.'
     : missingSignIn
       ? 'An identity this run needs has nobody signed in to it. Sign in above, and Send comes back.'
       : null
   const turns = positions.size
 
   // Following the answer as it is written is the whole reason this is a
-  // transcript rather than a list, so the view keeps its end in sight.
-  const foot = useRef<HTMLDivElement>(null)
+  // transcript rather than a list, so the view keeps its end in sight — on every
+  // chunk of a stream, not only on every turn.
+  //
+  // The box is scrolled by its own `scrollTop` rather than by `scrollIntoView`
+  // on a marker at the end of it: that walks up every scrollable ancestor and
+  // takes the page with it, so a token arriving while somebody was reading the
+  // traffic below moved the traffic. This moves this box and nothing else.
+  const log = useRef<HTMLDivElement>(null)
   // biome-ignore lint/correctness/useExhaustiveDependencies: the effect reads nothing, it reacts — a new item or a new chunk is exactly when the view has to move.
   useEffect(() => {
-    foot.current?.scrollIntoView({ block: 'end' })
+    const box = log.current
+    if (box !== null) {
+      box.scrollTop = box.scrollHeight
+    }
   }, [items.length, live?.text])
 
   return (
@@ -156,6 +178,7 @@ export function ChatPanel({
     >
       <div className="space-y-3">
         <div
+          ref={log}
           // Tall enough to hold a conversation, capped so the traffic below
           // stays one scroll away rather than one page.
           className="max-h-[28rem] space-y-3 overflow-y-auto pr-1 sm:max-h-[36rem]"
@@ -166,7 +189,7 @@ export function ChatPanel({
             <p className="py-8 text-center text-muted text-sm">
               {hasPrompt
                 ? 'Nothing said yet. Ask something below.'
-                : 'Nothing sent yet. Attach what this model reads, and send.'}
+                : 'Nothing sent yet. Upload what this model reads, and send.'}
             </p>
           ) : null}
 
@@ -210,8 +233,6 @@ export function ChatPanel({
           ) : null}
 
           {error ? <Failure error={error} /> : null}
-
-          <div ref={foot} />
         </div>
 
         <Composer
@@ -220,15 +241,16 @@ export function ChatPanel({
           hasPrompt={hasPrompt}
           turns={turns}
           busy={busy}
-          maxIterations={maxIterations}
+          capTurns={capTurns}
+          maxTurns={maxTurns}
           streaming={streaming}
           attachments={attachments}
           attaching={attaching}
           attachError={attachError}
-          needsUpload={needsUpload}
           refusal={refusal}
           onPrompt={onPrompt}
-          onMaxIterations={onMaxIterations}
+          onCapTurns={onCapTurns}
+          onMaxTurns={onMaxTurns}
           onStreaming={onStreaming}
           onAttach={onAttach}
           onDetach={onDetach}
@@ -237,6 +259,30 @@ export function ChatPanel({
         />
       </div>
     </Panel>
+  )
+}
+
+/**
+ * An arrow into a tray, on the button that picks files.
+ *
+ * Drawn here rather than pulled in: it is six line segments, and an icon set is
+ * a dependency, a bundle and a second way of saying `currentColor`.
+ */
+function UploadIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M8 10.5V2.5M4.75 5.75L8 2.5l3.25 3.25" />
+      <path d="M2.5 10.5v2A1.5 1.5 0 0 0 4 14h8a1.5 1.5 0 0 0 1.5-1.5v-2" />
+    </svg>
   )
 }
 
@@ -580,7 +626,7 @@ function Writing({
 }
 
 /**
- * What **Attach** has actually done, said plainly.
+ * What **Upload files** has actually done, said plainly.
  *
  * The bluntness is the point, and the sentence is a careful one. These files go
  * out with the next **Send** — as `uploads`, to the *template*, not to the
@@ -678,15 +724,16 @@ function Composer({
   hasPrompt,
   turns,
   busy,
-  maxIterations,
+  capTurns,
+  maxTurns,
   streaming,
   attachments,
   attaching,
   attachError,
-  needsUpload,
   refusal,
   onPrompt,
-  onMaxIterations,
+  onCapTurns,
+  onMaxTurns,
   onStreaming,
   onAttach,
   onDetach,
@@ -698,23 +745,17 @@ function Composer({
   hasPrompt: boolean
   turns: number
   busy: boolean
-  maxIterations: number
+  capTurns: boolean
+  maxTurns: number
   streaming: boolean
   attachments: UploadedFile[]
   attaching: boolean
   attachError: { code: string; message: string; detail?: unknown } | null
-  /**
-   * The model declares `requires_upload:` and nothing is attached yet.
-   *
-   * **Send** stays shut until something is: the server refuses this call before
-   * it renders a body, and a button that only produces a `422` is a button that
-   * lies about what it does.
-   */
-  needsUpload: boolean
   /** Why **Send** does not go, beyond an empty box. See `refusal` in `ChatPanel`. */
   refusal: string | null
   onPrompt: (value: string) => void
-  onMaxIterations: (value: number) => void
+  onCapTurns: (on: boolean) => void
+  onMaxTurns: (value: number) => void
   onStreaming: (value: boolean) => void
   onAttach: (files: File[]) => void
   onDetach: (id: string) => void
@@ -731,8 +772,8 @@ function Composer({
   // Every reason **Send** does not go, in one place, because Enter has to obey
   // the same list the button does. The last is the one worth pointing at: it is
   // never fixed by anything in the box — which on a `has_prompt: false` model is
-  // not even there — but by **Attach** two buttons along, or by the sign-in on
-  // the bar above.
+  // not even there — but by **Upload files** two buttons along, or by the
+  // sign-in on the bar above.
   const stuck = busy || empty || refusal !== null
 
   // The real control is the input; the button is what you can see. Styling a
@@ -743,7 +784,7 @@ function Composer({
   // One turn is a run with no second turn to loop into: the same model and the
   // same rendered request as a longer run, stopped after one. A cap rather than a
   // mode of its own, because a mode implies two mechanisms and there is one.
-  const single = maxIterations === 1
+  const single = capTurns && maxTurns === 1
 
   return (
     <div className="space-y-2 border-line border-t pt-3">
@@ -795,7 +836,7 @@ function Composer({
         */
         <p className="text-muted text-sm">
           This model takes no message: what goes out is what its request builds — the file you
-          attach, and the fields around it.
+          upload, and the fields around it.
         </p>
       )}
 
@@ -864,20 +905,11 @@ function Composer({
           disabled={attaching}
           onClick={() => picker.current?.click()}
           title="Write a file to mire's upload directory and hand it to the template as `uploads`."
+          className="inline-flex items-center gap-1.5"
         >
-          {attaching ? 'Attaching…' : 'Attach'}
+          <UploadIcon />
+          {attaching ? 'Uploading…' : 'Upload files'}
         </Button>
-
-        {/*
-          Beside the button that fixes it, because that is the whole of the fix.
-          Not on the bar above: what the request carries is this box's subject,
-          and the bar's is where the call goes and who it goes as.
-        */}
-        {needsUpload ? (
-          <span className="text-bad text-xs">
-            This model is built around a file. Attach one, and Send comes back.
-          </span>
-        ) : null}
 
         {/*
           Only while there is something to stop. A permanently disabled Stop
@@ -889,57 +921,59 @@ function Composer({
           </Button>
         ) : null}
         {/*
-          Never inert, at any value: a budget of one turn is a run like any other,
-          not a disabled state. Streaming has no say in it either way — how the
-          answer arrives is not how many answers there are.
+          A budget this tab puts on the loop, and unticked it puts none: the run
+          takes the model's own `agent.default_max_turns`, which is the file's
+          answer and the one a call from anywhere else gets. Ticked, the number
+          replaces it for this run — which is how you ask for a single turn, or
+          for room a model's own budget does not leave.
+
+          The box stays either way, greyed rather than gone: what this tab would
+          cap the run at is worth reading while the model's own budget stands, and
+          a control that vanishes moves the whole row every time the tick flips.
+          The number in it is kept too — unticking says the model knows better
+          this time, not that the 12 somebody arrived at was a mistake.
+
+          Never inert once it is on, at any value: a budget of one turn is a run
+          like any other, not a disabled state. Streaming has no say in it either
+          way — how the answer arrives is not how many answers there are.
         */}
-        <label
-          className="ml-auto flex items-center gap-1.5 text-muted text-xs"
-          title="How many turns the loop may take. 1 sends one turn and stops."
-        >
-          max turns
+        <div className="ml-auto flex items-center gap-1.5 text-muted text-xs">
+          <label
+            className="flex items-center gap-1.5"
+            title="Cap the loop's turns from here. Unticked, the model's own budget applies."
+          >
+            <input
+              type="checkbox"
+              checked={capTurns}
+              disabled={busy}
+              onChange={(event) => onCapTurns(event.target.checked)}
+              className="disabled:opacity-50"
+            />
+            max turns
+          </label>
           <input
             type="number"
+            aria-label="Turn limit"
             min={1}
             max={50}
-            value={maxIterations}
-            disabled={busy}
+            value={maxTurns}
+            disabled={busy || !capTurns}
             onChange={(event) =>
-              onMaxIterations(Math.min(50, Math.max(1, Number(event.target.value) || 1)))
+              onMaxTurns(Math.min(50, Math.max(1, Number(event.target.value) || 1)))
             }
-            className={`${INPUT_CLASSES} w-16`}
+            className={`${INPUT_CLASSES} w-16 disabled:opacity-50`}
           />
-        </label>
+        </div>
       </div>
 
       <Attachments files={attachments} error={attachError} busy={attaching} onDetach={onDetach} />
 
-      <p className="text-faint text-xs">
-        <strong>Send</strong> runs this model in a loop, answering the tools the model asks for
-        until it stops asking — or until <strong>max turns</strong>, which at{' '}
-        <strong className="font-medium">1</strong> is a single turn and no loop at all. A model that
-        declares no tool stops on turn one anyway. <strong>stream</strong> is the other question,
-        asked whatever the count: read the answer chunk by chunk as it arrives, which is the only
-        way to see time to first token and the only way to watch it being written. It reaches the
-        wire only if the model's template passes <code>stream</code> on.
-      </p>
       {single ? (
         <p className="text-faint text-xs">
           At <strong className="font-medium">1</strong> a tool call comes back unanswered, flagged
           on its bubble: there is no second turn to carry the result, and most endpoints refuse the
           next one until it has one. That is the turn to send when the question is whether the model
           asks for the tool at all.
-        </p>
-      ) : null}
-      {streaming && !single ? (
-        <p className="text-faint text-xs">
-          A streamed loop is worth knowing one thing about:{' '}
-          <strong className="font-medium">tool calls do not reassemble from a stream</strong>.{' '}
-          <code>mire</code> decodes a streamed answer from its last chunk, and an endpoint that
-          splits a call's arguments across chunks has none there — so a turn that really did ask for
-          a tool can come back looking like a turn that asked for nothing, and the loop stops on it.
-          That is the endpoint's behaviour rather than a setting to fix; untick{' '}
-          <strong>stream</strong> to test tool calling.
         </p>
       ) : null}
     </div>

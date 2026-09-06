@@ -151,7 +151,7 @@ agent:
     finish_reason_in:
       - stop
       - end_turn
-  max_iterations: 6
+  default_max_turns: 6
   max_duration_ms: 600000
 
 # The tools are not declared here, and neither are the servers they come from.

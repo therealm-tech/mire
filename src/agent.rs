@@ -17,7 +17,7 @@
 //! Every way out is named. The one worth spelling out is
 //! [`StopOutcome::PredicateNeverEvaluable`]: a backend that never emits a
 //! `finish_reason` would let a model stopping on `finish_reason_in` run to
-//! `max_iterations` and look like a slow agent. It is not — the configured
+//! `default_max_turns` and look like a slow agent. It is not — the configured
 //! predicate could never be evaluated even once, and that is what gets reported.
 
 use std::collections::{BTreeMap, HashSet};
@@ -45,7 +45,7 @@ use crate::uploads::UploadRef;
 use crate::vars::Vars;
 
 /// Turns allowed when the model says nothing.
-const DEFAULT_MAX_ITERATIONS: u32 = 10;
+const DEFAULT_MAX_TURNS: u32 = 10;
 
 /// Wall-clock ceiling when the model says nothing. Generous: a small model on
 /// a CPU is slow, and a timeout that fires on a working agent is worse than one
@@ -68,7 +68,7 @@ pub enum StopOutcome {
         reason: StopReason,
     },
     /// The turn budget ran out with the predicates evaluable but never true.
-    MaxIterations {
+    MaxTurns {
         /// The budget.
         limit: u32,
     },
@@ -249,8 +249,8 @@ pub struct Trace {
 pub struct AgentInput {
     /// The single-turn input.
     pub call: CallInput,
-    /// Turn budget, overriding the model's.
-    pub max_iterations: Option<u32>,
+    /// Turn budget, overriding the model's `default_max_turns`.
+    pub max_turns: Option<u32>,
     /// Which of the declared MCP servers this run may reach.
     ///
     /// `None` is all of them: a server is declared once, in `mcp/`, and every
@@ -548,7 +548,7 @@ fn budget_exhausted(
     }
     if index > limit {
         return Some(if predicate_ever_evaluable {
-            StopOutcome::MaxIterations { limit }
+            StopOutcome::MaxTurns { limit }
         } else {
             StopOutcome::PredicateNeverEvaluable {
                 predicate: describe_predicate(stop_when),
@@ -726,7 +726,7 @@ async fn prepare(runner: &Runner, input: &mut AgentInput) -> Result<Prepared, Ag
         .collect();
 
     Ok(Prepared {
-        limit: input.max_iterations.unwrap_or(spec.max_iterations),
+        limit: input.max_turns.unwrap_or(spec.default_max_turns),
         deadline: spec
             .max_duration_ms
             .map_or(DEFAULT_MAX_DURATION, Duration::from_millis),
@@ -808,7 +808,7 @@ fn detect_repeat(seen: &mut HashSet<String>, calls: &[ToolCall]) -> Option<Strin
 fn default_spec() -> AgentSpec {
     AgentSpec {
         stop_when: StopWhen::default(),
-        max_iterations: DEFAULT_MAX_ITERATIONS,
+        default_max_turns: DEFAULT_MAX_TURNS,
         max_duration_ms: None,
     }
 }

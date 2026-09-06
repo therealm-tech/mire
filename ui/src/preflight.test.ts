@@ -306,14 +306,12 @@ describe('preflight', () => {
     // Declaring a server in `mcp/` makes it available, not live: a tool call
     // really runs somewhere, so the run reaches one because somebody said so.
     const idle = run({ servers: TWO_SERVERS })
-    expect(idle.servers).toEqual([])
     expect(blocking(idle)).toEqual([])
-    // Nothing is set up, and the block that holds the switches says so. The bar
-    // counts what the run reaches, and reaching nothing counts to nothing.
+    // Nothing is set up, and the block that holds the switches says so: the bar
+    // has nothing to add about a run that reaches no server.
     expect(idle.notes).toEqual([])
 
     const state = run({ servers: TWO_SERVERS, mcpOn: ['files', 'search'] })
-    expect(state.servers).toEqual(['files', 'search'])
     expect(state.notes).toEqual([])
   })
 
@@ -334,7 +332,6 @@ describe('preflight', () => {
     // business with one.
     const loopless = run({ ...overrides, usesMcp: false })
     expect(blocking(loopless)).toEqual([])
-    expect(loopless.servers).toEqual([])
   })
 
   it('carries only the blockers of the servers this run actually reaches', () => {
@@ -343,19 +340,11 @@ describe('preflight', () => {
     // Both want a session nobody has, and only the one switched on can refuse
     // this call: a server left off is never discovered, listed or signed in to.
     const narrowed = run({ ...overrides, mcpOn: ['files'] })
-    expect(narrowed.servers).toEqual(['files'])
     expect(blocking(narrowed)).toHaveLength(1)
     expect(blocking(narrowed)[0]?.fix).toEqual({ kind: 'sign-in', provider: 'me', retry: false })
 
     // Still one line: two servers wanting one identity is one thing to fetch.
     expect(blocking(run({ ...overrides, mcpOn: ['files', 'search'] }))).toHaveLength(1)
-  })
-
-  it('ignores a switched-on name that nothing declares any more', () => {
-    // `mcpOn` outlives a reload, and so outlives the entry it was about. A name
-    // deleted from `mcp/` is simply not in the picture.
-    const state = run({ servers: TWO_SERVERS, mcpOn: ['deleted', 'files'] })
-    expect(state.servers).toEqual(['files'])
   })
 
   it('says an identity the model and a server share once, and once only', () => {

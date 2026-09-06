@@ -4,9 +4,8 @@ Deliberately small. It does not edit anything — the models are yours and your
 editor's — and it holds no logic of its own: it shows what the API returns.
 
 - **What the next call will do**, above the box you would make it from. Where it
-  goes, who it goes as, and which MCP servers it would set up first — the
-  "known signal in" half, said before it happens rather than reconstructed from a
-  trace afterwards. It says nothing about whether the endpoint is up. That is the
+  goes and who it goes as — the "known signal in" half, said before it happens
+  rather than reconstructed from a trace afterwards. It says nothing about whether the endpoint is up. That is the
   question you came to ask, and answering it here would be answering it by
   guessing.
 
@@ -24,8 +23,8 @@ editor's — and it holds no logic of its own: it shows what the API returns.
 
   What the request *carries* is not here. A `requires_upload:` model with nothing
   attached is refused just as squarely, but the file that fixes it is picked two
-  buttons along on the composer, so that is where it is said — beside **Attach**,
-  with **Send** shut until it is pressed.
+  buttons along on the composer, so that is where it is answered — **Send** stays
+  shut, and says why, until **Upload files** has been pressed.
 
   **Send waits for one of these lines, and only one**: an identity with nobody
   signed in to it, the model's own or one a server in this run needs. That call
@@ -82,7 +81,12 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   "one turn or several" question: at **1** the run sends a turn and stops, which
   is the single call and the single answer, with a tool call — if the model makes
   one — coming back unanswered and flagged. Anything above it is a loop with room
-  to finish. A **stream** box is the other question: ticked, the answer is read
+  to finish. It is **off by default**, and off it is not a budget of zero: the run
+  takes the model's own `agent.default_max_turns`, which is what the file says and
+  what a call from anywhere else gets. Ticking it is this tab overriding that for
+  this run. The number stays on screen either way, greyed while the model's own
+  budget stands, and it is remembered — unticking the cap does not throw away the
+  number somebody settled on. A **stream** box is the other question: ticked, the answer is read
   chunk by chunk, the text appearing as it is written and the only way to see
   time to first token. The two are independent — a streamed loop and a
   whole-bodied single turn are both a tick away — and the box is **off by
@@ -114,9 +118,10 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   somebody's real server, so a run reaches one because you said so here and never
   because a file was sitting in `mcp/`. A server left off is not set up — nothing
   discovered, nothing listed, no credential fetched, its tools not offered, and
-  the refusal it was causing gone with it. The card stays, [saying
-  so](mcp.md#choosing-what-a-run-reaches); the bar above counts what the run
-  reaches, and a run that reaches nothing counts to nothing there.
+  the refusal it was causing gone with it. The card stays, with its switch off and
+  nothing on it left to act on — [what that
+  means](mcp.md#choosing-what-a-run-reaches) is the same for every server that is
+  out, so it is said once there rather than under each of them.
 
   A server declaring [stages](configuration.md#stages) is one card all the same,
   with a button per stage and a dot on the one a bare name means — the same shape
@@ -155,9 +160,10 @@ with the call and never stored, never logged, never echoed back. A credential
 username, the granted scopes and a countdown.
 
 **The tab remembers a little, and never that.** Which model you were on and the
-stage you were asking it at, what you had half typed, how many turns you allow,
-which MCP servers you switched on and at which stage you were asking them —
-small settings whose loss is pure annoyance, kept in the browser's own storage. The stage is remembered per model and per server, so
+stage you were asking it at, what you had half typed, whether and how far you cap
+the turns, which MCP servers you switched on and at which stage you were asking
+them — small settings whose loss is pure annoyance, kept in the browser's own
+storage. The stage is remembered per model and per server, so
 coming back to one comes back to where the question was rather than to its
 default; a stage the file no longer declares is simply the default again. The credential is not among them, and neither is
 the conversation or the traffic: a session's bodies are unbounded, and the first
@@ -227,8 +233,8 @@ Four things follow, each of which is a decision:
 
 ## Attaching a file
 
-**Attach** writes a file to `mire`'s upload directory — `--uploads`, `./uploads`
-by default — and lists what it stored. That is the whole feature, and the next
+**Upload files** writes a file to `mire`'s upload directory — `--uploads`,
+`./uploads` by default — and lists what it stored. That is the whole feature, and the next
 sentence is the important one.
 
 **The file goes to the template, not to the endpoint.** The next **Send** hands
@@ -302,7 +308,7 @@ itself.
 Attachments are re-rendered on **every turn** of an agent loop, since the body is
 built from the template each time. And a template that inlines one puts it in the
 request body, so it arrives in **Traffic** at its full base64 size — a 12 MB photo
-is a 16 MB request to scroll past. Attach the file you meant to test with. (A
+is a 16 MB request to scroll past. Upload the file you meant to test with. (A
 `multipart:` model does not have this problem: the panel names its parts rather
 than repeating their bytes.)
 
@@ -340,12 +346,13 @@ url: http://127.0.0.1:9000/v1/audio/transcriptions
 requires_upload: true
 ```
 
-**Send** is then shut until **Attach** has been pressed — and so is **Retry**,
-which is a send like any other — with the reason on the preflight bar beside every
-other thing that would stop the call:
+**Send** is then shut until **Upload files** has been pressed — and so is
+**Retry**, which is a send like any other. The button carries the reason, so what
+holds it is readable from the button itself rather than from a sentence somewhere
+else on the page:
 
 ```
-whisper needs a file: attach one, since the request is built around it.
+This model is built around a file. Upload one, and Send comes back.
 ```
 
 The button is the courtesy; the rule is the server's. A call arriving at
