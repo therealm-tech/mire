@@ -924,6 +924,11 @@ decode:
     assert_eq!(models[0]["name"], "chat");
     assert_eq!(models[1]["stage"], "prod");
 
+    // Which of the two a bare `chat` means, said on the entry rather than left
+    // for the UI to guess from the order.
+    assert_eq!(models[0]["isDefault"], true);
+    assert_eq!(models[1]["isDefault"], false);
+
     let (status, _, body) = harness
         .call(json!({"model": "chat@prod", "prompt": "ping"}))
         .await;

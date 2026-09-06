@@ -39,6 +39,14 @@ export const modelSummarySchema = z.object({
   name: z.string(),
   /** The stage this reading of the file belongs to. Absent when it declares none. */
   stage: z.string().optional(),
+  /**
+   * Whether a bare `name` means this reading.
+   *
+   * The file's `default_stage:`, and always true for a file that declares no
+   * stages. The list marks it: it is the stage another file's `auth:` and a
+   * hand-written call reach without naming one.
+   */
+  isDefault: z.boolean(),
   kind: modelKindSchema,
   /**
    * Whether this model takes a typed message.

@@ -5,6 +5,7 @@ import { preflight, reaches } from './preflight'
 const MODEL: ModelSummary = {
   id: 'chat',
   name: 'chat',
+  isDefault: true,
   kind: 'chat',
   url: 'https://models.internal/v1/chat/completions',
   auth: 'token',
