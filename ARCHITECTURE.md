@@ -397,10 +397,11 @@ regexes behind `tools:` are all parsed when the file is read, so a typo names th
 file at startup instead of surfacing twenty minutes into a run — or, worse,
 rendering beautifully into a URL that is quietly the wrong one.
 
-**Vectors are never rendered whole**, in the logs, the API or the UI: a width, an
-L2 norm, a sample and a histogram. A careful summary sitting next to a `raw`
-field carrying all 1024 floats would be theatre, so the raw node is elided too.
-`includeVectors` is the only way to get the payload.
+**Vectors are summarised, never rendered whole**, in the logs and in an API
+answer that did not ask for them: a width, an L2 norm, a sample and a histogram.
+A careful summary sitting next to a `raw` field carrying all 1024 floats would be
+theatre, so the raw node is elided too. `includeVectors` is the only way to get
+the payload, and the UI sends it on every embedding call.
 
 **The artefacts are a static binary and a `distroless/static` image.** The UI is
 embedded, so there is one thing to copy and no assets to serve from anywhere

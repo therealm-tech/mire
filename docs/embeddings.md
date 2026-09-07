@@ -79,13 +79,15 @@ help nobody — and the panel says so (`first 8 shown`). The **checks still read
 every vector**: a hole in token 300 fails `finite` even though nothing drew it,
 and names it `0#300`.
 
-## Vectors are never rendered whole
+## Vectors are summarised, never rendered whole
 
-Not in the logs, not in the API, not in the UI. You get the width, the L2 norm, a
-sample of the first values and a distribution histogram. The raw response is
-elided too (`"<1024 values elided; set includeVectors to see them>"`), because a
-careful summary next to a `raw` field carrying all 1024 floats would be theatre —
-the rest of the raw tree, which is what you actually read, is untouched.
+Not in the logs, not in an API answer that did not ask for them. You get the
+width, the L2 norm, a sample of the first values and a distribution histogram.
+The raw response is elided too (`"<1024 values elided; set includeVectors to see
+them>"`), because a careful summary next to a `raw` field carrying all 1024
+floats would be theatre — the rest of the raw tree, which is what you actually
+read, is untouched.
 
 `includeVectors: true` turns all of that off and gives you the full payload. It
-is the only way to get it.
+is the only way to get it, and the UI's embedding tab always sends it: a summary
+you cannot open is a summary you have to take on faith.

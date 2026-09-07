@@ -13,12 +13,10 @@ export function EmbeddingRequest({
   input,
   prompts,
   repeat,
-  includeVectors,
   busy,
   missingSignIn,
   onInput,
   onRepeat,
-  onIncludeVectors,
   onSend,
   onStop,
 }: {
@@ -26,7 +24,6 @@ export function EmbeddingRequest({
   /** The same library the composer offers: a saved text is a text either box takes. */
   prompts: PromptsResponse
   repeat: number
-  includeVectors: boolean
   busy: boolean
   /**
    * An identity this call needs has no browser session behind it, so it would be
@@ -36,7 +33,6 @@ export function EmbeddingRequest({
   missingSignIn: boolean
   onInput: (value: string) => void
   onRepeat: (value: number) => void
-  onIncludeVectors: (value: boolean) => void
   onSend: () => void
   onStop: () => void
 }) {
@@ -54,26 +50,20 @@ export function EmbeddingRequest({
           />
         </Field>
 
-        <div className="flex flex-wrap items-end gap-4">
-          <Field label="Runs (2+ checks determinism)">
-            <input
-              type="number"
-              min={1}
-              max={5}
-              value={repeat}
-              onChange={(event) => onRepeat(Number(event.target.value))}
-              className={`${INPUT_CLASSES} w-20`}
-            />
-          </Field>
-          <label className="flex items-center gap-2 pb-1 text-xs">
-            <input
-              type="checkbox"
-              checked={includeVectors}
-              onChange={(event) => onIncludeVectors(event.target.checked)}
-            />
-            Attach full vectors
-          </label>
-        </div>
+        <label
+          className="flex items-center gap-1.5 text-muted text-xs"
+          title="Send the same input more than once. Two runs or more is what the determinism check compares."
+        >
+          runs
+          <input
+            type="number"
+            min={1}
+            max={5}
+            value={repeat}
+            onChange={(event) => onRepeat(Number(event.target.value))}
+            className={`${INPUT_CLASSES} w-16`}
+          />
+        </label>
 
         <div className="flex flex-wrap items-center gap-2">
           <Button

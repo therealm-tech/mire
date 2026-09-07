@@ -195,7 +195,6 @@ export function App() {
   const [timeline, setTimeline] = useState<ChatItem[]>([])
   const [input, setInput] = usePersisted('input', z.string(), 'one\ntwo')
   const [repeat, setRepeat] = usePersisted('repeat', z.number(), 1)
-  const [includeVectors, setIncludeVectors] = usePersisted('vectors', z.boolean(), false)
 
   // The loop's budget, and the only thing that says how many turns a send is:
   // `1` is a single turn of the same mechanism, 6 is a loop with room to finish.
@@ -681,7 +680,9 @@ export function App() {
       model: model.id,
       input: input.split('\n').filter((line) => line.trim().length > 0),
       repeat,
-      includeVectors,
+      // The summary is what the panel reads, but a vector nobody can see is a
+      // vector nobody can check: the UI always asks for the payload behind it.
+      includeVectors: true,
     }
     if (token.length > 0) {
       body.token = token
@@ -709,7 +710,7 @@ export function App() {
         }
       })
       .finally(settle)
-  }, [model, token, input, repeat, includeVectors, begin, settle])
+  }, [model, token, input, repeat, begin, settle])
 
   /**
    * The turn about to be sent, appended to what came before.
@@ -1249,12 +1250,10 @@ export function App() {
                 input={input}
                 prompts={prompts}
                 repeat={repeat}
-                includeVectors={includeVectors}
                 busy={busy}
                 missingSignIn={missingSignIn}
                 onInput={setInput}
                 onRepeat={setRepeat}
-                onIncludeVectors={setIncludeVectors}
                 onSend={embed}
                 onStop={stop}
               />
