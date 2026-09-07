@@ -66,6 +66,9 @@ import { usePersisted } from './storage'
 
 const ANONYMOUS = 'anonymous'
 
+/** Where the documentation is published. */
+const DOCUMENTATION_URL = 'https://therealm-tech.github.io/mire/'
+
 /**
  * The model's turn, as the decoder saw it.
  *
@@ -1059,16 +1062,31 @@ export function App() {
           <Mark />
           <h1 className="font-semibold text-xl tracking-tight">mire</h1>
         </div>
-        {/*
-          In place of the tagline rather than beside it: the tagline is there
-          because the corner was empty, and a save landing is worth more than it
-          for the few seconds it has something to say.
-        */}
-        {reloadedAt === null ? (
-          <p className="text-faint text-xs">A known signal in, a look at what comes out.</p>
-        ) : (
-          <Badge tone="good">Configuration reloaded</Badge>
-        )}
+        <div className="flex items-center gap-3">
+          {/*
+            In place of the tagline rather than beside it: the tagline is there
+            because the corner was empty, and a save landing is worth more than it
+            for the few seconds it has something to say.
+          */}
+          {reloadedAt === null ? (
+            <p className="text-faint text-xs">A known signal in, a look at what comes out.</p>
+          ) : (
+            <Badge tone="good">Configuration reloaded</Badge>
+          )}
+          {/*
+            A new tab, for the same reason an answer's citations open in one: the
+            conversation and the traffic live in this tab and nowhere else, so
+            navigating away mid-run loses the run.
+          */}
+          <a
+            href={DOCUMENTATION_URL}
+            target="_blank"
+            rel="noreferrer noopener"
+            className="text-faint text-xs underline underline-offset-2 hover:text-muted"
+          >
+            Documentation
+          </a>
+        </div>
       </header>
 
       <ConfigBanner directories={config.directories} />
