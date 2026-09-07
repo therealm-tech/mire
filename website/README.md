@@ -45,3 +45,12 @@ npm run typecheck  # tsc --noEmit
 
 `npm run sync` on its own regenerates `docs/` and the brand assets under
 `static/img/` without starting anything.
+
+## The one pinned transitive dependency
+
+`package.json` overrides `serialize-javascript` to `^7.0.3`. Docusaurus reaches
+it twice through `@docusaurus/bundler` — `copy-webpack-plugin` and
+`css-minimizer-webpack-plugin` both ask for `^6.0.0` — and 6.0.2 carries
+[GHSA-5c6j-r48x-rmvq](https://github.com/advisories/GHSA-5c6j-r48x-rmvq), an RCE
+that fails the repository's Trivy gate. The override goes away when Docusaurus
+bumps those two plugins.
