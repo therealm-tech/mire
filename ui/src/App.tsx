@@ -38,14 +38,17 @@ import { Preflight } from './components/Preflight'
 import { Badge, Button, Panel, Spinner } from './components/primitives'
 import { TrafficPanel } from './components/TrafficPanel'
 import {
+  abandonPending,
   activityItem,
+  answered,
   type ChatItem,
   callExchange,
   type Exchange,
   type Live,
+  liveExchange,
   messageItem,
   setupExchanges,
-  turnExchanges,
+  turnRemainder,
   verdictItem,
   wireMessages,
 } from './conversation'
@@ -280,6 +283,23 @@ export function App() {
    */
   const running = useRef<AbortController | null>(null)
 
+  /**
+   * What the run in flight has already put on the page, by turn.
+   *
+   * A turn is announced twice — piece by piece as it happens, then whole when it
+   * closes — and this is what tells the second telling from a second event. A
+   * ref rather than state because nothing renders differently for holding it,
+   * and because it has to be right *within* the handler that just appended to
+   * it, not on the render after.
+   */
+  const placed = useRef(new Map<number, Exchange[]>())
+
+  /** Files an exchange under the turn that produced it, and hands it back. */
+  const place = useCallback(<T extends Exchange>(turn: number, exchange: T): T => {
+    placed.current.set(turn, [...(placed.current.get(turn) ?? []), exchange])
+    return exchange
+  }, [])
+
   /** Opens a run, replacing whatever the last one left behind. */
   const begin = useCallback((): AbortSignal => {
     running.current?.abort()
@@ -295,6 +315,9 @@ export function App() {
   const settle = useCallback(() => {
     running.current = null
     setBusy(false)
+    // A card put up when the request went out and never answered is a card that
+    // would otherwise sit there waiting for the rest of the session.
+    setExchanges(abandonPending)
   }, [])
 
   /**
@@ -311,6 +334,7 @@ export function App() {
     running.current = null
     setStopped(true)
     setBusy(false)
+    setExchanges(abandonPending)
     logger.info('run.stopped', {})
   }, [])
 
@@ -663,6 +687,9 @@ export function App() {
       // never resolves.
       setLive(streaming ? { text: '', status: null } : null)
       setEmbedding(null)
+      // Turn numbers start again at one, so last run's ledger would be read as
+      // this one's.
+      placed.current = new Map()
 
       const body: AgentRequest = {
         model: model.id,
@@ -708,14 +735,37 @@ export function App() {
               // reset below rather than grown across the whole run.
               setLive((current) => ({ text: (current?.text ?? '') + event.text, status: null }))
               break
+            case 'sent':
+            case 'protocol':
+            case 'hook':
+            case 'tool': {
+              // The turn, as it happens. The call's card goes up while the
+              // endpoint is still thinking — what was asked is settled long
+              // before what was answered — and every wire underneath it lands as
+              // it is touched: a turn asking for five tools used to show nothing
+              // at all until the fifth came back.
+              const exchange = place(event.turn, liveExchange(event))
+              setExchanges((current) => [...current, exchange])
+              break
+            }
             case 'turn': {
-              // Everything the turn put on a wire, in the order it left: the
-              // model call, then each tool that answered it.
-              const wires = turnExchanges(event)
-              setExchanges((current) => [...current, ...wires])
+              // The turn repeats what the events above already said, so it adds
+              // only what is missing — and answers the call whose card has been
+              // sitting there waiting since it went out.
+              const live = placed.current.get(event.index) ?? []
+              placed.current.delete(event.index)
+              const rest = turnRemainder(live, event)
+              const call = live.find((one) => one.kind === 'model')
+              setExchanges((current) => [
+                ...(call
+                  ? current.map((one) => (one.id === call.id ? answered(call, event.call) : one))
+                  : current),
+                ...rest,
+              ])
               // The summary rows are built from those same exchanges rather
               // than from the event again, which is what lets a row name the
               // card it is a summary of.
+              const wires = [...live, ...rest]
               if (event.tools.length > 0) {
                 setTimeline((current) => [...current, activityItem(event.index, wires)])
               }
@@ -779,7 +829,19 @@ export function App() {
         })
         .finally(settle)
     },
-    [model, token, attachments, capTurns, maxTurns, streaming, usesMcp, activeMcp, begin, settle],
+    [
+      model,
+      token,
+      attachments,
+      capTurns,
+      maxTurns,
+      streaming,
+      usesMcp,
+      activeMcp,
+      begin,
+      settle,
+      place,
+    ],
   )
 
   const send = useCallback(() => runLoop(ask()), [runLoop, ask])

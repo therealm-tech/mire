@@ -147,11 +147,12 @@ embedded front end and rewrites its base URL under a path prefix.
 
 **[`ui/`](ui/)** is a React + TypeScript front end, built by Vite and embedded
 into the binary. It renders what the API returns and holds the conversation; it
-has no model of its own and edits no configuration. It follows the configuration
-rather than sampling it once: it subscribes to `GET /api/events` and re-reads the
-listings whenever a reload is announced. What did not load it reads from
-`GET /api/config` alone, and shows in one bar under the header: a save that breaks
-a file is one event, and the listings cannot speak for `decodes/`.
+has no model of its own and edits no configuration. It follows what the process
+is doing rather than sampling it: it subscribes to `GET /api/events` and re-reads
+the listings whenever a reload is announced, and it draws a run's traffic from
+the events that run emits as each wire is touched. What did not load it reads
+from `GET /api/config` alone, and shows in one bar under the header: a save that
+breaks a file is one event, and the listings cannot speak for `decodes/`.
 
 ## Data flow
 
@@ -204,6 +205,20 @@ rules read variables out of the result, and `after` hooks fire with those
 variables already in scope. A tool that reports a problem is a result, fed back
 to the model; only a call that could not be answered at all is an error of
 `mire`'s own.
+
+Each of those is announced as it happens, and the turn is announced again when it
+closes. The request is reported the moment it goes out — rendered, authenticated,
+`curl` included, everything about it settled but the answer — and each round
+trip, hook and tool result as it lands; the `turn` event that follows repeats all
+of it. The repetition is the point: a client reading turns alone is right about
+the run, and a client reading the live events is right about it earlier. What
+that costs is that the same facts arrive twice, so a reader has to be able to
+recognise the second telling — which the browser does by turn, and by kind within
+it.
+
+The MCP and hook journals are therefore drained per tool call rather than at the
+end of the turn, and what is drained is kept and handed to the turn. A turn
+asking for five tools would otherwise say nothing until the fifth came back.
 
 The loop ends on a named outcome — a stop predicate held, the iteration budget,
 the deadline, a repeated call, or a predicate that could never be evaluated
@@ -260,10 +275,12 @@ login.
   configuration reload does not sign anybody out. They end with the process.
 - **Captured variables** are one bag per run, shared across every server that run
   reaches, thrown away with the run.
-- **The conversation and the traffic** live in the browser tab, not here. The tab
-  also remembers small settings — the selected model, a half-typed message, the
-  turn budget, which servers are off — in browser storage. A credential is never
-  among them.
+- **The conversation and the traffic** live in the browser tab, not here. The
+  process announces each wire as it touches it and then forgets it; nothing is
+  buffered for a client that was not listening, and a tab that connects late
+  learns nothing about what it missed. The tab also remembers small settings —
+  the selected model, a half-typed message, the turn budget, which servers are
+  off — in browser storage. A credential is never among them.
 
 ## Design decisions
 

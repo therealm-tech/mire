@@ -612,7 +612,7 @@ pub async fn call(
     let mut input: CallInput = request.into();
     input.uploads = uploads;
 
-    Ok(Json(state.runner.call(input).await?))
+    Ok(Json(state.runner.call(input, |_| {}).await?))
 }
 
 /// Runs one call, streaming the answer as it arrives.
@@ -781,6 +781,22 @@ pub async fn agent(
                 agent::AgentUpdate::Delta { turn, text } => AgentEvent::Delta {
                     turn,
                     text: text.to_owned(),
+                },
+                agent::AgentUpdate::Sent { turn, sent } => AgentEvent::Sent {
+                    turn,
+                    sent: Box::new(sent.clone()),
+                },
+                agent::AgentUpdate::Protocol { turn, exchange } => AgentEvent::Protocol {
+                    turn,
+                    exchange: Box::new(exchange.clone()),
+                },
+                agent::AgentUpdate::Hook { turn, record } => AgentEvent::Hook {
+                    turn,
+                    record: Box::new(record.clone()),
+                },
+                agent::AgentUpdate::Tool { turn, invocation } => AgentEvent::Tool {
+                    turn,
+                    invocation: Box::new(invocation.clone()),
                 },
                 agent::AgentUpdate::Turn(turn) => AgentEvent::Turn(Box::new(turn.clone())),
             };

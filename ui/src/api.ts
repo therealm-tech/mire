@@ -394,7 +394,7 @@ export const streamViewSchema = z.object({
   firstChunkMs: z.number().optional(),
 })
 
-const responseViewSchema = z.object({
+export const responseViewSchema = z.object({
   http: httpMetaSchema,
   bodyText: z.string().optional(),
   raw: z.unknown().nullable(),
@@ -425,18 +425,31 @@ export const partViewSchema = z.object({
   size: z.number().optional(),
 })
 
-export const callOutcomeSchema = z.object({
+export const requestViewSchema = z.object({
+  method: z.string(),
+  url: z.string(),
+  headers: z.record(z.string(), z.string()),
+  /** Empty for a `multipart:` request — a form is not text, its parts are below. */
+  body: z.string(),
+  parts: z.array(partViewSchema).default([]),
+})
+
+/**
+ * What went out, the moment it went out.
+ *
+ * The half of a call that is knowable before the endpoint has said anything:
+ * every field here reappears in the [`CallOutcome`] when the answer lands, so
+ * this is the same call read early rather than a second account of it.
+ */
+export const sentSchema = z.object({
   model: z.string(),
   auth: z.string(),
-  request: z.object({
-    method: z.string(),
-    url: z.string(),
-    headers: z.record(z.string(), z.string()),
-    /** Empty for a `multipart:` request — a form is not text, its parts are below. */
-    body: z.string(),
-    parts: z.array(partViewSchema).default([]),
-  }),
+  request: requestViewSchema,
   curl: z.string(),
+})
+
+export const callOutcomeSchema = z.object({
+  ...sentSchema.shape,
   response: responseViewSchema,
   retriedAfterUnauthorized: z.boolean(),
 })
@@ -620,6 +633,13 @@ export const agentEventSchema = z.discriminatedUnion('event', [
   // Only when the run streams. It names its turn, because a loop writes several
   // answers in a row and the deltas of one are not a continuation of the last.
   z.object({ event: z.literal('delta'), turn: z.number(), text: z.string() }),
+  // The four live events, each one a piece of the turn that is still running.
+  // Everything they carry is repeated in the `turn` that closes it, so they are
+  // the early copy rather than the only one.
+  z.object({ event: z.literal('sent'), turn: z.number(), ...sentSchema.shape }),
+  z.object({ event: z.literal('protocol'), turn: z.number(), exchange: mcpExchangeSchema }),
+  z.object({ event: z.literal('hook'), turn: z.number(), record: hookRecordSchema }),
+  z.object({ event: z.literal('tool'), turn: z.number(), invocation: toolInvocationSchema }),
   z.object({ event: z.literal('turn'), ...turnSchema.shape }),
   z.object({ event: z.literal('done'), ...traceSchema.shape }),
   z.object({ event: z.literal('failed'), code: z.string(), message: z.string() }),
@@ -627,6 +647,7 @@ export const agentEventSchema = z.discriminatedUnion('event', [
 
 /** What `POST /api/call/stream` emits. */
 export const streamEventSchema = z.discriminatedUnion('event', [
+  z.object({ event: z.literal('sent'), ...sentSchema.shape }),
   z.object({
     event: z.literal('open'),
     status: z.number(),
@@ -666,6 +687,9 @@ export type CheckOutcome = z.infer<typeof checkOutcomeSchema>
 export type DecodeTrace = z.infer<typeof decodeTraceSchema>
 export type DecodedError = z.infer<typeof decodedErrorSchema>
 export type PartView = z.infer<typeof partViewSchema>
+export type RequestView = z.infer<typeof requestViewSchema>
+export type ResponseView = z.infer<typeof responseViewSchema>
+export type Sent = z.infer<typeof sentSchema>
 export type CallOutcome = z.infer<typeof callOutcomeSchema>
 export type StopOutcome = z.infer<typeof stopOutcomeSchema>
 export type ToolInvocation = z.infer<typeof toolInvocationSchema>

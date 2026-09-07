@@ -33,7 +33,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::Config;
 use crate::decode::Decoded;
-use crate::exec::{CallEvent, CallInput, CallOutcome, ExecError, Runner};
+use crate::exec::{CallEvent, CallInput, CallOutcome, ExecError, Runner, Sent};
 use crate::mcp::{
     HookJournal, HookRecord, McpClient, McpCredentials, McpError, McpExchange, McpJournal,
     McpRegistry, McpTool, Revision,
@@ -313,7 +313,40 @@ pub enum AgentUpdate<'a> {
         /// The text of this chunk alone, not the aggregate.
         text: &'a str,
     },
+    /// A turn's request left. The wait a reader is about to sit through, named
+    /// while it is still happening rather than once it is over.
+    Sent {
+        /// The turn that sent it, counting from one.
+        turn: u32,
+        /// What went out.
+        sent: &'a Sent,
+    },
+    /// One JSON-RPC round trip landed, mid-turn.
+    Protocol {
+        /// The turn it happened in.
+        turn: u32,
+        /// The round trip.
+        exchange: &'a McpExchange,
+    },
+    /// One hook fired, mid-turn.
+    Hook {
+        /// The turn it happened in.
+        turn: u32,
+        /// What the hook was asked and what it answered.
+        record: &'a HookRecord,
+    },
+    /// One tool was answered, mid-turn.
+    Tool {
+        /// The turn it happened in.
+        turn: u32,
+        /// The call and its result.
+        invocation: &'a ToolInvocation,
+    },
     /// A turn completed.
+    ///
+    /// Carries everything the four updates above already said, so a client that
+    /// listens to this one alone still gets the whole turn — they are the live
+    /// copy, not the only one.
     Turn(&'a Turn),
 }
 
@@ -389,8 +422,7 @@ pub async fn run(
             let turn = record(
                 index,
                 outcome,
-                Vec::new(),
-                &tools,
+                Invoked::none(&tools),
                 Decision::Stop {
                     stop: StopOutcome::Stopped {
                         reason: reason.clone(),
@@ -410,10 +442,10 @@ pub async fn run(
             .then(|| detect_repeat(&mut seen_calls, &completion.tool_calls))
             .flatten();
 
-        let invocations = invoke_tools(&tools, &completion.tool_calls, index).await;
-        let decision = decide(repeated.as_ref(), invocations.len(), index);
+        let invoked = invoke_tools(&tools, &completion.tool_calls, index, &mut on_update).await;
+        let decision = decide(repeated.as_ref(), invoked.invocations.len(), index);
 
-        let turn = record(index, outcome, invocations, &tools, decision);
+        let turn = record(index, outcome, invoked, decision);
         on_update(AgentUpdate::Turn(&turn));
 
         if let Some(tool) = repeated {
@@ -462,35 +494,56 @@ async fn call_turn(
     on_update: &mut impl FnMut(AgentUpdate<'_>),
 ) -> Result<CallOutcome, ExecError> {
     if !input.stream {
-        return runner.call(input).await;
+        return runner
+            .call(input, |event| {
+                if let CallEvent::Sent(sent) = &event {
+                    on_update(AgentUpdate::Sent { turn: index, sent });
+                }
+            })
+            .await;
     }
 
     runner
-        .call_streaming(input, |event| {
-            if let CallEvent::Delta { text } = &event {
-                on_update(AgentUpdate::Delta { turn: index, text });
-            }
+        .call_streaming(input, |event| match &event {
+            CallEvent::Sent(sent) => on_update(AgentUpdate::Sent { turn: index, sent }),
+            CallEvent::Delta { text } => on_update(AgentUpdate::Delta { turn: index, text }),
+            CallEvent::Open { .. } => {}
         })
         .await
 }
 
-/// One turn, with everything it put on a wire attached.
+/// Everything a turn's tools put on a wire, in the three lists a turn keeps them
+/// in.
 ///
-/// The journals are drained *here*, after the tools have run, so a turn holds
-/// exactly what it produced and the next one starts from nothing.
-fn record(
-    index: u32,
-    call: CallOutcome,
+/// One value rather than three returns because they are drained together, tool
+/// by tool, and a turn that took two of the three would be a turn missing the
+/// half that says what actually happened.
+struct Invoked {
     invocations: Vec<ToolInvocation>,
-    tools: &Tools,
-    decision: Decision,
-) -> Turn {
+    mcp: Vec<McpExchange>,
+    hooks: Vec<HookRecord>,
+}
+
+impl Invoked {
+    /// No tool ran this turn. Whatever is in the journals still belongs to it —
+    /// leaving it there would file it under the next one.
+    fn none(tools: &Tools) -> Self {
+        Self {
+            invocations: Vec::new(),
+            mcp: crate::mcp::drain(&tools.journal),
+            hooks: crate::mcp::hook::drain(&tools.hooks),
+        }
+    }
+}
+
+/// One turn, with everything it put on a wire attached.
+fn record(index: u32, call: CallOutcome, invoked: Invoked, decision: Decision) -> Turn {
     Turn {
         index,
         call: Box::new(call),
-        tools: invocations,
-        mcp: crate::mcp::drain(&tools.journal),
-        hooks: crate::mcp::hook::drain(&tools.hooks),
+        tools: invoked.invocations,
+        mcp: invoked.mcp,
+        hooks: invoked.hooks,
         decision,
     }
 }
@@ -918,8 +971,23 @@ fn compile_validators(tools: &[ToolSpec], live: &[McpTool]) -> Vec<(String, Opti
 ///
 /// A simulated tool wins over a live one of the same name: that is how you stub
 /// exactly one tool of an otherwise real server.
-async fn invoke_tools(tools: &Tools, calls: &[ToolCall], turn: u32) -> Vec<ToolInvocation> {
-    let mut invocations = Vec::with_capacity(calls.len());
+///
+/// The journals are drained *per call* rather than at the end of the turn, which
+/// is what lets a call be reported the moment it is answered: a turn asking for
+/// five tools would otherwise say nothing until the fifth one came back. What
+/// is drained is kept and handed to the turn, so the live copy costs the record
+/// nothing.
+async fn invoke_tools(
+    tools: &Tools,
+    calls: &[ToolCall],
+    turn: u32,
+    on_update: &mut impl FnMut(AgentUpdate<'_>),
+) -> Invoked {
+    let mut invoked = Invoked {
+        invocations: Vec::with_capacity(calls.len()),
+        mcp: Vec::new(),
+        hooks: Vec::new(),
+    };
 
     for call in calls {
         // Arguments that do not match are reported *and still answered*: the
@@ -935,17 +1003,18 @@ async fn invoke_tools(tools: &Tools, calls: &[ToolCall], turn: u32) -> Vec<ToolI
             })
             .unwrap_or_default();
 
-        if let Some(spec) = tools.model.tools.iter().find(|t| t.name == call.name) {
-            invocations.push(simulated(spec, call, turn, schema_errors));
+        let invocation = if let Some(spec) = tools.model.tools.iter().find(|t| t.name == call.name)
+        {
+            simulated(spec, call, turn, schema_errors)
         } else if let Some(tool) = tools.live.iter().find(|t| t.name == call.name) {
-            invocations.push(live(tools, tool, call, schema_errors).await);
+            live(tools, tool, call, schema_errors).await
         } else {
             let message = format!(
                 "no tool named `{}` is declared; this model offers {:?}",
                 call.name,
                 tools.known()
             );
-            invocations.push(ToolInvocation {
+            ToolInvocation {
                 call: call.clone(),
                 source: ToolSource::Simulated,
                 server: None,
@@ -956,11 +1025,34 @@ async fn invoke_tools(tools: &Tools, calls: &[ToolCall], turn: u32) -> Vec<ToolI
                 result: format!("{{\"error\": {}}}", json_string(&message)),
                 error: Some(message),
                 captured: crate::vars::Captured::new(),
+            }
+        };
+
+        // The wire first, then what was made of it: the JSON-RPC and the hooks
+        // are how this answer was arrived at, and a reader following along wants
+        // them in that order.
+        for exchange in crate::mcp::drain(&tools.journal) {
+            on_update(AgentUpdate::Protocol {
+                turn,
+                exchange: &exchange,
             });
+            invoked.mcp.push(exchange);
         }
+        for record in crate::mcp::hook::drain(&tools.hooks) {
+            on_update(AgentUpdate::Hook {
+                turn,
+                record: &record,
+            });
+            invoked.hooks.push(record);
+        }
+        on_update(AgentUpdate::Tool {
+            turn,
+            invocation: &invocation,
+        });
+        invoked.invocations.push(invocation);
     }
 
-    invocations
+    invoked
 }
 
 /// A tool the model declares. Nothing leaves this process.
@@ -1203,6 +1295,10 @@ tools:
         serde_yaml_ng::from_str(&yaml).unwrap()
     }
 
+    /// Swallows the live updates. What they carry is the API's business, and
+    /// [`a_tool_is_reported_as_it_is_answered`] is where it is checked.
+    fn ignoring(_: AgentUpdate<'_>) {}
+
     /// The dispatch context for a model with no MCP servers.
     fn simulated_only(model: Model) -> Tools {
         let model = std::sync::Arc::new(model);
@@ -1261,7 +1357,9 @@ tools:
             ..good.clone()
         };
 
-        let invocations = invoke_tools(&tools, &[good, bad], 1).await;
+        let invocations = invoke_tools(&tools, &[good, bad], 1, &mut ignoring)
+            .await
+            .invocations;
         assert_eq!(invocations[0].source, ToolSource::Simulated);
         assert!(invocations[0].schema_errors.is_empty());
         assert_eq!(invocations[0].result, r#"{"temp": 21}"#);
@@ -1284,8 +1382,10 @@ tools:
                 arguments_as_text: false,
             }],
             1,
+            &mut ignoring,
         )
-        .await;
+        .await
+        .invocations;
 
         assert!(
             invocations[0]
@@ -1312,8 +1412,10 @@ tools:
                 arguments_as_text: false,
             }],
             3,
+            &mut ignoring,
         )
-        .await;
+        .await
+        .invocations;
 
         assert_eq!(invocations[0].result, r#"{"city": "Lyon", "turn": 3}"#);
         assert!(invocations[0].error.is_none());
@@ -1334,9 +1436,35 @@ tools:
     async fn a_simulated_tool_captures_nothing_because_it_belongs_to_no_server() {
         let tools = simulated_only(weather_model(r#"response: '{"temp": 21}'"#));
 
-        let invocations = invoke_tools(&tools, &[weather_call()], 1).await;
+        let invocations = invoke_tools(&tools, &[weather_call()], 1, &mut ignoring)
+            .await
+            .invocations;
 
         assert!(invocations[0].captured.is_empty());
+    }
+
+    /// A turn asking for three tools used to say nothing until the third one
+    /// came back. Each is reported as it lands, and the turn still records all
+    /// three.
+    #[tokio::test]
+    async fn a_tool_is_reported_as_it_is_answered() {
+        let tools = simulated_only(weather_model(r#"response: '{"temp": 21}'"#));
+        let mut reported: Vec<u32> = Vec::new();
+
+        let invoked = invoke_tools(
+            &tools,
+            &[weather_call(), weather_call()],
+            7,
+            &mut |update| {
+                if let AgentUpdate::Tool { turn, .. } = update {
+                    reported.push(turn);
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(reported, vec![7, 7]);
+        assert_eq!(invoked.invocations.len(), 2);
     }
 
     #[tokio::test]
@@ -1352,8 +1480,10 @@ tools:
                 arguments_as_text: false,
             }],
             1,
+            &mut ignoring,
         )
-        .await;
+        .await
+        .invocations;
 
         assert!(invocations[0].error.is_some());
         assert!(invocations[0].result.contains("error"));

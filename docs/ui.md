@@ -454,11 +454,22 @@ order it touched them. **Cards land folded**, and the folded list is a grid:
 every row puts the same thing in the same column, so fifty exchanges are read by
 running down one column rather than by reading fifty headlines.
 
+**A card goes up when the request leaves, not when the answer lands.** A model
+call sits there with `···` in the status column while the endpoint is thinking,
+and its left half — the body, the headers, *Copy as curl* — is complete and
+readable the whole time: what was asked is settled long before what was
+answered. Each tool, each JSON-RPC round trip and each hook appears the moment it
+lands, rather than the whole turn arriving at once when the last of them comes
+back. A call the run walked away from — a stop, a failure, a closed tab — keeps
+its card and reads `none`, which is a different statement from a call that is
+still out.
+
 | | | | | | | |
 | --- | --- | --- | --- | --- | --- | --- |
 | kind | what was asked | who was asked, and where | turn | status | received | took |
 | `mcp` | `server/discover` | weather · 127.0.0.1:11436/mcp | setup | 200 | 892 B | 2 ms |
 | `model` | `/v1/chat/completions` | gpt-oss-20b · api.groq.com | T1 | 200 | 18.2 kB | 1240 ms |
+| `model` | `/v1/chat/completions` | gpt-oss-20b · api.groq.com | T2 | ··· | | |
 | `hook` | `gate` | before get_weather · vault.internal/v1/sign | T1 | 403 | 96 B | 61 ms |
 
 The bar beside the duration is drawn against the slowest call in view, so the one

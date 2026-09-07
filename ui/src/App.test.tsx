@@ -361,6 +361,60 @@ function streamedAgent(turn: ReturnType<typeof turnOf>, deltas: string[]): strin
 }
 
 /**
+ * What a run says while a turn is happening, before the `turn` that repeats it.
+ *
+ * Structurally typed so both turn fixtures fit: what is announced is a slice of
+ * the turn, whatever built it.
+ */
+function liveEvents(turn: {
+  index: number
+  call: Record<string, unknown>
+  mcp?: unknown[]
+  hooks?: unknown[]
+  tools?: unknown[]
+}): string[] {
+  const { response, retriedAfterUnauthorized, ...sent } = turn.call
+  const one = (name: string, payload: Record<string, unknown>) => [
+    `event: ${name}`,
+    `data: ${JSON.stringify({ event: name, turn: turn.index, ...payload })}`,
+    '',
+  ]
+
+  return [
+    ...one('sent', sent),
+    ...(turn.mcp ?? []).flatMap((exchange) => one('protocol', { exchange })),
+    ...(turn.hooks ?? []).flatMap((record) => one('hook', { record })),
+    ...(turn.tools ?? []).flatMap((invocation) => one('tool', { invocation })),
+  ]
+}
+
+/**
+ * The whole stream a run really emits: each turn announced piece by piece, then
+ * repeated whole.
+ *
+ * The turn-only shape every other test speaks is the same run read by a client
+ * that missed the live events, and both have to end up on the same page.
+ */
+function liveAgentStream(turns: ReturnType<typeof turnOf>[]): string {
+  return [...turns.flatMap((turn) => liveEvents(turn)), agentStream(turns)].join('\n')
+}
+
+/**
+ * A stream that says its piece and then stays open, which is what a run in
+ * flight looks like: the request has gone out and the endpoint is thinking.
+ */
+function hanging(text: string): Response {
+  return new Response(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(text))
+      },
+    }),
+    { status: 200, headers: { 'content-type': 'text/event-stream' } },
+  )
+}
+
+/**
  * A stream that opens and then says nothing until the caller gives up.
  *
  * `fetch` wires its signal to the body, so a real abort surfaces as the reader
@@ -480,6 +534,9 @@ function mockApi(routes: Record<string, unknown>) {
     const match = Object.entries(answers).find(([suffix]) => url.endsWith(suffix))
     if (!match) {
       throw new Error(`unexpected fetch: ${url}`)
+    }
+    if (match[1] instanceof Response) {
+      return Promise.resolve(match[1])
     }
     if (typeof match[1] === 'string') {
       return Promise.resolve(sse(match[1]))
@@ -1895,11 +1952,21 @@ function traceFixture() {
   }
 }
 
-/** A run that calls one MCP tool, so every kind of exchange is on the wire. */
-function toolRunApi(turns: ReturnType<typeof turnFixture>[] = [turnFixture()]) {
+/**
+ * A run that calls one MCP tool, so every kind of exchange is on the wire.
+ *
+ * `live` says what the run announces while each turn is still happening; left
+ * out, the turn is the first anybody hears of it, which is the same run read by
+ * a client that missed the live events.
+ */
+function toolRunApi(
+  turns: ReturnType<typeof turnFixture>[] = [turnFixture()],
+  live: (turn: ReturnType<typeof turnFixture>) => string[] = () => [],
+) {
   const stream = [
     ...setupEvent(),
     ...turns.flatMap((turn) => [
+      ...live(turn),
       'event: turn',
       `data: ${JSON.stringify({ event: 'turn', ...turn })}`,
       '',
@@ -1925,6 +1992,77 @@ describe('traffic', () => {
 
     expect(await screen.findByRole('heading', { name: 'Traffic' })).toBeInTheDocument()
     expect(screen.getByText(/Nothing on the wire yet/)).toBeInTheDocument()
+  })
+
+  it('puts the request on the page while the endpoint is still thinking', async () => {
+    vi.stubGlobal(
+      'fetch',
+      mockApi({
+        'api/models': MODELS,
+        'api/auth': AUTH,
+        'api/mcp': MCP,
+        'api/prompts': PROMPTS,
+        // The trailing blank line closes the frame; without it the reader is
+        // still waiting for the rest of an event rather than for the endpoint.
+        'api/agent': hanging([...liveEvents(answerTurn(200)), ''].join('\n')),
+      }),
+    )
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    const traffic = within(panel('Traffic'))
+    await waitFor(() => {
+      expect(traffic.getByRole('button', { name: /Turn 1 · model/ })).toBeInTheDocument()
+    })
+    // One card, and the half that is knowable is on it: what the endpoint is
+    // being asked, while it is still being asked it.
+    expect(traffic.getByText('1 exchange')).toBeInTheDocument()
+    const open = within(await openCard(user, /Turn 1 · model/))
+    expect(open.getByText(/Waiting for the endpoint/)).toBeInTheDocument()
+    // The whole request half, curl included: it is reproducible before the
+    // endpoint has said a word.
+    expect(open.getByRole('button', { name: 'Copy as curl' })).toBeInTheDocument()
+  })
+
+  it('lands the answer on the card the request put up rather than a second one', async () => {
+    vi.stubGlobal(
+      'fetch',
+      mockApi({
+        'api/models': MODELS,
+        'api/auth': AUTH,
+        'api/mcp': MCP,
+        'api/prompts': PROMPTS,
+        'api/agent': liveAgentStream([answerTurn(200)]),
+      }),
+    )
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    const traffic = within(panel('Traffic'))
+    await waitFor(() => {
+      expect(traffic.getByText('200')).toBeInTheDocument()
+    })
+    expect(traffic.getByText('1 exchange')).toBeInTheDocument()
+  })
+
+  it('lists a turn announced as it happened once, not twice', async () => {
+    vi.stubGlobal('fetch', toolRunApi(undefined, liveEvents))
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+
+    const traffic = within(panel('Traffic'))
+    await waitFor(() => {
+      expect(traffic.getByRole('button', { name: /Turn 1 · get_weather/ })).toBeInTheDocument()
+    })
+    // The same five cards the same run puts up when nothing is announced early:
+    // the live events and the turn are one run said twice, not two runs.
+    expect(traffic.getByText('5 exchanges')).toBeInTheDocument()
   })
 
   it('records the model call and the tool call as separate exchanges', async () => {

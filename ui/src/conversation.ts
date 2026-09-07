@@ -12,10 +12,13 @@
  */
 
 import type {
+  AgentEvent,
   CallOutcome,
   HookRecord,
   McpExchange,
   Message,
+  ResponseView,
+  Sent,
   StopOutcome,
   ToolInvocation,
   Trace,
@@ -189,13 +192,30 @@ export function messagePositions(timeline: ChatItem[]): Map<string, number> {
   return positions
 }
 
-/** One call to a model endpoint, request through decode through response. */
+/**
+ * One call to a model endpoint, request through decode through response.
+ *
+ * Placed when the request goes out rather than when the answer lands, because a
+ * panel that stays empty for the thirty seconds an endpoint takes to answer is
+ * a panel that looks broken exactly when it is being watched. What went out is
+ * settled by then; what came back fills in later, or never does.
+ */
 export interface ModelExchange {
   kind: 'model'
   id: string
   /** The turn it belongs to, or `null` for a call made outside a loop. */
   turn: number | null
-  outcome: CallOutcome
+  /** What went out. Known before the endpoint has said anything. */
+  sent: Sent
+  /** What came back, or `null` while the call is still in flight. */
+  response: ResponseView | null
+  retriedAfterUnauthorized: boolean
+  /**
+   * The call is over and nothing came back — the run failed, or it was
+   * cancelled. Distinguishes "still waiting" from "waited, and that was that",
+   * which no `null` response can say on its own.
+   */
+  abandoned: boolean
 }
 
 /** One tool invocation. `source: 'mcp'` means it really left the process. */
@@ -238,8 +258,103 @@ export interface HookExchange {
 
 export type Exchange = ModelExchange | ToolExchange | ProtocolExchange | HookExchange
 
+/** A call that has already answered. */
+function modelExchange(turn: number | null, outcome: CallOutcome): ModelExchange {
+  const { response, retriedAfterUnauthorized, ...sent } = outcome
+  return {
+    kind: 'model',
+    id: nextId('model'),
+    turn,
+    sent,
+    response,
+    retriedAfterUnauthorized,
+    abandoned: false,
+  }
+}
+
 export function callExchange(outcome: CallOutcome): ModelExchange {
-  return { kind: 'model', id: nextId('model'), turn: null, outcome }
+  return modelExchange(null, outcome)
+}
+
+/**
+ * A call that has gone out and is being waited on.
+ *
+ * It carries its own id from here on, which is what lets the answer land on
+ * *this* card rather than on a second one below it.
+ */
+export function sentExchange(turn: number | null, sent: Sent): ModelExchange {
+  return {
+    kind: 'model',
+    id: nextId('model'),
+    turn,
+    sent,
+    response: null,
+    retriedAfterUnauthorized: false,
+    abandoned: false,
+  }
+}
+
+/**
+ * The same card, with the answer that finally came back.
+ *
+ * The outcome's own account of the request replaces the one the `sent` event
+ * carried — they are built from the same values, and taking the authoritative
+ * one is what keeps a run read live byte-identical to the same run read from
+ * its turns alone.
+ */
+export function answered(exchange: ModelExchange, outcome: CallOutcome): ModelExchange {
+  const { response, retriedAfterUnauthorized, ...sent } = outcome
+  return { ...exchange, sent, response, retriedAfterUnauthorized }
+}
+
+/**
+ * Closes every call still in flight: the run is over and they answered nothing.
+ *
+ * Left alone they would sit there spinning for the rest of the session, which
+ * says "still waiting" about a run that ended minutes ago.
+ */
+export function abandonPending(exchanges: Exchange[]): Exchange[] {
+  return exchanges.map((exchange) =>
+    exchange.kind === 'model' && exchange.response === null && !exchange.abandoned
+      ? { ...exchange, abandoned: true }
+      : exchange,
+  )
+}
+
+export function protocolExchange(turn: number | null, exchange: McpExchange): ProtocolExchange {
+  return { kind: 'protocol', id: nextId('protocol'), turn, exchange }
+}
+
+export function hookExchange(turn: number, record: HookRecord): HookExchange {
+  return { kind: 'hook', id: nextId('hook'), turn, record }
+}
+
+export function toolExchange(turn: number, invocation: ToolInvocation): ToolExchange {
+  return { kind: 'tool', id: nextId('tool'), turn, invocation }
+}
+
+/**
+ * The exchange one of a run's live events stands for.
+ *
+ * Four kinds of wire, announced as each is touched, all landing on the same
+ * list — so the dispatch lives here rather than four times over at the call
+ * site.
+ */
+export function liveExchange(
+  event: Extract<AgentEvent, { event: 'sent' | 'protocol' | 'hook' | 'tool' }>,
+): Exchange {
+  switch (event.event) {
+    case 'sent': {
+      const { event: _name, turn, ...sent } = event
+      return sentExchange(turn, sent)
+    }
+    case 'protocol':
+      return protocolExchange(event.turn, event.exchange)
+    case 'hook':
+      return hookExchange(event.turn, event.record)
+    case 'tool':
+      return toolExchange(event.turn, event.invocation)
+  }
 }
 
 /**
@@ -249,49 +364,36 @@ export function callExchange(outcome: CallOutcome): ModelExchange {
  * turns at all, which is exactly when this is the only thing to read.
  */
 export function setupExchanges(mcp: McpExchange[]): ProtocolExchange[] {
-  return mcp.map((exchange) => ({
-    kind: 'protocol',
-    id: nextId('protocol'),
-    turn: null,
-    exchange,
-  }))
+  return mcp.map((exchange) => protocolExchange(null, exchange))
 }
 
 /**
- * Everything one turn put on a wire, in the order it happened: the model call
- * that asked for the tools, the JSON-RPC that answered it, then the results as
- * the loop fed them back.
+ * What a turn adds to what its own live events already put on the page.
+ *
+ * A run announces each piece as it lands and then repeats the lot in the `turn`
+ * that closes it, which is what lets a client read either one and be right. So
+ * the turn contributes only what is missing from `placed` — nothing at all in
+ * the ordinary case, and the whole turn when the live events were never seen.
+ *
+ * Counting by kind is enough to find the tail because both halves come from the
+ * same lists in the same order: what a turn holds is what it announced, plus
+ * whatever it announced after the last thing that arrived.
  *
  * The raw exchanges come before the digested ones on purpose. Reading downwards
  * is then the actual sequence of events — the model asked for this, that went to
  * the server, and this is what the next request carried.
  */
-export function turnExchanges(turn: Turn): Exchange[] {
-  const model: ModelExchange = {
-    kind: 'model',
-    id: nextId('model'),
-    turn: turn.index,
-    outcome: turn.call,
-  }
-  const protocol: ProtocolExchange[] = turn.mcp.map((exchange) => ({
-    kind: 'protocol',
-    id: nextId('protocol'),
-    turn: turn.index,
-    exchange,
-  }))
-  const hooks: HookExchange[] = turn.hooks.map((record) => ({
-    kind: 'hook',
-    id: nextId('hook'),
-    turn: turn.index,
-    record,
-  }))
-  const tools: ToolExchange[] = turn.tools.map((invocation) => ({
-    kind: 'tool',
-    id: nextId('tool'),
-    turn: turn.index,
-    invocation,
-  }))
-  return [model, ...protocol, ...hooks, ...tools]
+export function turnRemainder(placed: Exchange[], turn: Turn): Exchange[] {
+  const already = (kind: Exchange['kind']) => placed.filter((one) => one.kind === kind).length
+
+  return [
+    ...(already('model') === 0 ? [modelExchange(turn.index, turn.call)] : []),
+    ...turn.mcp
+      .slice(already('protocol'))
+      .map((exchange) => protocolExchange(turn.index, exchange)),
+    ...turn.hooks.slice(already('hook')).map((record) => hookExchange(turn.index, record)),
+    ...turn.tools.slice(already('tool')).map((invocation) => toolExchange(turn.index, invocation)),
+  ]
 }
 
 /**
@@ -319,7 +421,13 @@ export function statusTone(status: number, expectUnauthorized: boolean): Tone {
 export function failed(exchange: Exchange, expectUnauthorized: boolean): boolean {
   switch (exchange.kind) {
     case 'model': {
-      const { http, error, stream } = exchange.outcome.response
+      // A call still in flight has failed at nothing yet; one the run walked
+      // away from has failed at everything, and is exactly what the filter is
+      // for.
+      if (exchange.response === null) {
+        return exchange.abandoned
+      }
+      const { http, error, stream } = exchange.response
       if (statusTone(http.status, expectUnauthorized) === 'bad') {
         return true
       }

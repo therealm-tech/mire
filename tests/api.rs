@@ -274,6 +274,19 @@ fn events(text: &str) -> Vec<(String, Value)> {
     events
 }
 
+/// The payloads of every event of one name, in order.
+///
+/// A run's stream interleaves several kinds, so a test that wants "the first
+/// turn" is asking for a name rather than for a position — and asking by name
+/// keeps it right when another kind of event lands between two turns.
+fn named<'a>(events: &'a [(String, Value)], name: &str) -> Vec<&'a Value> {
+    events
+        .iter()
+        .filter(|(event, _)| event == name)
+        .map(|(_, payload)| payload)
+        .collect()
+}
+
 /// An OpenAI-shaped chat model pointing at `url`.
 fn openai_model(url: &str) -> String {
     format!(
@@ -2725,10 +2738,14 @@ async fn an_agent_answers_a_tool_call_and_stops_when_the_model_is_done() {
 
     assert_eq!(status, 200);
     let names: Vec<&str> = events.iter().map(|(name, _)| name.as_str()).collect();
-    assert_eq!(names, vec!["turn", "turn", "done"], "{events:?}");
+    assert_eq!(
+        names,
+        vec!["sent", "tool", "turn", "sent", "turn", "done"],
+        "{events:?}"
+    );
 
     // Turn 1: the model asked for the tool, and the tool answered.
-    let (_, first) = &events[0];
+    let first = named(&events, "turn")[0];
     assert_eq!(first["index"], 1);
     assert_eq!(first["tools"][0]["call"]["name"], "get_weather");
     assert_eq!(
@@ -2751,7 +2768,7 @@ async fn an_agent_answers_a_tool_call_and_stops_when_the_model_is_done() {
     assert_eq!(first["decision"]["decision"], "continue");
 
     // Turn 2: the result came back in, and the model finished.
-    let (_, second) = &events[1];
+    let second = named(&events, "turn")[1];
     assert_eq!(second["index"], 2);
     assert_eq!(
         second["call"]["response"]["decoded"]["content"],
@@ -2764,7 +2781,7 @@ async fn an_agent_answers_a_tool_call_and_stops_when_the_model_is_done() {
     assert!(sent.contains(r#""role":"tool""#), "{sent}");
     assert!(sent.contains("21"), "{sent}");
 
-    let (_, done) = &events[2];
+    let done = named(&events, "done")[0];
     assert_eq!(done["stop"]["outcome"], "stopped");
     assert_eq!(done["stop"]["reason"]["predicate"], "noToolCalls");
     assert_eq!(done["turns"].as_array().unwrap().len(), 2);
@@ -2918,7 +2935,7 @@ async fn arguments_that_do_not_match_the_schema_are_reported_and_still_answered(
         .agent(json!({"model": "agent", "prompt": "weather?"}))
         .await;
 
-    let tool = &events[0].1["tools"][0];
+    let tool = &named(&events, "turn")[0]["tools"][0];
     let errors = tool["schemaErrors"].as_array().unwrap();
     assert!(
         !errors.is_empty(),
@@ -2960,7 +2977,7 @@ async fn a_tool_the_model_never_declared_is_answered_with_an_error() {
         .agent(json!({"model": "agent", "prompt": "go"}))
         .await;
 
-    let tool = &events[0].1["tools"][0];
+    let tool = &named(&events, "turn")[0]["tools"][0];
     assert!(tool["error"].as_str().unwrap().contains("launch_missiles"));
     assert!(tool["result"].as_str().unwrap().contains("error"));
 }
@@ -3054,7 +3071,7 @@ async fn a_tool_can_answer_from_a_script_that_reads_its_arguments() {
         .await;
 
     assert_eq!(
-        events[0].1["tools"][0]["result"],
+        named(&events, "turn")[0]["tools"][0]["result"],
         r#"{"city": "Lyon", "turn": 1}"#
     );
 }
@@ -4495,6 +4512,75 @@ async fn a_hook_fires_on_both_sides_of_a_tool_call_and_says_what_it_sent() {
     assert_eq!(after["result"]["text"], "21 and clear");
     assert_eq!(after["result"]["isError"], false);
     assert!(after["result"]["latencyMs"].is_number());
+}
+
+/// A turn's traffic used to arrive in one lump, when the turn was over. Each
+/// piece is announced as it lands, and the turn still repeats all of it — which
+/// is what lets a client read either one and be right.
+#[tokio::test]
+async fn a_turn_announces_its_traffic_as_it_happens_and_repeats_it_at_the_end() {
+    let mcp = mcp_server(
+        weather_tool(),
+        vec![json!({
+            "resultType": "complete",
+            "content": [{"type": "text", "text": "21 and clear"}],
+            "isError": false,
+        })],
+    )
+    .await;
+    let hook = hook_endpoint(204, "").await;
+    let endpoint = MockServer::start().await;
+    model_using_a_tool(&endpoint).await;
+
+    let harness = Harness::start(&[
+        (
+            "mcp/weather.yaml",
+            mcp_with_hook(&mcp, &hook.uri(), &["before", "after"], "", ""),
+        ),
+        (
+            "models/chat.yaml",
+            mcp_model(&format!("{}/v1/chat/completions", endpoint.uri())),
+        ),
+    ])
+    .await;
+
+    let (status, events) = harness
+        .agent(json!({"model": "chat", "prompt": "weather in Paris?"}))
+        .await;
+    assert_eq!(status, 200);
+
+    // The setup traffic, then the request, then the wire underneath the tool —
+    // the round trip, the hooks that fired around it, and the answer the loop
+    // fed back — all of it before the turn that records it.
+    let names: Vec<&str> = events
+        .iter()
+        .take_while(|(name, _)| name != "turn")
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["setup", "sent", "protocol", "hook", "hook", "tool"],
+        "{names:?}"
+    );
+
+    assert_eq!(
+        named(&events, "protocol")[0]["exchange"]["method"],
+        "tools/call"
+    );
+    assert_eq!(named(&events, "hook")[0]["record"]["phase"], "before");
+    assert_eq!(named(&events, "hook")[1]["record"]["phase"], "after");
+    assert_eq!(
+        named(&events, "tool")[0]["invocation"]["call"]["name"],
+        "get_weather"
+    );
+
+    // The turn is still the whole story: nothing was moved out of it to be
+    // announced early, and nothing landed under the next turn either.
+    let turn = named(&events, "turn")[0];
+    assert_eq!(turn["mcp"].as_array().expect("mcp").len(), 1);
+    assert_eq!(turn["hooks"].as_array().expect("hooks").len(), 2);
+    assert_eq!(turn["tools"].as_array().expect("tools").len(), 1);
+    assert!(named(&events, "turn")[1]["mcp"].is_null());
 }
 
 /// A chat model that reaches a server. It says nothing about capturing —
@@ -6598,15 +6684,21 @@ async fn a_streamed_call_arrives_in_pieces_and_adds_up_to_the_answer() {
     assert_eq!(status, 200);
 
     let names: Vec<&str> = events.iter().map(|(name, _)| name.as_str()).collect();
-    // The head first, then one event per chunk that carried text, then the
-    // whole outcome. The role-only chunk produced nothing, which is the point.
-    assert_eq!(names, ["open", "delta", "delta", "done"], "{events:?}");
+    // The request, then the head, then one event per chunk that carried text,
+    // then the whole outcome. The role-only chunk produced nothing, which is the
+    // point.
+    assert_eq!(
+        names,
+        ["sent", "open", "delta", "delta", "done"],
+        "{events:?}"
+    );
 
-    assert_eq!(events[0].1["status"], 200);
-    assert_eq!(events[1].1["text"], "Hel");
-    assert_eq!(events[2].1["text"], "lo");
+    assert!(events[0].1["request"]["url"].as_str().is_some());
+    assert_eq!(events[1].1["status"], 200);
+    assert_eq!(events[2].1["text"], "Hel");
+    assert_eq!(events[3].1["text"], "lo");
 
-    let response = &events[3].1["response"];
+    let response = &events[4].1["response"];
     assert_eq!(response["decoded"]["content"], "Hello");
     assert_eq!(response["decoded"]["finishReason"], "stop");
     assert_eq!(response["decoded"]["usage"]["completionTokens"], 2);
@@ -6891,8 +6983,9 @@ async fn a_rejected_streamed_call_says_so_in_its_first_event() {
 
     // A 401 from the endpoint under test is a successful call, streamed or not.
     assert_eq!(status, 200);
-    assert_eq!(events[0].0, "open");
-    assert_eq!(events[0].1["status"], 401);
+    assert_eq!(events[0].0, "sent");
+    assert_eq!(events[1].0, "open");
+    assert_eq!(events[1].1["status"], 401);
     assert_eq!(
         events.last().expect("done").1["response"]["http"]["status"],
         401
@@ -7307,7 +7400,7 @@ async fn a_loop_does_not_stream_unless_the_run_asks_for_it() {
     assert_eq!(status, 200);
 
     let names: Vec<&str> = events.iter().map(|(name, _)| name.as_str()).collect();
-    assert_eq!(names, vec!["turn", "done"], "{events:?}");
+    assert_eq!(names, vec!["sent", "turn", "done"], "{events:?}");
 
     // Not merely "no deltas arrived": the flag reached the template as `false`,
     // which is what an endpoint serving both shapes actually reads.
@@ -7523,7 +7616,9 @@ async fn a_streamed_loop_reports_deltas_per_turn() {
     let names: Vec<&str> = events.iter().map(|(name, _)| name.as_str()).collect();
     assert_eq!(
         names,
-        vec!["delta", "delta", "turn", "delta", "delta", "turn", "done"],
+        vec![
+            "sent", "delta", "delta", "tool", "turn", "sent", "delta", "delta", "turn", "done"
+        ],
         "{events:?}"
     );
 
@@ -7546,16 +7641,17 @@ async fn a_streamed_loop_reports_deltas_per_turn() {
 
     // And the turns are the ordinary ones: the loop read a streamed answer the
     // same way it reads any other, tool call included.
+    let turns = named(&events, "turn");
     assert_eq!(
-        events[2].1["call"]["response"]["decoded"]["content"],
+        turns[0]["call"]["response"]["decoded"]["content"],
         "looking"
     );
-    assert_eq!(events[2].1["tools"][0]["call"]["name"], "get_weather");
+    assert_eq!(turns[0]["tools"][0]["call"]["name"], "get_weather");
     assert_eq!(
-        events[5].1["call"]["response"]["decoded"]["content"],
+        turns[1]["call"]["response"]["decoded"]["content"],
         "21 degrees"
     );
-    assert_eq!(events[6].1["stop"]["outcome"], "stopped");
+    assert_eq!(named(&events, "done")[0]["stop"]["outcome"], "stopped");
 
     // Every turn streamed, not only the first: a loop that changed its mind
     // halfway would be measuring two different things and calling them one run.

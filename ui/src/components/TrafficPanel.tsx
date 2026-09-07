@@ -1,5 +1,5 @@
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
-import type { HookRecord, PartView, StreamView, ToolInvocation } from '../api'
+import type { HookRecord, PartView, ResponseView, StreamView, ToolInvocation } from '../api'
 import {
   type Exchange,
   failed,
@@ -261,7 +261,7 @@ export function TrafficPanel({
 function elapsed(exchange: Exchange): number | null {
   switch (exchange.kind) {
     case 'model':
-      return exchange.outcome.response.http.latencyMs
+      return exchange.response?.http.latencyMs ?? null
     case 'protocol':
       return exchange.exchange.latencyMs
     case 'hook':
@@ -317,6 +317,7 @@ function Card({
   flags,
   turn,
   status,
+  pending = false,
   size,
   ms,
   slowest,
@@ -346,6 +347,12 @@ function Card({
   flags?: ReactNode
   turn: string
   status: Status
+  /**
+   * Still waiting. The status cell breathes rather than sitting still, which is
+   * the difference between a panel that is following a run and one that has
+   * stopped.
+   */
+  pending?: boolean
   /** What came back, in bytes, when that is known. */
   size: number | null
   ms: number | null
@@ -384,7 +391,9 @@ function Card({
         </span>
         <span className={`${CONTEXT} text-right font-mono text-[10.5px] text-faint`}>{turn}</span>
         <span
-          className={`text-right font-mono text-[12.5px] font-medium ${TONE_TEXT[status.tone]}`}
+          className={`text-right font-mono text-[12.5px] font-medium ${TONE_TEXT[status.tone]} ${
+            pending ? 'animate-pulse' : ''
+          }`}
         >
           {status.text}
         </span>
@@ -824,18 +833,17 @@ function ModelCard({
   flash: boolean
   onToggle: () => void
 }) {
-  const { outcome } = exchange
-  const { http, error, stream } = outcome.response
-  const tone = statusTone(http.status, expectUnauthorized)
-  const protectedAsExpected = expectUnauthorized && (http.status === 401 || http.status === 403)
-  const { path, origin } = split(outcome.request.url)
-  const sent =
-    outcome.request.body.length > 0
-      ? weigh(outcome.request.body)
-      : outcome.request.parts.reduce((total, part) => total + (part.size ?? 0), 0)
+  const { sent, response } = exchange
+  const { path, origin } = split(sent.request.url)
+  const asked =
+    sent.request.body.length > 0
+      ? weigh(sent.request.body)
+      : sent.request.parts.reduce((total, part) => total + (part.size ?? 0), 0)
   const received =
-    stream?.bytes ??
-    (outcome.response.bodyText === undefined ? null : weigh(outcome.response.bodyText))
+    response === null
+      ? null
+      : (response.stream?.bytes ??
+        (response.bodyText === undefined ? null : weigh(response.bodyText)))
 
   return (
     <Card
@@ -845,54 +853,59 @@ function ModelCard({
       op={path}
       where={
         <>
-          {outcome.model} <span className="opacity-70">· {origin ?? outcome.request.url}</span>
+          {sent.model} <span className="opacity-70">· {origin ?? sent.request.url}</span>
         </>
       }
       flags={
         <>
-          {outcome.retriedAfterUnauthorized ? <Flag tone="warn">replayed</Flag> : null}
+          {exchange.retriedAfterUnauthorized ? <Flag tone="warn">replayed</Flag> : null}
           {/*
             Only worth saying when the status did not already say it: a `400`
             with an error in it is not news, a `200` with one very much is.
           */}
-          {error && http.status < 400 ? <Flag tone="bad">error in the body</Flag> : null}
-          {stream && !stream.terminated ? <Flag tone="bad">cut off</Flag> : null}
+          {response?.error && response.http.status < 400 ? (
+            <Flag tone="bad">error in the body</Flag>
+          ) : null}
+          {response?.stream && !response.stream.terminated ? <Flag tone="bad">cut off</Flag> : null}
           {/*
             On the folded row and not only in the pane: time to first token is
             the number a streaming call is read for, and having to open a card to
             learn it is how a slow endpoint and a slow model stay indistinguishable.
           */}
-          {http.ttftMs === undefined ? null : <Flag>first token {http.ttftMs} ms</Flag>}
+          {response?.http.ttftMs === undefined ? null : (
+            <Flag>first token {response.http.ttftMs} ms</Flag>
+          )}
         </>
       }
       turn={turnCell(exchange.turn, 'call')}
-      status={{ text: String(http.status), tone }}
+      status={callStatus(exchange, expectUnauthorized)}
+      pending={response === null && !exchange.abandoned}
       size={received}
-      ms={http.latencyMs}
+      ms={response?.http.latencyMs ?? null}
       slowest={slowest}
       open={open}
       flash={flash}
       onToggle={onToggle}
     >
       <Panes>
-        <Pane title="Request" action={<CopyButton text={outcome.curl} label="Copy as curl" />}>
-          <RequestLine method={outcome.request.method} url={outcome.request.url} />
+        <Pane title="Request" action={<CopyButton text={sent.curl} label="Copy as curl" />}>
+          <RequestLine method={sent.request.method} url={sent.request.url} />
           <Facts>
-            <Fact label="content-type" value={header(outcome.request.headers, 'content-type')} />
-            <Fact label="sent" value={sent === 0 ? undefined : formatBytes(sent)} />
-            <Fact label="auth" value={outcome.auth} />
+            <Fact label="content-type" value={header(sent.request.headers, 'content-type')} />
+            <Fact label="sent" value={asked === 0 ? undefined : formatBytes(asked)} />
+            <Fact label="auth" value={sent.auth} />
           </Facts>
-          <Headers headers={outcome.request.headers} />
-          {outcome.request.body.length > 0 ? (
+          <Headers headers={sent.request.headers} />
+          {sent.request.body.length > 0 ? (
             <Views
               views={[
                 {
                   key: 'payload',
                   label: 'Payload',
-                  render: () => <Body text={outcome.request.body} />,
+                  render: () => <Body text={sent.request.body} />,
                 },
-                { key: 'raw', label: 'Raw', render: () => <Code>{outcome.request.body}</Code> },
-                { key: 'curl', label: 'curl', render: () => <Code>{outcome.curl}</Code> },
+                { key: 'raw', label: 'Raw', render: () => <Code>{sent.request.body}</Code> },
+                { key: 'curl', label: 'curl', render: () => <Code>{sent.curl}</Code> },
               ]}
             />
           ) : null}
@@ -902,117 +915,179 @@ function ModelCard({
             the endpoint actually reads — a form carrying the right file under the
             wrong name is refused exactly like one carrying no file at all.
           */}
-          {outcome.request.parts.length > 0 ? <FormParts parts={outcome.request.parts} /> : null}
+          {sent.request.parts.length > 0 ? <FormParts parts={sent.request.parts} /> : null}
         </Pane>
 
-        <Pane
-          title="Response"
-          action={
-            outcome.response.bodyText === undefined ? undefined : (
-              <CopyButton text={outcome.response.bodyText} label="Copy body" />
-            )
-          }
-        >
-          <ResponseLine
-            status={http.status}
-            tone={tone}
-            ms={http.latencyMs}
-            note={http.ttftMs === undefined ? undefined : `first token ${http.ttftMs} ms`}
-          />
-          <Facts>
-            <Fact label="content-type" value={header(http.headers, 'content-type')} />
-            <Fact label="received" value={received === null ? undefined : formatBytes(received)} />
-          </Facts>
-          {/*
-            Already carried by every trace and never once shown. This is where a
-            rate limit, a gateway's own identity and the request id an operator
-            will ask for have been all along.
-          */}
-          <Headers
-            headers={http.headers}
-            empty="The endpoint returned no headers worth recording."
-          />
-
-          {protectedAsExpected ? (
-            <p className="text-good text-sm">
-              The route is protected — that is a pass, not a failure.
+        {response === null ? (
+          <Pane title="Response">
+            {/*
+              A card with nothing in its right half is the whole point: the
+              request is readable while the endpoint is still thinking, which is
+              exactly when a reader wants to check what was asked.
+            */}
+            <p className="text-muted text-sm">
+              {exchange.abandoned
+                ? 'The run ended before the endpoint answered. Nothing came back.'
+                : 'Waiting for the endpoint. What went out is on the left, in full.'}
             </p>
-          ) : null}
-
-          {/*
-            First, above everything: when the endpoint refused, its own sentence
-            is the answer, and reading it should not mean opening a tab.
-          */}
-          {error ? (
-            <div className="space-y-1 rounded bg-bad-soft p-2">
-              <p className="text-bad text-sm">
-                {error.message ?? 'The endpoint reported an error without saying what.'}
-              </p>
-              <div className="flex flex-wrap gap-2">
-                {error.type ? <Badge tone="bad">{error.type}</Badge> : null}
-                {error.code ? <Badge tone="bad">code {error.code}</Badge> : null}
-              </div>
-            </div>
-          ) : null}
-
-          <Views
-            // A red status with the decoder's empty hands under it is the whole
-            // problem this panel answers: when the endpoint refused, what it
-            // said is the answer, and it is in the body.
-            initial={http.status >= 400 ? 'payload' : 'decoded'}
-            views={[
-              {
-                key: 'decoded',
-                label: 'Decoded',
-                render: () => <Decoded exchange={exchange} error={error !== undefined} />,
-              },
-              {
-                key: 'payload',
-                label: 'Payload',
-                render: () =>
-                  outcome.response.bodyText === undefined ? (
-                    <Tree value={outcome.response.raw} />
-                  ) : (
-                    <Body text={outcome.response.bodyText} />
-                  ),
-              },
-              ...(outcome.response.bodyText === undefined
-                ? []
-                : [
-                    {
-                      key: 'raw',
-                      label: 'Raw',
-                      render: () => <Code>{outcome.response.bodyText ?? ''}</Code>,
-                    },
-                  ]),
-            ]}
-          />
-
-          {outcome.response.jsonError ? (
-            <div className="space-y-1">
-              <Badge tone="warn">not JSON</Badge>
-              <p className="text-muted text-xs">{outcome.response.jsonError}</p>
-            </div>
-          ) : null}
-
-          {outcome.response.elided ? (
-            <p className="text-faint text-xs">
-              The vectors are elided from the body above; they are analysed in full in the panel
-              beside this one.
-            </p>
-          ) : null}
-
-          {stream ? <StreamStats stream={stream} /> : null}
-        </Pane>
+          </Pane>
+        ) : (
+          <ResponsePane response={response} expectUnauthorized={expectUnauthorized} />
+        )}
       </Panes>
     </Card>
   )
 }
 
-/** What the decoder made of the answer, which is not the answer itself. */
-function Decoded({ exchange, error }: { exchange: ModelExchange; error: boolean }) {
-  const { decoded } = exchange.outcome.response
+/**
+ * The status of a model call, which the endpoint has not necessarily given yet.
+ *
+ * A call in flight has no status and a run that ended before one arrived has
+ * none either, and the two are worth telling apart: the first is the tool
+ * working, the second is the tool having given up.
+ */
+function callStatus(exchange: ModelExchange, expectUnauthorized: boolean): Status {
+  if (exchange.response !== null) {
+    const { status } = exchange.response.http
+    return { text: String(status), tone: statusTone(status, expectUnauthorized) }
+  }
+  return exchange.abandoned ? { text: 'none', tone: 'bad' } : { text: '···', tone: 'neutral' }
+}
 
+/**
+ * The right half of a model card, once there is one.
+ *
+ * Its own component because the left half exists from the moment the request
+ * goes out and this one only from the moment the endpoint answers — a card that
+ * rendered both together could not be drawn until the call was over.
+ */
+function ResponsePane({
+  response,
+  expectUnauthorized,
+}: {
+  response: ResponseView
+  expectUnauthorized: boolean
+}) {
+  const { error, stream } = response
+  const tone = statusTone(response.http.status, expectUnauthorized)
+  const protectedAsExpected =
+    expectUnauthorized && (response.http.status === 401 || response.http.status === 403)
+  const received =
+    stream?.bytes ?? (response.bodyText === undefined ? null : weigh(response.bodyText))
+
+  return (
+    <Pane
+      title="Response"
+      action={
+        response.bodyText === undefined ? undefined : (
+          <CopyButton text={response.bodyText} label="Copy body" />
+        )
+      }
+    >
+      <ResponseLine
+        status={response.http.status}
+        tone={tone}
+        ms={response.http.latencyMs}
+        note={
+          response.http.ttftMs === undefined ? undefined : `first token ${response.http.ttftMs} ms`
+        }
+      />
+      <Facts>
+        <Fact label="content-type" value={header(response.http.headers, 'content-type')} />
+        <Fact label="received" value={received === null ? undefined : formatBytes(received)} />
+      </Facts>
+      {/*
+        Already carried by every trace and never once shown. This is where a
+        rate limit, a gateway's own identity and the request id an operator
+        will ask for have been all along.
+      */}
+      <Headers
+        headers={response.http.headers}
+        empty="The endpoint returned no headers worth recording."
+      />
+
+      {protectedAsExpected ? (
+        <p className="text-good text-sm">The route is protected — that is a pass, not a failure.</p>
+      ) : null}
+
+      {/*
+        First, above everything: when the endpoint refused, its own sentence
+        is the answer, and reading it should not mean opening a tab.
+      */}
+      {error ? (
+        <div className="space-y-1 rounded bg-bad-soft p-2">
+          <p className="text-bad text-sm">
+            {error.message ?? 'The endpoint reported an error without saying what.'}
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {error.type ? <Badge tone="bad">{error.type}</Badge> : null}
+            {error.code ? <Badge tone="bad">code {error.code}</Badge> : null}
+          </div>
+        </div>
+      ) : null}
+
+      <Views
+        // A red status with the decoder's empty hands under it is the whole
+        // problem this panel answers: when the endpoint refused, what it
+        // said is the answer, and it is in the body.
+        initial={response.http.status >= 400 ? 'payload' : 'decoded'}
+        views={[
+          {
+            key: 'decoded',
+            label: 'Decoded',
+            render: () => <Decoded decoded={response.decoded} error={error !== undefined} />,
+          },
+          {
+            key: 'payload',
+            label: 'Payload',
+            render: () =>
+              response.bodyText === undefined ? (
+                <Tree value={response.raw} />
+              ) : (
+                <Body text={response.bodyText} />
+              ),
+          },
+          ...(response.bodyText === undefined
+            ? []
+            : [
+                {
+                  key: 'raw',
+                  label: 'Raw',
+                  render: () => <Code>{response.bodyText ?? ''}</Code>,
+                },
+              ]),
+        ]}
+      />
+
+      {response.jsonError ? (
+        <div className="space-y-1">
+          <Badge tone="warn">not JSON</Badge>
+          <p className="text-muted text-xs">{response.jsonError}</p>
+        </div>
+      ) : null}
+
+      {response.elided ? (
+        <p className="text-faint text-xs">
+          The vectors are elided from the body above; they are analysed in full in the panel beside
+          this one.
+        </p>
+      ) : null}
+
+      {stream ? <StreamStats stream={stream} /> : null}
+    </Pane>
+  )
+}
+
+/** What the decoder made of the answer, which is not the answer itself. */
+function Decoded({
+  decoded,
+  error,
+}: {
+  // Typed off the response rather than imported: `Decoded` is this component's
+  // own name in this file, and the answer's shape has no second name.
+  decoded: ResponseView['decoded']
+  error: boolean
+}) {
   if (decoded?.kind === 'embedding') {
     // The vectors themselves are analysed above; here the point is only that the
     // decoder found some, and how many.
