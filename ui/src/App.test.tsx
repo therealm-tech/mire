@@ -1007,7 +1007,7 @@ describe('App', () => {
 
     await user.click(await screen.findByRole('button', { name: /embed/ }))
     expect(screen.getByText('One text per line')).toBeInTheDocument()
-    expect(screen.getByText(/2\+ checks determinism/)).toBeInTheDocument()
+    expect(screen.getByText('runs')).toBeInTheDocument()
   })
 })
 
@@ -1406,11 +1406,15 @@ describe('the loop', () => {
   it('sends a chat model through the loop and an embedding one straight out', async () => {
     const user = userEvent.setup()
     const urls: string[] = []
+    let callBody: unknown
     vi.stubGlobal(
       'fetch',
-      vi.fn((input: RequestInfo | URL) => {
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input)
         urls.push(url)
+        if (url.endsWith('api/call') && typeof init?.body === 'string') {
+          callBody = JSON.parse(init.body)
+        }
         if (url.endsWith('api/models')) {
           return Promise.resolve(Response.json(MODELS))
         }
@@ -1442,6 +1446,10 @@ describe('the loop', () => {
     await user.click(screen.getByRole('button', { name: /embed/ }))
     await user.click(screen.getByRole('button', { name: 'Send' }))
     await waitFor(() => expect(urls.some((url) => url.endsWith('api/call'))).toBe(true))
+
+    // There is no checkbox for it: an embedding sent from here always asks for
+    // the vectors behind the summary.
+    expect(callBody).toMatchObject({ includeVectors: true })
   })
 
   it('answers in the transcript and records the timings underneath', async () => {

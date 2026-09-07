@@ -153,9 +153,10 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   becomes a model of its own. It is the model's own route asked for in YAML, so
   `curl -H 'accept: application/yaml' …/api/models/qwen3 > models/qwen3.yaml` is
   that act without the tab.
-- **Input**, for embedding models. One text per line, a run count, and a
-  checkbox for the full vectors. There is no second turn of an embedding, so
-  there is no conversation and no loop.
+- **Input**, for embedding models. One text per line and a run count — two or
+  more runs is what the determinism check compares. The call always asks for the
+  full vectors, so the summary the panel reads has the payload behind it. There
+  is no second turn of an embedding, so there is no conversation and no loop.
 - **Traffic**, under the conversation. Everything that left the process, in the
   order it left, one card per exchange, filtered by kind or down to the failures
   — and reachable from the transcript above, which names the card each of its
