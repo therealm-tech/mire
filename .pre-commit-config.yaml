@@ -8,7 +8,7 @@ repos:
       - id: check-yaml
       - id: check-added-large-files
         # A lockfile is legitimately large and legitimately versioned.
-        exclude: ^ui/package-lock\.json$
+        exclude: ^(ui|website)/package-lock\.json$
       - id: check-merge-conflict
       - id: detect-private-key
 
@@ -95,4 +95,21 @@ repos:
         entry: npm --prefix ui run typecheck
         language: system
         files: ^ui/.*\.(ts|tsx|json)$
+        pass_filenames: false
+
+      # The documentation site is a second front end with its own Biome and
+      # TypeScript configuration, for the same reason the front end has one: a
+      # nested project in a Rust repository, not a workspace member.
+      - id: docs-biome
+        name: biome check (website)
+        entry: npm --prefix website run lint
+        language: system
+        files: ^website/.*\.(ts|tsx|mts|json)$
+        pass_filenames: false
+
+      - id: docs-typecheck
+        name: tsc --noEmit (website)
+        entry: npm --prefix website run typecheck
+        language: system
+        files: ^website/.*\.(ts|tsx|mts|json)$
         pass_filenames: false

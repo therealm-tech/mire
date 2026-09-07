@@ -1,0 +1,102 @@
+/* Mobile first: one column, and the grid only appears once there is room. */
+
+.hero {
+  padding: 3rem 0 2.5rem;
+  text-align: center;
+  background: var(--mire-hero-background);
+  border-bottom: 1px solid var(--ifm-toc-border-color);
+}
+
+.mark {
+  width: 64px;
+  height: 64px;
+}
+
+.title {
+  margin: 0.75rem 0 0;
+  font-size: 2.75rem;
+  letter-spacing: -0.02em;
+}
+
+.tagline {
+  margin: 0.75rem auto 0;
+  max-width: 34rem;
+  font-size: 1.125rem;
+  color: var(--ifm-color-emphasis-700);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  justify-content: center;
+  margin-top: 1.75rem;
+}
+
+.answers {
+  padding: 2.5rem 0;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1rem;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  padding: 1.25rem;
+  border: 1px solid var(--ifm-toc-border-color);
+  border-radius: var(--ifm-global-radius);
+  background: var(--ifm-background-surface-color);
+}
+
+.question {
+  margin: 0;
+  font-size: 1.125rem;
+  line-height: 1.4;
+}
+
+.body {
+  margin: 0.75rem 0 1rem;
+  color: var(--ifm-color-emphasis-700);
+  font-size: 0.9375rem;
+}
+
+.cardLink {
+  margin-top: auto;
+  font-weight: 600;
+}
+
+.shape {
+  padding: 0 0 3.5rem;
+}
+
+.shapeTitle {
+  font-size: 1.5rem;
+}
+
+.shapeBody {
+  max-width: 46rem;
+  color: var(--ifm-color-emphasis-700);
+}
+
+@media (min-width: 768px) {
+  .hero {
+    padding: 5rem 0 4rem;
+  }
+
+  .title {
+    font-size: 3.5rem;
+  }
+
+  .grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1.5rem;
+  }
+
+  .shape {
+    padding-bottom: 5rem;
+  }
+}

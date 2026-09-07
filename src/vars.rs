@@ -5,13 +5,14 @@
 //! on a server in `mcp/` names those, by `JSONPath`, per tool:
 //!
 //! ```yaml
-//! servers:
-//!   - name: dev
-//!     url: https://dev.internal/mcp
-//!     capture:
-//!       - tools: [create_session]
-//!         vars:
-//!           session: [$.sessionId]
+//! name: dev
+//! url: https://dev.internal/mcp
+//! capture:
+//!   - tools:
+//!       - create_session
+//!     vars:
+//!       session:
+//!         - $.sessionId
 //! ```
 //!
 //! and a hook on that same server reads them back as `vars`:
@@ -19,10 +20,11 @@
 //! ```yaml
 //! hooks:
 //!   - name: audit
-//!     on: [after]
-//!     action:
-//!       kind: http
-//!       url: https://audit.internal/sessions/{{ vars.session }}
+//!     on:
+//!       - after
+//!     actions:
+//!       - http:
+//!           url: https://audit.internal/sessions/{{ vars.session }}
 //! ```
 //!
 //! # Why `JSONPath`

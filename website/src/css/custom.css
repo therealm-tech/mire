@@ -1,0 +1,71 @@
+/*
+ * The palette the embedded UI uses — warm paper, navy ink — so the
+ * documentation and the tool it documents do not look like two products.
+ * Source of truth for the values: ui/src/index.css in the repository.
+ */
+
+:root {
+  --ifm-color-primary: #33415a;
+  --ifm-color-primary-dark: #2e3b51;
+  --ifm-color-primary-darker: #2b374c;
+  --ifm-color-primary-darkest: #242e3f;
+  --ifm-color-primary-light: #3c4c69;
+  --ifm-color-primary-lighter: #41526f;
+  --ifm-color-primary-lightest: #4b5e80;
+
+  --ifm-background-color: #fffdf8;
+  --ifm-background-surface-color: #ffffff;
+  --ifm-heading-color: #0b1220;
+  --ifm-font-family-monospace:
+    ui-monospace, "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
+  --ifm-code-font-size: 92%;
+  --ifm-global-radius: 0.5rem;
+
+  --docusaurus-highlighted-code-line-bg: #eef1f5;
+  --mire-hero-background: linear-gradient(180deg, #f7f8fa 0%, #fffdf8 100%);
+}
+
+[data-theme="dark"] {
+  --ifm-color-primary: #a8bcd8;
+  --ifm-color-primary-dark: #90a8ca;
+  --ifm-color-primary-darker: #849fc5;
+  --ifm-color-primary-darkest: #6580ab;
+  --ifm-color-primary-light: #c0d0e6;
+  --ifm-color-primary-lighter: #ccd9eb;
+  --ifm-color-primary-lightest: #eef3fa;
+
+  --ifm-background-color: #0b1220;
+  --ifm-background-surface-color: #121a29;
+  --ifm-heading-color: #f2e9d7;
+
+  --docusaurus-highlighted-code-line-bg: #1f2a3a;
+  --mire-hero-background: linear-gradient(180deg, #121a29 0%, #0b1220 100%);
+}
+
+/* The mark is a line drawing on `currentColor`, so it follows the theme. */
+.navbar__logo {
+  color: var(--ifm-heading-color);
+}
+
+.navbar-github::before {
+  content: "";
+  display: block;
+  width: 24px;
+  height: 24px;
+  background-color: var(--ifm-navbar-link-color);
+  mask-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 24 24' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2c-3.3.7-4-1.6-4-1.6-.6-1.4-1.4-1.8-1.4-1.8-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 0-.8.4-1.3.7-1.6-2.7-.3-5.5-1.3-5.5-6 0-1.2.5-2.3 1.3-3.1-.2-.4-.6-1.6.1-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.7 1.6.2 2.8.1 3.2.8.8 1.3 1.9 1.3 3.2 0 4.6-2.8 5.6-5.5 5.9.5.4.9 1.1.9 2.3v3.3c0 .3.1.7.8.6A12 12 0 0 0 12 .3'/%3E%3C/svg%3E");
+  mask-size: contain;
+  mask-repeat: no-repeat;
+}
+
+/* Wide tables are the norm in the reference pages; let them scroll on their own
+   rather than pushing the page sideways. */
+.markdown table {
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.markdown h2 {
+  margin-top: 2.5rem;
+}

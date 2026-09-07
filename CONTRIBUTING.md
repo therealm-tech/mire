@@ -21,11 +21,12 @@ See [README.md](README.md#getting-started) for running the project itself, and
   rustup toolchain install
   ```
 
-- **Node.js ≥ 24** and `npm`, for the front end — see
-  [nodejs.org](https://nodejs.org/en/download).
+- **Node.js ≥ 24** and `npm`, for the front end and for the documentation site
+  — see [nodejs.org](https://nodejs.org/en/download).
 
   ```sh
   npm --prefix ui ci
+  npm --prefix website ci
   ```
 
 - **`pre-commit`**, which is the lint gate:
@@ -111,6 +112,38 @@ than pulling in a typography plugin. It costs about 48 kB gzipped in the embedde
 bundle — a hand-rolled parser would cost less and be wrong about a corner of
 CommonMark nobody would find until a model landed on it.
 
+## Working on the documentation site
+
+[`website/`](website/README.md) is the Docusaurus site published to
+<https://therealm-tech.github.io/mire/>.
+
+```sh
+npm --prefix website start
+```
+
+Its content is **not** written there. `website/docs/` is generated and ignored by
+git: [`website/scripts/sync-docs.mts`](website/scripts/sync-docs.mts) assembles
+it from [`docs/`](docs/), [`ARCHITECTURE.md`](ARCHITECTURE.md),
+[`docs/adr/`](docs/adr/) and [`CONTRIBUTING.md`](CONTRIBUTING.md) — this file —
+plus the pages under `website/content/` that exist only on the site. So a change
+to any document in this repository is a change to the published documentation,
+and there is one copy of each of them rather than two that drift.
+
+The sync rewrites every relative link on the way: one pointing at a document the
+site publishes becomes a route, one pointing at a file in the repository becomes
+a GitHub URL, and one pointing at nothing fails the sync. The build then refuses
+a route or an anchor that does not resolve, so a heading renamed in `docs/` turns
+CI red rather than leaving a dead link behind.
+
+Adding a document to the site takes two edits: the manifest at the top of the
+sync script, and [`website/sidebars.ts`](website/sidebars.ts). A new ADR needs
+neither — `docs/adr/` is synced whole and its sidebar entry is generated.
+
+```sh
+npm --prefix website run build      # what CI builds
+npm --prefix website run check      # biome, writing fixes
+```
+
 ## Running the tests
 
 Both suites are expected green on every pull request. New behaviour comes with
@@ -187,6 +220,8 @@ pre-commit run cargo-clippy --all-files
 | `actionlint` | [`.github/workflows/`](.github/workflows/) | no |
 | `biome` | Format and lint of `ui/`; `npm --prefix ui run check` writes the fixes | with `check` |
 | `ui-typecheck` | `tsc --noEmit`, a blocking gate on the same footing as the linter | no |
+| `docs-biome` | Format and lint of `website/`; `npm --prefix website run check` writes the fixes | with `check` |
+| `docs-typecheck` | `tsc --noEmit` over the documentation site | no |
 
 The hooks stop short of the test suites on purpose: a commit hook has to stay
 fast enough that nobody reaches for `--no-verify`, and a suite is the first thing
@@ -204,9 +239,10 @@ attached.
 | --- | --- | --- | --- |
 | [`quality.yaml`](.github/workflows/quality.yaml) | every push to `main`, every pull request | `pre-commit run --all-files`, `cargo test`, `npm --prefix ui test`, and Trivy over the repository | `pre-commit run --all-files`, then both suites |
 | [`build.yaml`](.github/workflows/build.yaml) | the same, when `src/`, `ui/`, the manifests or the `Dockerfile` change | Builds the image per architecture on its own native runner, scans it, and on `main` pushes it with a multi-arch manifest | `docker build .` |
+| [`docs.yaml`](.github/workflows/docs.yaml) | the same, when `docs/`, `website/`, `ARCHITECTURE.md` or `CONTRIBUTING.md` change | Builds the documentation site, and on `main` publishes it to GitHub Pages | `npm --prefix website run build` |
 | [`release.yaml`](.github/workflows/release.yaml) | a `v*` tag | Checks the tag against the manifest version, then publishes the image and the GitHub Release | — |
 
-All four `quality` jobs and both `build` jobs block a merge. The Trivy job runs
+All four `quality` jobs, both `build` jobs and the `docs` build block a merge. The Trivy job runs
 twice on purpose: one pass publishes everything actionable to the Security tab as
 SARIF, the other fails the build on `HIGH` and `CRITICAL` only.
 

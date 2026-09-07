@@ -8,6 +8,10 @@
 A test pattern for model endpoints. You put a known signal in, and you look at
 what comes out.
 
+**[Documentation](https://therealm-tech.github.io/mire/)** ·
+[Getting started](https://therealm-tech.github.io/mire/docs/getting-started/installation) ·
+[Your first call](https://therealm-tech.github.io/mire/docs/getting-started/first-call)
+
 ## Description
 
 You deployed a model, or you changed a route, and you want to know four things:
@@ -28,7 +32,7 @@ but it is the same binary with the same lifetime, for when a notebook is easier
 to hand an image than a binary.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and the reasoning behind
-it.
+it, and <https://therealm-tech.github.io/mire/> for the documentation in full.
 
 ## Getting started
 
@@ -132,6 +136,10 @@ docker run --rm --read-only -p 127.0.0.1:8787:8787 \
 ```
 
 ### Documentation
+
+The whole of it, searchable and cross-linked, is published at
+**<https://therealm-tech.github.io/mire/>**. The same content lives in this
+repository:
 
 | Document | What it covers |
 | --- | --- |
