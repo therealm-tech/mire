@@ -45,7 +45,6 @@ function list(selected: string | null, stages: Record<string, string> = {}, onSe
   render(
     <ModelList
       models={[PLAIN, ...STAGED]}
-      issues={[]}
       selected={selected}
       stages={stages}
       onSelect={onSelect}
@@ -132,9 +131,7 @@ describe('ModelList', () => {
     const user = userEvent.setup()
     const onSelect = vi.fn()
     const orphaned = STAGED.map((model) => ({ ...model, isDefault: false }))
-    render(
-      <ModelList models={orphaned} issues={[]} selected={null} stages={{}} onSelect={onSelect} />,
-    )
+    render(<ModelList models={orphaned} selected={null} stages={{}} onSelect={onSelect} />)
 
     await user.click(screen.getByRole('button', { name: /^qwen3 chat/ }))
 

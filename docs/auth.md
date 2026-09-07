@@ -138,10 +138,11 @@ never sees a new model against an old auth registry.
 
 A broken file never stops `mire` from starting, and never takes the good ones
 down with it. One malformed model, or one bad provider, is skipped and reported:
-`GET /api/models` and `GET /api/auth` each return an `issues` list with the file,
-the message and the position. You reach for this tool when
-something is already wrong — it should come up and show you what, not refuse to
-run until its own config is perfect.
+`GET /api/config` lists every directory's failures with the file, the message and
+the position, and `GET /api/models` and `GET /api/auth` each carry the same
+`issues` list for their own directory. You reach for this tool when something is
+already wrong — it should come up and show you what, not refuse to run until its
+own config is perfect.
 
 The token values themselves are read on **every** call, not cached: a rotated
 service account token file is picked up on the next request.

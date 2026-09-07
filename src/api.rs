@@ -111,28 +111,52 @@ fn upload_routes() -> ApiRouter<AppState> {
 
 /// Hearing about the configuration directory, rather than asking.
 fn config_routes() -> ApiRouter<AppState> {
-    ApiRouter::new().api_route(
-        "/api/events",
-        get_with(handlers::events, |op| {
-            op.summary("Watch the configuration for changes")
-                .description(
-                    "A server-sent event stream that emits one `config` event every time \
+    ApiRouter::new()
+        .api_route(
+            "/api/config",
+            get_with(handlers::read_config, |op| {
+                op.summary("Describe the configuration as a whole")
+                    .description(
+                        "Every subdirectory `mire` reads — `models/`, `auth/`, `mcp/`, \
+                         `prompts/`, `decodes/` — with how many entries each one currently \
+                         provides and every file that did not load, naming the file and the \
+                         position where the parser reports one.\n\n\
+                         The listings carry the same issues for their own directory, and this \
+                         is a projection of the same snapshot, so the two cannot disagree. \
+                         Read this one to answer \"did my save land, and did it break \
+                         anything\" in a single request — and because `decodes/` has no \
+                         listing of its own, it is the only place its issues appear.\n\n\
+                         `generation` is the counter `GET /api/events` announces, so a client \
+                         can tell which reading of the directories it is looking at.",
+                    )
+                    .tag("config")
+                    .response::<200, Json<dto::ConfigResponse>>()
+            }),
+        )
+        .api_route(
+            "/api/events",
+            get_with(handlers::events, |op| {
+                op.summary("Watch the configuration for changes")
+                    .description(
+                        "A server-sent event stream that emits one `config` event every time \
                      the file watcher reloads the configuration directories, carrying the \
                      new `generation` — a counter that starts at zero and only goes up.\n\n\
                      It carries no configuration. A client that receives one re-reads \
-                     `GET /api/models`, `/api/prompts`, `/api/auth` and `/api/mcp`, which \
-                     stay the only places the contents come from. The counter is per \
+                     `GET /api/config` for the state of the directories, and \
+                     `GET /api/models`, `/api/prompts`, `/api/auth` and `/api/mcp` for what \
+                     is in them — they stay the only places the contents come from. The \
+                     counter is per \
                      process: reconnecting to a number *below* the one you held means \
                      `mire` was restarted under you, which is one more reason to re-read \
                      rather than a contradiction.\n\n\
                      The stream never ends on its own and never emits a failure — a reload \
                      that fails keeps the previous configuration, so there is nothing to \
                      announce. Reconnect if it drops.",
-                )
-                .tag("config")
-                .response::<200, String>()
-        }),
-    )
+                    )
+                    .tag("config")
+                    .response::<200, String>()
+            }),
+        )
 }
 
 /// Reading the configuration directory.

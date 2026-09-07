@@ -149,7 +149,9 @@ embedded front end and rewrites its base URL under a path prefix.
 into the binary. It renders what the API returns and holds the conversation; it
 has no model of its own and edits no configuration. It follows the configuration
 rather than sampling it once: it subscribes to `GET /api/events` and re-reads the
-listings whenever a reload is announced.
+listings whenever a reload is announced. What did not load it reads from
+`GET /api/config` alone, and shows in one bar under the header: a save that breaks
+a file is one event, and the listings cannot speak for `decodes/`.
 
 ## Data flow
 
@@ -214,9 +216,14 @@ without their results is how a working endpoint starts answering `400`.
 The watcher debounces the burst an editor makes of one save, re-reads every
 directory and swaps the snapshot; the swap is what bumps the generation, and the
 generation is announced on `GET /api/events` after it, never before. A browser
-that hears it re-reads the four listings and settles what the tab had selected
-against what came back — a model whose file is gone is replaced rather than left
-pointing at nothing.
+that hears it re-reads the listings and `GET /api/config`, then settles what the
+tab had selected against what came back — a model whose file is gone is replaced
+rather than left pointing at nothing.
+
+`GET /api/config` reads the generation before the snapshot, never after. A reload
+landing between the two answers a stale number for the configuration that follows
+it, which costs a client one re-read it did not need; the other order answers the
+new number for the old contents, and the client stops re-reading for good.
 
 The event carries a number and no configuration: the listings stay the only place
 the contents come from, and the number exists to be compared with the last one

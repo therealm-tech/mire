@@ -5,6 +5,7 @@
 | Route | What it does |
 | --- | --- |
 | `GET /api/events` | Server-sent events: one `config` event per configuration reload, so a client can re-read the listings instead of showing what was there when it connected |
+| `GET /api/config` | Every directory `mire` reads, how many entries each one provides and every file that did not load — the whole configuration in one request, and the only place `decodes/` issues appear |
 | `GET /api/models` | Every model, plus the files that failed to load and why |
 | `GET /api/models/{id}` | One model, as declared |
 | `GET /api/prompts` | Prompts declared in `prompts/`, plus the entries that did not load |

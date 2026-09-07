@@ -1,4 +1,4 @@
-import type { LoadIssue, ModelSummary } from '../api'
+import type { ModelSummary } from '../api'
 import { Badge, Button } from './primitives'
 
 /**
@@ -42,13 +42,11 @@ function group(models: ModelSummary[]): Group[] {
 
 export function ModelList({
   models,
-  issues,
   selected,
   stages,
   onSelect,
 }: {
   models: ModelSummary[]
-  issues: LoadIssue[]
   /** The id of the selected model — `name`, or `name@stage`. */
   selected: string | null
   /** The stage last picked, per model name. See `stages` in `App`. */
@@ -150,21 +148,6 @@ export function ModelList({
           No model loaded. Drop a YAML file in the models directory — it is picked up without a
           restart.
         </p>
-      ) : null}
-
-      {issues.length > 0 ? (
-        <div className="space-y-1">
-          <h3 className="font-semibold text-muted text-xs">Files that did not load</h3>
-          {issues.map((issue) => (
-            <p key={`${issue.file}:${issue.message}`} className="text-xs">
-              <span className="break-all font-mono text-bad">
-                {issue.file}
-                {issue.line === null ? '' : `:${issue.line}:${issue.column ?? 0}`}
-              </span>
-              <span className="block text-muted">{issue.message}</span>
-            </p>
-          ))}
-        </div>
       ) : null}
     </div>
   )

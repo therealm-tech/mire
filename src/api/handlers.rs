@@ -18,8 +18,8 @@ use validator::Validate;
 use super::AppState;
 use super::dto::{
     AgentEvent, AgentRequest, AuthPath, AuthResponse, CallRequest, CallbackQuery, ConfigEvent,
-    LoginRequest, LoginResponse, LogoutResponse, McpPath, McpResponse, McpToolsResponse, ModelPath,
-    ModelsResponse, PromptsResponse, StreamEvent, UploadResponse,
+    ConfigResponse, LoginRequest, LoginResponse, LogoutResponse, McpPath, McpResponse,
+    McpToolsResponse, ModelPath, ModelsResponse, PromptsResponse, StreamEvent, UploadResponse,
 };
 use super::sse::EventStream;
 use super::ui;
@@ -41,6 +41,19 @@ pub async fn healthz() -> &'static str {
 pub async fn list_models(State(state): State<AppState>) -> Json<ModelsResponse> {
     let config = state.runner.config().snapshot();
     Json(ModelsResponse::new(&config.models))
+}
+
+/// The configuration directories as a whole: what loaded, and what did not.
+pub async fn read_config(State(state): State<AppState>) -> Json<ConfigResponse> {
+    let store = state.runner.config();
+    // The generation first, the snapshot second, and never the other way round.
+    // A reload landing between the two reads swaps the contents *then* counts,
+    // so this order answers a stale number for the configuration that follows —
+    // a client that re-reads once for nothing. The other order answers the new
+    // number for the old contents, and the client stops re-reading for good.
+    let generation = store.generation();
+    let config = store.snapshot();
+    Json(ConfigResponse::new(&config, generation))
 }
 
 /// Every saved prompt, and every entry that failed to load.

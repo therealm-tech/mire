@@ -97,6 +97,37 @@ export const promptsResponseSchema = z.object({
   issues: z.array(loadIssueSchema),
 })
 
+/** One subdirectory of the configuration, and how its last read went. */
+export const configDirectorySchema = z.object({
+  /** `models`, `auth`, `mcp`, `prompts`, `decodes`. */
+  name: z.string(),
+  /**
+   * How many entries are usable under that name.
+   *
+   * Entries rather than files: a staged file declares one per stage, and
+   * `decodes` counts the shapes compiled into `mire` alongside the declared
+   * ones — so a `decodes` directory that loaded nothing is still not zero.
+   */
+  loaded: z.number(),
+  issues: z.array(loadIssueSchema),
+})
+
+/**
+ * The state of the configuration directories, in one answer.
+ *
+ * The only place the UI reads load issues from. The four listings each carry
+ * their own `issues[]` and always will — a `curl` at `/api/models` should say
+ * why a model is missing — but a page that read them there would be answering
+ * "what did not load" in four places, and still missing `decodes/`, which has no
+ * listing to be missed from.
+ */
+export const configResponseSchema = z.object({
+  /** The counter `GET /api/events` announces. Which read this describes. */
+  generation: z.number(),
+  /** Always all five, always in the same order. */
+  directories: z.array(configDirectorySchema),
+})
+
 /**
  * What `GET /api/events` announces: the directories were re-read.
  *
@@ -613,6 +644,8 @@ export const errorBodySchema = z.object({
 })
 
 export type LoadIssue = z.infer<typeof loadIssueSchema>
+export type ConfigDirectory = z.infer<typeof configDirectorySchema>
+export type ConfigResponse = z.infer<typeof configResponseSchema>
 export type ModelKind = z.infer<typeof modelKindSchema>
 export type ModelSummary = z.infer<typeof modelSummarySchema>
 export type ModelsResponse = z.infer<typeof modelsResponseSchema>
@@ -745,6 +778,10 @@ export function fetchAuth(): Promise<AuthResponse> {
 
 export function fetchMcp(): Promise<McpResponse> {
   return request('api/mcp', mcpResponseSchema)
+}
+
+export function fetchConfig(): Promise<ConfigResponse> {
+  return request('api/config', configResponseSchema)
 }
 
 /**

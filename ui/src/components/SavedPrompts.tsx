@@ -1,5 +1,5 @@
 import { useId } from 'react'
-import type { LoadIssue, Prompt } from '../api'
+import type { Prompt } from '../api'
 
 /**
  * The questions worth keeping, one dropdown away from the box.
@@ -12,19 +12,18 @@ import type { LoadIssue, Prompt } from '../api'
  * It **replaces** what is in the box rather than appending to it, which is the
  * honest reading of "load the saved one" — and why the label says so.
  *
- * Gone entirely when the file declares nothing and complains about nothing: a
- * permanently empty dropdown is a control that only ever wastes a click.
+ * Gone entirely when the file declares nothing: a permanently empty dropdown is
+ * a control that only ever wastes a click. What `prompts/` refused to load is not
+ * said here any more — it is one of the five directories the bar under the header
+ * speaks for.
  */
 export function SavedPrompts({
   prompts,
-  issues,
   disabled,
   onPick,
 }: {
   /** Every prompt that loaded, in the order the file wrote them. */
   prompts: Prompt[]
-  /** Entries of `prompts/` that did not, so a typo is visible where it bites. */
-  issues: LoadIssue[]
   disabled: boolean
   onPick: (text: string) => void
 }) {
@@ -32,7 +31,7 @@ export function SavedPrompts({
   // embedding box's — and a hard-coded id would tie both labels to the first.
   const id = useId()
 
-  if (prompts.length === 0 && issues.length === 0) {
+  if (prompts.length === 0) {
     return null
   }
 
@@ -64,13 +63,6 @@ export function SavedPrompts({
           </option>
         ))}
       </select>
-
-      {issues.length > 0 ? (
-        <span className="text-[11px] text-bad">
-          {issues.length === 1 ? '1 entry' : `${issues.length} entries`} of prompts/ did not load:{' '}
-          {issues.map((issue) => issue.message).join('; ')}
-        </span>
-      ) : null}
     </div>
   )
 }

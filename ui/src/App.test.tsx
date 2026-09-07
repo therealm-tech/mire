@@ -220,6 +220,39 @@ const PROMPTS = {
   ],
 }
 
+/**
+ * What `GET /api/config` says about the directories behind the fixtures above.
+ *
+ * It reads `PROMPTS.issues` rather than restating it: the endpoint is a
+ * projection of the same snapshot the listings come from, so a fixture where the
+ * two disagree would be testing a state the server cannot produce.
+ *
+ * The `decodes/` complaint is here on purpose. It is the one no listing carries,
+ * so it is the one that proves the banner is reading the whole configuration
+ * rather than stitching the four listings back together.
+ */
+const CONFIG = {
+  generation: 3,
+  directories: [
+    { name: 'models', loaded: MODELS.models.length, issues: [] },
+    { name: 'auth', loaded: AUTH.providers.length, issues: [] },
+    { name: 'mcp', loaded: MCP.servers.length, issues: [] },
+    { name: 'prompts', loaded: PROMPTS.prompts.length, issues: PROMPTS.issues },
+    {
+      name: 'decodes',
+      loaded: 6,
+      issues: [
+        {
+          file: '/tmp/decodes/openai-ish.yaml',
+          message: 'invalid JSON pointer `/choices/0/mesage`',
+          line: 22,
+          column: 5,
+        },
+      ],
+    },
+  ],
+}
+
 function completion(status: number) {
   return {
     model: 'chat',
@@ -437,7 +470,14 @@ function mockApi(routes: Record<string, unknown>) {
   // at what a route was actually sent — a `FormData` body has no other witness.
   return vi.fn((input: RequestInfo | URL, _init?: RequestInit) => {
     const url = String(input)
-    const match = Object.entries(routes).find(([suffix]) => url.endsWith(suffix))
+    // Built per call rather than once, because the reload tests answer
+    // differently the second time by mutating the map they handed in.
+    //
+    // The configuration comes first so that a caller's own entry replaces it in
+    // place: the page reads it on every load, and a test about the model listing
+    // should not have to say so.
+    const answers = { 'api/config': CONFIG, ...routes }
+    const match = Object.entries(answers).find(([suffix]) => url.endsWith(suffix))
     if (!match) {
       throw new Error(`unexpected fetch: ${url}`)
     }
@@ -494,8 +534,14 @@ function recordingApi(answers: string[], mcp: unknown = MCP, auth: unknown = AUT
     if (url.endsWith('api/mcp')) {
       return Promise.resolve(Response.json(mcp))
     }
+    if (url.endsWith('api/config')) {
+      return Promise.resolve(Response.json(CONFIG))
+    }
     if (url.endsWith('api/prompts')) {
       return Promise.resolve(Response.json(PROMPTS))
+    }
+    if (url.endsWith('api/config')) {
+      return Promise.resolve(Response.json(CONFIG))
     }
     if (url.endsWith('api/agent')) {
       sent.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
@@ -1088,6 +1134,9 @@ describe('the loop', () => {
         if (url.endsWith('api/mcp')) {
           return Promise.resolve(Response.json(MCP))
         }
+        if (url.endsWith('api/config')) {
+          return Promise.resolve(Response.json(CONFIG))
+        }
         if (url.endsWith('api/prompts')) {
           return Promise.resolve(Response.json(PROMPTS))
         }
@@ -1313,6 +1362,9 @@ describe('the loop', () => {
         }
         if (url.endsWith('api/mcp')) {
           return Promise.resolve(Response.json(MCP))
+        }
+        if (url.endsWith('api/config')) {
+          return Promise.resolve(Response.json(CONFIG))
         }
         if (url.endsWith('api/prompts')) {
           return Promise.resolve(Response.json(PROMPTS))
@@ -2413,6 +2465,8 @@ describe('browser login', () => {
             state: 'abc',
           }
           signedIn = true
+        } else if (url.endsWith('api/config')) {
+          return Promise.resolve(Response.json(CONFIG))
         } else if (url.endsWith('api/prompts')) {
           return Promise.resolve(Response.json(PROMPTS))
         } else if (url.endsWith('api/mcp')) {
@@ -2482,6 +2536,8 @@ describe('browser login', () => {
             redirectUri: 'x',
             state: 's',
           }
+        } else if (url.endsWith('api/config')) {
+          return Promise.resolve(Response.json(CONFIG))
         } else if (url.endsWith('api/prompts')) {
           return Promise.resolve(Response.json(PROMPTS))
         } else if (url.endsWith('api/mcp')) {
@@ -2536,6 +2592,8 @@ describe('browser login', () => {
             state: 's',
           }
           signedIn = true
+        } else if (url.endsWith('api/config')) {
+          return Promise.resolve(Response.json(CONFIG))
         } else if (url.endsWith('api/prompts')) {
           return Promise.resolve(Response.json(PROMPTS))
         } else if (url.endsWith('api/mcp')) {
@@ -2587,6 +2645,8 @@ describe('browser login', () => {
         if (url.endsWith('/logout')) {
           signedIn = false
           payload = { signedOut: true }
+        } else if (url.endsWith('api/config')) {
+          return Promise.resolve(Response.json(CONFIG))
         } else if (url.endsWith('api/prompts')) {
           return Promise.resolve(Response.json(PROMPTS))
         } else if (url.endsWith('api/mcp')) {
@@ -2631,6 +2691,8 @@ describe('browser login', () => {
           logouts.push(url)
           signedIn = false
           payload = { signedOut: true }
+        } else if (url.endsWith('api/config')) {
+          return Promise.resolve(Response.json(CONFIG))
         } else if (url.endsWith('api/prompts')) {
           return Promise.resolve(Response.json(PROMPTS))
         } else if (url.endsWith('api/mcp')) {
@@ -2913,6 +2975,7 @@ describe('conversation', () => {
         const url = String(input)
         if (url.endsWith('api/models')) return Promise.resolve(Response.json(MODELS))
         if (url.endsWith('api/auth')) return Promise.resolve(Response.json(AUTH))
+        if (url.endsWith('api/config')) return Promise.resolve(Response.json(CONFIG))
         if (url.endsWith('api/prompts')) return Promise.resolve(Response.json(PROMPTS))
         if (url.endsWith('api/mcp')) return Promise.resolve(Response.json(MCP))
         sent.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
@@ -3076,6 +3139,8 @@ describe('preflight', () => {
             redirectUri: 'x',
             state: 's',
           }
+        } else if (url.endsWith('api/config')) {
+          return Promise.resolve(Response.json(CONFIG))
         } else if (url.endsWith('api/prompts')) {
           return Promise.resolve(Response.json(PROMPTS))
         } else if (url.endsWith('api/mcp')) {
@@ -3137,6 +3202,9 @@ describe('stopping a run', () => {
           return Promise.resolve(stalled(init?.signal))
         }
         let payload: unknown = MODELS
+        if (url.endsWith('api/config')) {
+          return Promise.resolve(Response.json(CONFIG))
+        }
         if (url.endsWith('api/prompts')) {
           return Promise.resolve(Response.json(PROMPTS))
         }
@@ -3390,12 +3458,6 @@ describe('saved prompts', () => {
     expect(screen.getByLabelText('Message')).toHaveValue('ping')
   })
 
-  it('names the entry prompts/ would not load, where it bites', async () => {
-    render(<App />)
-
-    expect(await screen.findByText(/1 entry of prompts\/ did not load/)).toHaveTextContent('hollow')
-  })
-
   it('offers the same library to an embedding box', async () => {
     const user = userEvent.setup()
     render(<App />)
@@ -3406,7 +3468,7 @@ describe('saved prompts', () => {
     expect(screen.getByLabelText('One text per line')).toHaveValue('one\ntwo')
   })
 
-  it('is gone entirely when the file declares nothing and complains about nothing', async () => {
+  it('is gone entirely when the file declares nothing', async () => {
     vi.stubGlobal(
       'fetch',
       mockApi({
@@ -3945,6 +4007,9 @@ describe('attaching a file', () => {
         if (url.endsWith('api/mcp')) {
           return Promise.resolve(Response.json(MCP))
         }
+        if (url.endsWith('api/config')) {
+          return Promise.resolve(Response.json(CONFIG))
+        }
         if (url.endsWith('api/prompts')) {
           return Promise.resolve(Response.json(PROMPTS))
         }
@@ -4078,6 +4143,7 @@ describe('a model that declares stages', () => {
         const url = String(input)
         if (url.endsWith('api/models')) return Promise.resolve(Response.json(STAGED))
         if (url.endsWith('api/auth')) return Promise.resolve(Response.json(AUTH))
+        if (url.endsWith('api/config')) return Promise.resolve(Response.json(CONFIG))
         if (url.endsWith('api/prompts')) return Promise.resolve(Response.json(PROMPTS))
         if (url.endsWith('api/mcp')) return Promise.resolve(Response.json(MCP))
         sent.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
@@ -4127,6 +4193,7 @@ describe('a configuration reload', () => {
       'api/auth': AUTH,
       'api/mcp': MCP,
       'api/prompts': PROMPTS,
+      'api/config': CONFIG,
     }
     vi.stubGlobal('fetch', mockApi(routes))
     return routes
@@ -4230,6 +4297,98 @@ describe('a configuration reload', () => {
     page.unmount()
 
     expect(stream.closed).toBe(true)
+  })
+})
+
+/**
+ * The bar under the header, and the wiring behind it.
+ *
+ * The component's own behaviour is `ConfigBanner.test.tsx`; what is worth a page
+ * test is that the page reads `GET /api/config` for this and follows it — the
+ * listings used to be the source, and they cannot answer for `decodes/`.
+ */
+describe('configuration issues', () => {
+  it('reads the directory nothing else can speak for', async () => {
+    render(<App />)
+
+    const banner = await screen.findByRole('status', { name: 'Configuration load errors' })
+
+    // Both the fixtures declare, from the two directories they come from —
+    // `prompts/`, which has a listing, and `decodes/`, which has none.
+    expect(banner).toHaveTextContent('2 files of the configuration did not load')
+    expect(within(banner).getByText(/invalid JSON pointer/)).toBeInTheDocument()
+    expect(within(banner).getByText(/a prompt with no text/)).toBeInTheDocument()
+  })
+
+  it('says nothing when every file loaded', async () => {
+    vi.stubGlobal(
+      'fetch',
+      mockApi({
+        'api/models': MODELS,
+        'api/auth': AUTH,
+        'api/mcp': MCP,
+        'api/prompts': { ...PROMPTS, issues: [] },
+        'api/config': {
+          ...CONFIG,
+          directories: CONFIG.directories.map((entry) => ({ ...entry, issues: [] })),
+        },
+      }),
+    )
+
+    render(<App />)
+
+    await screen.findByLabelText('Message')
+    expect(
+      screen.queryByRole('status', { name: 'Configuration load errors' }),
+    ).not.toBeInTheDocument()
+  })
+
+  /**
+   * The whole point of watching the directories: a save that breaks a file is
+   * the moment the page has something to say, and it is not the moment to be
+   * still showing the state the tab opened on.
+   */
+  it('follows a save that breaks a file', async () => {
+    const routes: Record<string, unknown> = {
+      'api/models': MODELS,
+      'api/auth': AUTH,
+      'api/mcp': MCP,
+      'api/prompts': PROMPTS,
+      'api/config': {
+        ...CONFIG,
+        directories: CONFIG.directories.map((entry) => ({ ...entry, issues: [] })),
+      },
+    }
+    vi.stubGlobal('fetch', mockApi(routes))
+
+    render(<App />)
+    await screen.findByLabelText('Message')
+    expect(
+      screen.queryByRole('status', { name: 'Configuration load errors' }),
+    ).not.toBeInTheDocument()
+
+    routes['api/config'] = {
+      generation: 4,
+      directories: CONFIG.directories.map((entry) =>
+        entry.name === 'models'
+          ? {
+              ...entry,
+              issues: [
+                {
+                  file: '/tmp/models/qwen3.yaml',
+                  message: 'unknown field `templat`',
+                  line: 14,
+                  column: 3,
+                },
+              ],
+            }
+          : { ...entry, issues: [] },
+      ),
+    }
+    configStream().announce(4)
+
+    const banner = await screen.findByRole('status', { name: 'Configuration load errors' })
+    expect(within(banner).getByText('/tmp/models/qwen3.yaml:14:3')).toBeInTheDocument()
   })
 })
 

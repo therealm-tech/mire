@@ -6,10 +6,12 @@ import {
   type AuthResponse,
   type CallOutcome,
   type CallRequest,
+  type ConfigResponse,
   call,
   callbackUri,
   type Embedding,
   fetchAuth,
+  fetchConfig,
   fetchMcp,
   fetchModels,
   fetchPrompts,
@@ -25,6 +27,7 @@ import {
   watchConfig,
 } from './api'
 import { ChatPanel } from './components/ChatPanel'
+import { ConfigBanner } from './components/ConfigBanner'
 import { EmbeddingPanel } from './components/EmbeddingPanel'
 import { EmbeddingRequest } from './components/EmbeddingRequest'
 import { Failure } from './components/Failure'
@@ -152,6 +155,8 @@ export function App() {
   const [auth, setAuth] = useState<AuthResponse | null>(null)
   const [mcp, setMcp] = useState<McpResponse | null>(null)
   const [prompts, setPrompts] = useState<PromptsResponse | null>(null)
+  /** What loaded and what did not, per directory. The only source of load issues. */
+  const [config, setConfig] = useState<ConfigResponse | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   /** When the last announced reload landed on this page, for the note that says so. */
   const [reloadedAt, setReloadedAt] = useState<number | null>(null)
@@ -325,8 +330,8 @@ export function App() {
     loading.current += 1
     const attempt = loading.current
 
-    return Promise.all([fetchModels(), fetchAuth(), fetchMcp(), fetchPrompts()])
-      .then(([loadedModels, loadedAuth, loadedMcp, loadedPrompts]) => {
+    return Promise.all([fetchModels(), fetchAuth(), fetchMcp(), fetchPrompts(), fetchConfig()])
+      .then(([loadedModels, loadedAuth, loadedMcp, loadedPrompts, loadedConfig]) => {
         // Two saves in quick succession are two announcements, so two of these
         // can be in the air at once. The last one asked is the only one whose
         // answer is still about the files on disk.
@@ -339,6 +344,7 @@ export function App() {
         setAuth(loadedAuth)
         setMcp(loadedMcp)
         setPrompts(loadedPrompts)
+        setConfig(loadedConfig)
         settled.current = true
         // A remembered name is only good while the file behind it still is:
         // models are a directory somebody edits, and coming back to a
@@ -358,6 +364,8 @@ export function App() {
           providers: loadedAuth.providers.length,
           servers: loadedMcp.servers.length,
           prompts: loadedPrompts.prompts.length,
+          generation: loadedConfig.generation,
+          issues: loadedConfig.directories.reduce((count, entry) => count + entry.issues.length, 0),
         })
         return true
       })
@@ -900,7 +908,7 @@ export function App() {
     )
   }
 
-  if (!models || !auth || !mcp || !prompts) {
+  if (!models || !auth || !mcp || !prompts || !config) {
     return (
       <main className="p-6">
         <Spinner label="Loading configuration…" />
@@ -931,6 +939,8 @@ export function App() {
         )}
       </header>
 
+      <ConfigBanner directories={config.directories} />
+
       {/*
         `min-w-0` on both columns: a grid child is `min-width: auto`, so a wide
         request body would widen the column and put the scrollbar on the page
@@ -956,7 +966,6 @@ export function App() {
             {wide || picking ? (
               <ModelList
                 models={models.models}
-                issues={models.issues}
                 selected={selectedModel}
                 stages={stages}
                 onSelect={(picked) => {

@@ -43,12 +43,7 @@ export function EmbeddingRequest({
   return (
     <Panel title="Input">
       <div className="space-y-3">
-        <SavedPrompts
-          prompts={prompts.prompts}
-          issues={prompts.issues}
-          disabled={busy}
-          onPick={onInput}
-        />
+        <SavedPrompts prompts={prompts.prompts} disabled={busy} onPick={onInput} />
 
         <Field label="One text per line">
           <textarea
