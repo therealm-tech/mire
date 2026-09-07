@@ -4,6 +4,10 @@ Depth on each part of [`mire`](../README.md). The root
 [README](../README.md#getting-started) covers installing and running it, and
 [ARCHITECTURE.md](../ARCHITECTURE.md) covers how it is put together and why.
 
+These documents are also published, together with the architecture and the
+decision records, at <https://therealm-tech.github.io/mire/> — built from this
+directory by [`website/`](../website/README.md).
+
 | Document | What it covers |
 | --- | --- |
 | [configuration.md](configuration.md) | The options file, configuration directories and how they layer, stages (`dev`/`preprod`/`prod` in one file), containers, notebook path proxies |

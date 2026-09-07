@@ -1,0 +1,92 @@
+name: docs
+
+# The site is built from the repository's own markdown — `docs/`,
+# `ARCHITECTURE.md`, `CONTRIBUTING.md` — so a change to any of those is a change
+# to the published documentation, whether or not `website/` was touched.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "docs/**"
+      - "website/**"
+      - "ARCHITECTURE.md"
+      - "CONTRIBUTING.md"
+      - "mire.svg"
+      - "mire-mark.svg"
+      - "ui/public/favicon.svg"
+      - ".github/workflows/docs.yaml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "website/**"
+      - "ARCHITECTURE.md"
+      - "CONTRIBUTING.md"
+      - "mire.svg"
+      - "mire-mark.svg"
+      - "ui/public/favicon.svg"
+      - ".github/workflows/docs.yaml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Runs on pull requests too, without deploying: a link that no longer resolves
+  # fails the build, and finding that out after the merge is finding it out too
+  # late.
+  build:
+    name: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - name: install the site dependencies
+        run: npm --prefix website ci
+
+      # `prebuild` syncs the repository's markdown into `website/docs` first.
+      - name: build the site
+        run: npm --prefix website run build
+
+      - name: upload the site
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5.0.0
+        with:
+          path: website/build
+
+  deploy:
+    name: deploy
+    if: ${{ github.event_name != 'pull_request' }}
+    needs: build
+    permissions:
+      # Publishing to GitHub Pages, and proving to it who is asking.
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-24.04
+    steps:
+      # `enablement` turns Pages on for the repository the first time this runs,
+      # so the site is switched on by a reviewable change rather than by
+      # somebody remembering to click it.
+      - name: configure GitHub Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d  # v6.0.0
+        with:
+          enablement: true
+
+      - name: deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346  # v5.0.1

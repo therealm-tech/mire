@@ -1,0 +1,124 @@
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# Installation
+
+`mire` is one static binary with the web UI compiled into it. There is nothing
+to serve alongside it, no runtime to install and no database to point it at.
+
+<Tabs groupId="install">
+<TabItem value="binary" label="Released binary" default>
+
+Released binaries are **Linux only**, statically linked against musl, so there
+is no glibc version to match. Archives are published for `x86_64` and
+`aarch64`.
+
+```sh
+VERSION=$(curl -fsSL https://api.github.com/repos/therealm-tech/mire/releases/latest \
+  | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
+ARCH=$(uname -m)
+
+curl -fsSLO "https://github.com/therealm-tech/mire/releases/download/v${VERSION}/mire-${VERSION}-linux-${ARCH}.tar.gz"
+curl -fsSLO "https://github.com/therealm-tech/mire/releases/download/v${VERSION}/mire-${VERSION}-linux-${ARCH}.tar.gz.sha256"
+sha256sum -c "mire-${VERSION}-linux-${ARCH}.tar.gz.sha256"
+tar -xzf "mire-${VERSION}-linux-${ARCH}.tar.gz"
+install -m 0755 mire ~/.local/bin/mire
+```
+
+Check the archive against its `.sha256` before unpacking it — the line above is
+the whole verification, and skipping it is how you end up running something
+else.
+
+</TabItem>
+<TabItem value="container" label="Container image">
+
+Published for `linux/amd64` and `linux/arm64`, on a `distroless/static` base:
+no shell, no package manager, running as UID 65532 and writing nothing.
+
+```sh
+docker pull ghcr.io/therealm-tech/mire:latest
+```
+
+Mount the configuration rather than baking it in, and keep the filesystem
+read-only — the image needs nothing writable unless you attach files:
+
+```sh
+docker run --rm --read-only -p 127.0.0.1:8787:8787 \
+  -v "$PWD/config:/etc/mire/config:ro" \
+  ghcr.io/therealm-tech/mire:latest
+```
+
+The image ships no `HEALTHCHECK`: it holds no HTTP client to run one with.
+`GET /healthz` is the same check, run by something that already has one.
+
+See [Configuration](/docs/guides/configuration) for the container defaults and
+for attaching files from a container.
+
+</TabItem>
+<TabItem value="source" label="From source">
+
+Building from source is also the macOS route.
+
+```sh
+git clone https://github.com/therealm-tech/mire.git
+cd mire
+cargo build --release
+```
+
+The binary lands at `./target/release/mire`.
+
+Building needs **Node.js ≥ 24** as well as Rust: the front end is embedded, so
+`cargo build` runs the npm install and Vite on the way past. Running the binary
+needs neither.
+
+Without a Node toolchain:
+
+```sh
+MIRE_BUILD_UI=0 cargo build --release
+```
+
+That still gets you a placeholder page and a fully functional API — which is
+what the test suite builds against.
+
+</TabItem>
+</Tabs>
+
+## Prerequisites
+
+To run a released binary or the image: nothing but the binary or a container
+runtime. To build from source:
+
+- **Rust** — the toolchain pinned in
+  [`rust-toolchain.toml`](https://github.com/therealm-tech/mire/blob/main/rust-toolchain.toml),
+  installed for you by [`rustup`](https://rustup.rs)
+- **Node.js ≥ 24** and `npm`, for the embedded UI — see
+  [nodejs.org](https://nodejs.org/en/download)
+- **Docker**, optional, for the container image and for
+  [the dev stack](/docs/guides/dev-stack)
+
+## Check it came up
+
+```sh
+mire --version
+mire --help
+```
+
+`--help` names every option and its default; the same ground is covered in
+[Command line and options](/docs/reference/cli).
+
+Then point it at a directory of endpoints and open the URL it prints:
+
+```sh
+mire --config-dir ./config
+```
+
+It listens on `127.0.0.1:8787` unless you say otherwise. Widening the listen
+address is deliberate — see [Configuration](/docs/guides/configuration).
+
+## What to do next
+
+You need at least one model file before a call goes anywhere. The repository
+ships a `config/` directory and a `docker-compose.yaml` that stands up a model
+runtime, an identity provider and a gateway for it to point at — that pair is
+the shortest path to a real answer, and it is what
+[Your first call](/docs/getting-started/first-call) uses.

@@ -1,0 +1,151 @@
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# Your first call
+
+The shortest honest path to a decoded answer: a model runtime to call, a model
+file describing it, and one request.
+
+## Bring up something to call
+
+The repository ships a `docker-compose.yaml` that stands up a model runtime, a
+gateway that requires a credential, an identity provider and an MCP server —
+everything the shipped `config/` points at.
+
+```sh
+docker compose up -d          # first run pulls ~950 MB of models
+export OIDC_CLIENT_SECRET=mire-dev-secret
+export MODEL_TOKEN=anything   # the gateway only checks that a credential exists
+mire
+```
+
+`mire` reads `./config` by default, so there is nothing to pass. Open the URL it
+prints — `http://127.0.0.1:8787` — and the models are already in the picker.
+
+Full inventory of that stack, and what each service is for, in
+[A stack to test against](/docs/guides/dev-stack).
+
+:::note Pointing it at your own endpoint instead
+
+You need one file in `models/`. Take the `curl` you are pasting around today and
+split it into the URL, the body and the credential — that is a model file, and
+[Models](/docs/guides/models) walks through it. Everything below works the same
+way against it.
+
+:::
+
+## Send one call
+
+<Tabs groupId="surface">
+<TabItem value="ui" label="In the UI" default>
+
+Pick **qwen3** in the model list, type `ping`, and press **Send**.
+
+Above the composer, one line per thing there is to say about the call — where it
+goes and who it goes as — settled before it happens rather than reconstructed
+from a trace afterwards.
+
+The answer arrives in the conversation. Under it, **Traffic** is every wire the
+process touched, in the order it touched them: the card goes up when the request
+*leaves*, so the body, the headers and **Copy as curl** are readable while the
+endpoint is still thinking. Open the response half and the decode trace names
+the path that resolved each field — a missing answer is a miss you can see
+rather than a blank.
+
+[The web UI](/docs/guides/ui) covers the rest of the page.
+
+</TabItem>
+<TabItem value="api" label="From the API">
+
+The same call, which is what you paste into a ticket:
+
+```sh
+curl -sS localhost:8787/api/call \
+  -H 'content-type: application/json' \
+  -d '{"model": "qwen3", "prompt": "ping"}' | jq .response.decoded
+```
+
+Every route is in [HTTP API](/docs/reference/api), and the process serves a
+Scalar reference of its own at `/docs` against `/openapi.json`.
+
+</TabItem>
+</Tabs>
+
+## Read what actually went out
+
+The point of the tool is the request, not the answer. Every call hands back the
+request it made, with its `curl` equivalent:
+
+```sh
+curl -sS localhost:8787/api/call \
+  -H 'content-type: application/json' \
+  -d '{"model": "qwen3", "prompt": "ping"}' | jq -r .curl
+```
+
+That command reproduces the call tomorrow, on a machine that never had the tab
+open. Credentials are masked in it, in the request view, and in every trace and
+log line — the value never leaves the process.
+
+:::tip A `4xx` is a result, not a failure
+
+The endpoint's status is recorded, never consulted. A `401` from the endpoint
+under test is a **successful call** that told you something true; read
+`response.http.status`. The API returns an error only when `mire` itself could
+not do its job.
+
+:::
+
+## Ask the question the tool exists for
+
+`qwen3` points at the gateway rather than at the model runtime, so the
+credential is a question with an answer. Override it per call and read the
+matrix:
+
+```sh
+for provider in anonymous static-token keycloak-workload; do
+  status=$(curl -sS localhost:8787/api/call \
+    -H 'content-type: application/json' \
+    -d "{\"model\": \"qwen3\", \"auth\": \"$provider\", \"prompt\": \"ping\"}" \
+    | jq -r .response.http.status)
+  printf '%-20s %s\n' "$provider" "$status"
+done
+```
+
+```
+anonymous            401
+static-token         200
+keycloak-workload    200
+```
+
+One model, three answers, nothing duplicated — and the `401` is the pass. What
+each of those providers is, and how to write one for your own identity
+provider, is in [Credentials](/docs/guides/auth).
+
+## Then watch it call a tool
+
+`POST /api/agent` runs the same model in a loop and streams every wire as it is
+touched. Switch a server on for the run and the model's tool calls are really
+executed against it:
+
+```sh
+curl -sS -N localhost:8787/api/agent \
+  -H 'content-type: application/json' \
+  -d '{"model": "qwen3", "mcpServers": ["weather"], "prompt": "what is the weather in Paris?"}'
+```
+
+The run reports the MCP negotiation as its own event, then one event per turn,
+per round trip, per hook and per tool result. Every way out of the loop is
+named. [The agent loop](/docs/guides/agent-loop) covers the stop conditions, and
+[MCP servers](/docs/guides/mcp) covers declaring servers, hooks and captured
+variables.
+
+## Where to go next
+
+- **Your endpoints, not the toy ones** — [Models](/docs/guides/models), then
+  [Configuration](/docs/guides/configuration) for layering a directory of your
+  own over a shared one.
+- **Several environments from one file** —
+  [stages](/docs/guides/configuration#stages) give you `dev`, `preprod` and
+  `prod` in a single entry, addressed as `name@stage`.
+- **Time to first token** — [Streaming](/docs/guides/streaming).
+- **Vectors** — [Embeddings](/docs/guides/embeddings).
