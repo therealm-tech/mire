@@ -17,12 +17,15 @@
 //! carried forward — a stream that goes wrong halfway is a finding, and the
 //! chunks that did arrive are the evidence.
 
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::Value;
 
 use super::paths::{self, resolve};
 use super::{DecodeField, DecodeTrace};
+use crate::message::ToolCall;
 use crate::model::DecodeSpec;
 
 /// How the endpoint delimits its chunks.
@@ -224,6 +227,114 @@ pub fn delta(chunk: &Value, spec: &DecodeSpec, trace: &mut DecodeTrace) -> Delta
     Delta::Text(text)
 }
 
+/// A streamed tool call, put back together across the chunks it arrived in.
+///
+/// `OpenAI` streams one call as many fragments: the id and the name in the one that
+/// opens it, then `arguments` a few characters at a time, every fragment labelled
+/// with the `index` of the call it belongs to. Read one at a time they are
+/// unreadable — only the first carries a name — so the arguments are dropped and
+/// the model is recorded as having called `get_weather()` with nothing in it,
+/// which is worse than a failure because it looks like an answer.
+///
+/// Endpoints that send a whole call in one node carry no `index` at all: Ollama's
+/// own API answers with an array of complete calls, Anthropic with a content
+/// block each. Those are calls in their own right rather than fragments of the
+/// one before, which is what the two collections below keep apart.
+#[derive(Debug, Default)]
+pub struct ToolCalls {
+    /// Fragments being assembled, by the index the endpoint labels them with.
+    /// A `BTreeMap` so they come back out in the order the model asked for them.
+    fragments: BTreeMap<i64, Value>,
+    /// Calls that arrived in one piece, in the order they did.
+    whole: Vec<Value>,
+    /// The path that selected them, kept for anything the trace has to say later.
+    source: Option<String>,
+}
+
+impl ToolCalls {
+    /// Takes whatever this chunk carries, and says whether a path resolved at all.
+    ///
+    /// Resolving is not the same as finding a call: an endpoint that sends
+    /// `"tool_calls": []` on every chunk has a correct cascade over a model that
+    /// asked for nothing, and only the end of the stream can tell the difference.
+    pub fn push(&mut self, chunk: &Value, spec: &DecodeSpec, trace: &mut DecodeTrace) -> bool {
+        let Some((path, items)) = super::chat::tool_call_items(chunk, spec) else {
+            return false;
+        };
+        if !items.is_empty() {
+            trace.hit(DecodeField::ToolCalls, path.source());
+            self.source = Some(path.source().to_owned());
+        }
+        for item in items {
+            match item.get("index").and_then(Value::as_i64) {
+                Some(index) => match self.fragments.get_mut(&index) {
+                    Some(held) => merge(held, item),
+                    None => {
+                        self.fragments.insert(index, item.clone());
+                    }
+                },
+                None => self.whole.push(item.clone()),
+            }
+        }
+        true
+    }
+
+    /// The calls, once there are no more fragments to come.
+    #[must_use]
+    pub fn finish(self, trace: &mut DecodeTrace) -> Vec<ToolCall> {
+        let source = self.source.unwrap_or_default();
+        self.fragments
+            .into_values()
+            .chain(self.whole)
+            .filter_map(|item| {
+                super::chat::tool_call_from_value(&item).or_else(|| {
+                    // Reported only now: a fragment with no name is the ordinary
+                    // case mid-stream, and complaining per chunk would say a
+                    // healthy endpoint is broken several times a second.
+                    trace.issue_once(
+                        DecodeField::ToolCalls,
+                        &source,
+                        format!(
+                            "cannot read a tool call out of {}",
+                            super::chat::type_name(&item)
+                        ),
+                    );
+                    None
+                })
+            })
+            .collect()
+    }
+}
+
+/// Folds a fragment into the call it belongs to.
+///
+/// `arguments` is the one field that arrives in pieces and so is concatenated;
+/// everything else — the id, the name, the type — is stated once by the fragment
+/// that opens the call, and a later fragment repeating it must not be allowed to
+/// blank it out.
+fn merge(existing: &mut Value, incoming: &Value) {
+    let (Some(target), Some(source)) = (existing.as_object_mut(), incoming.as_object()) else {
+        return;
+    };
+    for (key, value) in source {
+        if !target.contains_key(key) {
+            target.insert(key.clone(), value.clone());
+            continue;
+        }
+        let held = target.get_mut(key).expect("the key is there, just checked");
+        match held {
+            Value::Null => *held = value.clone(),
+            Value::String(text) if key == "arguments" => {
+                if let Some(part) = value.as_str() {
+                    text.push_str(part);
+                }
+            }
+            Value::Object(_) => merge(held, value),
+            _ => {}
+        }
+    }
+}
+
 /// Which streamed cascades ever resolved, whatever they resolved to.
 ///
 /// The distinction the trace needs at the end, and the reason a bare
@@ -311,6 +422,89 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn streamed_spec() -> DecodeSpec {
+        serde_yaml_ng::from_str(r#"tool_calls: ["$.choices[0].delta.tool_calls"]"#).unwrap()
+    }
+
+    fn fragment(body: &Value) -> Value {
+        serde_json::json!({"choices": [{"delta": {"tool_calls": [body]}}]})
+    }
+
+    #[test]
+    fn a_call_split_over_several_chunks_comes_back_as_one() {
+        let spec = streamed_spec();
+        let mut trace = DecodeTrace::default();
+        let mut calls = ToolCalls::default();
+
+        for body in [
+            serde_json::json!({
+                "index": 0, "id": "c1", "type": "function",
+                "function": {"name": "get_weather", "arguments": ""}
+            }),
+            serde_json::json!({"index": 0, "function": {"arguments": "{\"ci"}}),
+            serde_json::json!({"index": 0, "function": {"arguments": "ty\":\"Paris\"}"}}),
+        ] {
+            assert!(calls.push(&fragment(&body), &spec, &mut trace));
+        }
+
+        let decoded = calls.finish(&mut trace);
+        assert_eq!(decoded.len(), 1, "{decoded:#?}");
+        assert_eq!(decoded[0].name, "get_weather");
+        assert_eq!(decoded[0].id.as_deref(), Some("c1"));
+        assert_eq!(decoded[0].arguments["city"], "Paris");
+        // The fragments were never readable on their own, and saying so once per
+        // chunk would call a healthy endpoint broken several times a second.
+        assert!(trace.issues.is_empty(), "{:#?}", trace.issues);
+    }
+
+    #[test]
+    fn two_calls_in_one_turn_stay_two() {
+        let spec = streamed_spec();
+        let mut trace = DecodeTrace::default();
+        let mut calls = ToolCalls::default();
+
+        for index in [0, 1] {
+            calls.push(
+                &fragment(&serde_json::json!({
+                    "index": index, "id": format!("c{index}"),
+                    "function": {"name": "get_weather", "arguments": "{}"}
+                })),
+                &spec,
+                &mut trace,
+            );
+        }
+
+        let decoded = calls.finish(&mut trace);
+        assert_eq!(decoded.len(), 2, "{decoded:#?}");
+        assert_eq!(decoded[0].id.as_deref(), Some("c0"));
+        assert_eq!(decoded[1].id.as_deref(), Some("c1"));
+    }
+
+    #[test]
+    fn calls_that_arrive_whole_are_never_folded_together() {
+        // No `index` anywhere: Ollama's own API and Anthropic's content blocks
+        // send complete calls, and merging them by position would turn two into
+        // one with the second one's arguments glued onto the first.
+        let spec = streamed_spec();
+        let mut trace = DecodeTrace::default();
+        let mut calls = ToolCalls::default();
+
+        calls.push(
+            &serde_json::json!({"choices": [{"delta": {"tool_calls": [
+                {"function": {"name": "get_weather", "arguments": "{\"city\":\"Lyon\"}"}},
+                {"function": {"name": "get_time", "arguments": "{}"}}
+            ]}}]}),
+            &spec,
+            &mut trace,
+        );
+
+        let decoded = calls.finish(&mut trace);
+        assert_eq!(decoded.len(), 2, "{decoded:#?}");
+        assert_eq!(decoded[0].name, "get_weather");
+        assert_eq!(decoded[0].arguments["city"], "Lyon");
+        assert_eq!(decoded[1].name, "get_time");
     }
 
     #[test]

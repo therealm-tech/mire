@@ -7086,6 +7086,167 @@ async fn a_loop_does_not_stream_unless_the_run_asks_for_it() {
     assert_eq!(body["stream"], false);
 }
 
+/// The shape an OpenAI-compatible endpoint really streams a tool call in.
+///
+/// Not `message.tool_calls`: that is the whole-response path, and streamed the
+/// call arrives under `delta` exactly as the text does. A cascade that knows only
+/// the first reads a model asking for a tool as a model asking for nothing — the
+/// run then stops on `noToolCalls` with the call sitting in plain sight on the
+/// wire, which is the one failure this tool exists to make impossible.
+///
+/// Written against `from: openai-chat` rather than a hand-written cascade, so it
+/// is the built-in shape under test and not a copy of it.
+#[tokio::test]
+async fn a_streamed_tool_call_is_read_from_the_delta() {
+    let server = MockServer::start().await;
+    // Verbatim from Ollama's `/v1/chat/completions`, trimmed to the two chunks
+    // that matter: the whole call in one delta, then the stop reason alone.
+    Mock::given(method("POST"))
+        .respond_with(event_stream(concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\
+             \"content\":\"\",\"tool_calls\":[{\"id\":\"call_onn1ncue\",\"index\":0,\
+             \"type\":\"function\",\"function\":{\"name\":\"get_weather\",\
+             \"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}}]},\
+             \"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        )))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(event_stream(concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"21 degrees\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        )))
+        .mount(&server)
+        .await;
+
+    let harness = Harness::start(&[("models/agent.yaml", from_shape_model(&server.uri()))]).await;
+
+    let (status, events) = harness
+        .agent(json!({"model": "agent", "prompt": "weather in Paris?", "stream": true}))
+        .await;
+    assert_eq!(status, 200);
+
+    let turns: Vec<&Value> = events
+        .iter()
+        .filter(|(name, _)| name == "turn")
+        .map(|(_, payload)| payload)
+        .collect();
+    assert_eq!(
+        turns.len(),
+        2,
+        "the tool call has to make a second turn happen"
+    );
+
+    let call = &turns[0]["tools"][0]["call"];
+    assert_eq!(call["name"], "get_weather");
+    assert_eq!(call["id"], "call_onn1ncue");
+    assert_eq!(call["arguments"]["city"], "Paris");
+
+    let (_, done) = events
+        .iter()
+        .find(|(name, _)| name == "done")
+        .expect("done");
+    assert_eq!(done["stop"]["outcome"], "stopped");
+}
+
+/// A streamed tool call that arrives in pieces, which is what `OpenAI` itself
+/// sends: the name and the id in the opening fragment, the arguments a few
+/// characters at a time under the same `index`.
+///
+/// Every fragment after the first carries no name, so read one at a time they are
+/// unreadable and dropped — leaving a call to `get_weather` with no city in it.
+/// The schema check catches the empty arguments, which is luck rather than
+/// design: a tool whose schema allows an empty object would have been called with
+/// the wrong thing and nobody told.
+#[tokio::test]
+async fn a_streamed_tool_call_is_reassembled_from_its_fragments() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(event_stream(concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\
+             \"type\":\"function\",\"function\":{\"name\":\"get_weather\",\
+             \"arguments\":\"\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\
+             \"function\":{\"arguments\":\"{\\\"ci\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\
+             \"function\":{\"arguments\":\"ty\\\":\\\"Paris\\\"}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        )))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(event_stream(concat!(
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        )))
+        .mount(&server)
+        .await;
+
+    let harness = Harness::start(&[("models/agent.yaml", from_shape_model(&server.uri()))]).await;
+
+    let (status, events) = harness
+        .agent(json!({"model": "agent", "prompt": "weather in Paris?", "stream": true}))
+        .await;
+    assert_eq!(status, 200);
+
+    let turn = &events
+        .iter()
+        .find(|(name, _)| name == "turn")
+        .expect("a turn")
+        .1;
+    let tools = turn["tools"].as_array().expect("the tools it called");
+    assert_eq!(tools.len(), 1, "one call, not one per fragment: {tools:#?}");
+    assert_eq!(tools[0]["call"]["name"], "get_weather");
+    assert_eq!(tools[0]["call"]["id"], "c1");
+    assert_eq!(tools[0]["call"]["arguments"]["city"], "Paris");
+    assert!(
+        tools[0]["schemaErrors"]
+            .as_array()
+            .expect("errors")
+            .is_empty(),
+        "{:#?}",
+        tools[0]["schemaErrors"]
+    );
+}
+
+/// A model that reads its answers with a built-in shape rather than a cascade
+/// copied into the file, so the shape itself is what a test exercises.
+fn from_shape_model(url: &str) -> String {
+    format!(
+        r#"
+name: agent
+kind: chat
+url: {url}
+timeout_ms: 5000
+request:
+  template: |
+    {{"model": "m", "messages": {{{{ messages | tojson }}}}, "stream": {{{{ stream | tojson }}}}}}
+decode:
+  from:
+    - openai-chat
+tools:
+  - name: get_weather
+    schema:
+      type: object
+      properties:
+        city:
+          type: string
+      required: [city]
+    response: '{{"temp": 21}}'
+agent:
+  stop_when:
+    no_tool_calls: true
+  default_max_turns: 3
+"#
+    )
+}
+
 /// The same loop, streamed: every turn arrives chunk by chunk, and each delta
 /// says which turn it belongs to.
 #[tokio::test]

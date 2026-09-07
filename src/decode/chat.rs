@@ -112,12 +112,7 @@ pub fn read_tool_calls(
     spec: &DecodeSpec,
     trace: &mut DecodeTrace,
 ) -> Option<Vec<ToolCall>> {
-    let (path, nodes) = resolve(raw, &spec.tool_calls)?;
-
-    let items: Vec<&Value> = match nodes.as_slice() {
-        [Value::Array(array)] => array.iter().collect(),
-        other => other.to_vec(),
-    };
+    let (path, items) = tool_call_items(raw, spec)?;
 
     let mut calls = Vec::with_capacity(items.len());
     for item in items {
@@ -135,6 +130,24 @@ pub fn read_tool_calls(
         trace.hit(DecodeField::ToolCalls, path.source());
     }
     Some(calls)
+}
+
+/// The nodes a `tool_calls` cascade selects, flattened to one item per call.
+///
+/// Separate from [`read_tool_calls`] because a stream cannot normalise as it
+/// reads: a fragment carries no name and would be thrown away one chunk at a
+/// time, so [`super::stream::ToolCalls`] wants the items themselves and puts them
+/// back together before anything tries to make a call out of them.
+pub(crate) fn tool_call_items<'a>(
+    raw: &'a Value,
+    spec: &'a DecodeSpec,
+) -> Option<(&'a crate::model::JsonPathExpr, Vec<&'a Value>)> {
+    let (path, nodes) = resolve(raw, &spec.tool_calls)?;
+    let items: Vec<&Value> = match nodes.as_slice() {
+        [Value::Array(array)] => array.iter().collect(),
+        other => other.to_vec(),
+    };
+    Some((path, items))
 }
 
 /// Reads the tool calls out of a whole response.

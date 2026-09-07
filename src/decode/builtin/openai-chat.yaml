@@ -3,7 +3,10 @@
 # and every hosted gateway that copied the shape.
 #
 # `delta` is not a duplicate of `content`: streamed, the text moves from
-# `message` to `delta`, one chunk at a time.
+# `message` to `delta`, one chunk at a time. Tool calls move with it, which is
+# why `tool_calls` carries both paths rather than the whole-response one alone —
+# a cascade that knows only `message.tool_calls` reads a streamed model asking
+# for a tool as a model asking for nothing at all.
 ---
 name: openai-chat
 kind: chat
@@ -14,6 +17,7 @@ decode:
     - $.choices[0].delta.content
   tool_calls:
     - $.choices[0].message.tool_calls
+    - $.choices[0].delta.tool_calls
   finish_reason:
     - $.choices[0].finish_reason
   usage:
