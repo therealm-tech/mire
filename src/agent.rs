@@ -16,8 +16,8 @@
 //!
 //! Every way out is named. The one worth spelling out is
 //! [`StopOutcome::PredicateNeverEvaluable`]: a backend that never emits a
-//! `finish_reason` would let a model stopping on `finish_reason_in` run to
-//! `default_max_turns` and look like a slow agent. It is not — the configured
+//! `finish_reason` would let a model stopping on `decode.terminal_reasons` run
+//! to `default_max_turns` and look like a slow agent. It is not — the configured
 //! predicate could never be evaluated even once, and that is what gets reported.
 
 use std::collections::{BTreeMap, HashSet};
@@ -344,6 +344,7 @@ pub async fn run(
         on_update(AgentUpdate::Setup(&setup));
     }
 
+    let stop_rules = Stop::new(&spec.stop_when, &model.decode.terminal_reasons);
     let started = Instant::now();
     let mut messages = input.call.messages.clone();
     let mut turns: Vec<Turn> = Vec::new();
@@ -360,7 +361,7 @@ pub async fn run(
             index,
             limit,
             predicate_ever_evaluable,
-            &spec.stop_when,
+            stop_rules,
         ) {
             break outcome;
         }
@@ -379,12 +380,12 @@ pub async fn run(
 
         let completion = completion_of(&outcome);
 
-        if completion.finish_reason.is_some() && !spec.stop_when.finish_reason_in.is_empty() {
+        if completion.finish_reason.is_some() && !stop_rules.terminal.is_empty() {
             predicate_ever_evaluable = true;
         }
 
         // Stop before spending a turn answering tools nobody will read.
-        if let Some(reason) = should_stop(&spec.stop_when, &completion) {
+        if let Some(reason) = should_stop(stop_rules, &completion) {
             let turn = record(
                 index,
                 outcome,
@@ -539,7 +540,7 @@ fn budget_exhausted(
     index: u32,
     limit: u32,
     predicate_ever_evaluable: bool,
-    stop_when: &StopWhen,
+    stop: Stop<'_>,
 ) -> Option<StopOutcome> {
     if started.elapsed() >= deadline {
         return Some(StopOutcome::Deadline {
@@ -551,7 +552,7 @@ fn budget_exhausted(
             StopOutcome::MaxTurns { limit }
         } else {
             StopOutcome::PredicateNeverEvaluable {
-                predicate: describe_predicate(stop_when),
+                predicate: describe_predicate(stop),
                 turns: limit,
             }
         });
@@ -843,28 +844,43 @@ fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+/// Everything a turn is judged against, from the two places it is written.
+///
+/// The run says *when* to stop looping and the decode says *which* stop reasons
+/// mean the model is finished — the second is a property of the endpoint's
+/// vocabulary, so it travels with the shape that defines it rather than being
+/// copied into every model file that speaks it.
+#[derive(Clone, Copy)]
+struct Stop<'a> {
+    when: &'a StopWhen,
+    terminal: &'a [String],
+}
+
+impl<'a> Stop<'a> {
+    fn new(when: &'a StopWhen, terminal: &'a [String]) -> Self {
+        Self { when, terminal }
+    }
+}
+
 /// Names the configured predicate, for the report that says it never fired.
-fn describe_predicate(stop_when: &StopWhen) -> &'static str {
-    if stop_when.finish_reason_in.is_empty() {
+fn describe_predicate(stop: Stop<'_>) -> &'static str {
+    if stop.terminal.is_empty() {
         "stop_when"
     } else {
-        "stop_when.finish_reason_in"
+        "decode.terminal_reasons"
     }
 }
 
 /// Applies the configured predicates. Combined with OR: the first that holds wins.
-fn should_stop(stop_when: &StopWhen, completion: &crate::decode::Completion) -> Option<StopReason> {
+fn should_stop(stop: Stop<'_>, completion: &crate::decode::Completion) -> Option<StopReason> {
     if let Some(reason) = &completion.finish_reason
-        && stop_when
-            .finish_reason_in
-            .iter()
-            .any(|value| value == reason)
+        && stop.terminal.iter().any(|value| value == reason)
     {
         return Some(StopReason::FinishReason {
             value: reason.clone(),
         });
     }
-    if stop_when.no_tool_calls && completion.tool_calls.is_empty() {
+    if stop.when.no_tool_calls && completion.tool_calls.is_empty() {
         return Some(StopReason::NoToolCalls);
     }
     None
@@ -1100,12 +1116,13 @@ mod tests {
     #[test]
     fn the_default_is_to_stop_when_there_are_no_tool_calls() {
         let stop_when = StopWhen::default();
+        let stop = Stop::new(&stop_when, &[]);
 
         assert!(matches!(
-            should_stop(&stop_when, &completion(None, &[])),
+            should_stop(stop, &completion(None, &[])),
             Some(StopReason::NoToolCalls)
         ));
-        assert!(should_stop(&stop_when, &completion(None, &["get_weather"])).is_none());
+        assert!(should_stop(stop, &completion(None, &["get_weather"])).is_none());
         // Repeat watching is opt-in: a model re-reading a tool is often working.
         assert!(!stop_when.repeated_call);
     }
@@ -1114,29 +1131,30 @@ mod tests {
     fn a_terminal_finish_reason_stops_the_loop_even_with_tool_calls_pending() {
         let stop_when = StopWhen {
             no_tool_calls: false,
-            finish_reason_in: vec!["stop".to_owned(), "end_turn".to_owned()],
             ..StopWhen::default()
         };
+        let terminal = ["stop".to_owned(), "end_turn".to_owned()];
+        let stop = Stop::new(&stop_when, &terminal);
 
-        let stopped = should_stop(&stop_when, &completion(Some("end_turn"), &["get_weather"]));
+        let stopped = should_stop(stop, &completion(Some("end_turn"), &["get_weather"]));
         assert!(matches!(
             stopped,
             Some(StopReason::FinishReason { value }) if value == "end_turn"
         ));
-        // A reason outside the list is not terminal.
-        assert!(should_stop(&stop_when, &completion(Some("length"), &[])).is_none());
+        // A reason outside the decode's vocabulary is not terminal.
+        assert!(should_stop(stop, &completion(Some("length"), &[])).is_none());
     }
 
     #[test]
     fn the_predicate_name_is_reported_when_it_never_had_anything_to_evaluate() {
-        let only_finish_reason = StopWhen {
+        let stop_when = StopWhen {
             no_tool_calls: false,
-            finish_reason_in: vec!["stop".to_owned()],
             ..StopWhen::default()
         };
+        let terminal = ["stop".to_owned()];
         assert_eq!(
-            describe_predicate(&only_finish_reason),
-            "stop_when.finish_reason_in"
+            describe_predicate(Stop::new(&stop_when, &terminal)),
+            "decode.terminal_reasons"
         );
     }
 

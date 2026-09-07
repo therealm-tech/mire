@@ -657,6 +657,21 @@ pub struct DecodeSpec {
     /// Why generation stopped. `kind: chat`.
     #[serde(default)]
     pub finish_reason: Vec<JsonPathExpr>,
+    /// The `finish_reason` values that mean the model is done talking, for the
+    /// agent loop. `kind: chat`.
+    ///
+    /// Here rather than under `agent:` because which values are terminal is a
+    /// fact about the endpoint's vocabulary, not about the run: `openai-chat`
+    /// says `tool_calls` when it wants a tool and `stop` when it does not,
+    /// Anthropic says `tool_use` and `end_turn`, and Gemini says `STOP` for
+    /// both. So it travels with the shape that defines it, and a model reaching
+    /// a built-in decode through `from:` inherits the right list instead of
+    /// copying a guess into every file.
+    ///
+    /// Empty means the loop does not read `finish_reason` to decide, which is
+    /// the only honest answer for a shape that does not distinguish the two.
+    #[serde(default)]
+    pub terminal_reasons: Vec<String>,
     /// Token accounting. Both kinds.
     #[serde(default)]
     pub usage: Vec<JsonPathExpr>,
@@ -709,15 +724,16 @@ fn paths_or_script(spec: &DecodeSpec) -> Result<(), ValidationError> {
 
 /// Predicates that end an agent loop. Combined with OR; an empty spec means
 /// "stop when there are no tool calls".
+///
+/// The third predicate is not here: stopping on `finish_reason` needs the list
+/// of values that mean *done*, and that list belongs to the response shape
+/// rather than to the run — see [`DecodeSpec::terminal_reasons`].
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StopWhen {
     /// Stop as soon as a turn produces no tool calls.
     #[serde(default = "default_true")]
     pub no_tool_calls: bool,
-    /// Stop when `finish_reason` is one of these values.
-    #[serde(default)]
-    pub finish_reason_in: Vec<String>,
     /// Stop when the model asks for the same tool with the same arguments
     /// twice. Off unless asked for: a model that re-reads a tool it already
     /// called is often working, not looping, and `default_max_turns` already
@@ -730,7 +746,6 @@ impl Default for StopWhen {
     fn default() -> Self {
         Self {
             no_tool_calls: true,
-            finish_reason_in: Vec::new(),
             repeated_call: false,
         }
     }
@@ -941,11 +956,11 @@ request:
 decode:
   content: ["$.choices[0].message.content", "$.output.text"]
   finish_reason: ["$.choices[0].finish_reason"]
+  terminal_reasons: [stop, length]
   error: ["$.error", "$.detail"]
 agent:
   stop_when:
     no_tool_calls: true
-    finish_reason_in: [stop, end_turn]
   default_max_turns: 10
 tools:
   - name: get_weather
@@ -970,6 +985,7 @@ tools:
             "$.choices[0].message.content"
         );
         assert_eq!(model.decode.error[1].source(), "$.detail");
+        assert_eq!(model.decode.terminal_reasons, ["stop", "length"]);
         assert_eq!(model.tools[0].name, "get_weather");
         // Declared without `repeated_call`, so the loop does not watch for one.
         assert!(!model.agent.as_ref().unwrap().stop_when.repeated_call);
@@ -995,8 +1011,8 @@ tools:
     #[test]
     fn watching_for_a_repeated_call_is_opt_in() {
         let yaml = CHAT_YAML.replace(
-            "    finish_reason_in: [stop, end_turn]",
-            "    finish_reason_in: [stop, end_turn]\n    repeated_call: true",
+            "    no_tool_calls: true",
+            "    no_tool_calls: true\n    repeated_call: true",
         );
 
         let model: Model = serde_yaml_ng::from_str(&yaml).unwrap();

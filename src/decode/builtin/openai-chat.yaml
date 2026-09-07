@@ -7,6 +7,16 @@
 # why `tool_calls` carries both paths rather than the whole-response one alone —
 # a cascade that knows only `message.tool_calls` reads a streamed model asking
 # for a tool as a model asking for nothing at all.
+#
+# This shape says which of the two things it is doing: `tool_calls` when the turn
+# is asking for a tool, and one of the values below when the model has stopped
+# talking. So an agent loop can read the stop reason here and be right, which is
+# not true of every shape in this directory.
+#
+# `length` and `content_filter` are terminal for the same reason `stop` is:
+# whatever the model was about to say, it is not going to say it, and handing a
+# truncated or filtered turn back asks the same question again with less of the
+# answer.
 ---
 name: openai-chat
 kind: chat
@@ -20,6 +30,10 @@ decode:
     - $.choices[0].delta.tool_calls
   finish_reason:
     - $.choices[0].finish_reason
+  terminal_reasons:
+    - stop
+    - length
+    - content_filter
   usage:
     - $.usage
   error:

@@ -128,24 +128,28 @@ decode:
 # Agent mode runs this model in a loop. Stop as soon as the model asks for no
 # more tools, or says it is done.
 #
-# `finish_reason_in` is affordable here because the OpenAI-compatible endpoint
-# reports `tool_calls` on exactly the turns that are still asking for one.
-# Ollama's own `/api/chat` says `done_reason: "stop"` on those same turns —
-# measured, not assumed — so following the note above and keeping this list would
-# end the loop at turn 1 and look like a model refusing to use its tools. Same
-# model, same weights, two different answers to "are you finished?": that
-# divergence is the sort of thing this tool exists to make visible.
+# Which stop reasons mean "done" is not written here: it is `terminal_reasons` on
+# the decode above, because it is a fact about the endpoint's vocabulary rather
+# than about this run. `openai-chat` contributes `stop`, and it is trustworthy on
+# that route — the OpenAI-compatible endpoint reports `tool_calls` on exactly the
+# turns still asking for one. `ollama-native-chat` contributes only `length`,
+# because Ollama's own `/api/chat` says `done_reason: "stop"` on those same turns
+# — measured, not assumed. Same model, same weights, two different answers to
+# "are you finished?": that divergence is the sort of thing this tool exists to
+# make visible.
 #
-# Setting `no_tool_calls: false` and relying on `finish_reason_in` alone against
-# an endpoint that never reports one is the case `mire` refuses to let pass
-# quietly: it stops and says the predicate could never be evaluated, rather than
-# looking like a slow agent.
+# Which is the one place following the note above takes more than a `url:` swap.
+# The two decodes union their vocabularies, so `stop` would still be terminal on
+# a route that means nothing of the sort by it; a model pointed at `/api/chat`
+# drops `openai-chat` from `from:` and reads Ollama's shape alone.
+#
+# Setting `no_tool_calls: false` and relying on `terminal_reasons` alone against
+# an endpoint that never reports a stop reason is the case `mire` refuses to let
+# pass quietly: it stops and says the predicate could never be evaluated, rather
+# than looking like a slow agent.
 agent:
   stop_when:
     no_tool_calls: true
-    finish_reason_in:
-      - stop
-      - end_turn
   default_max_turns: 6
   max_duration_ms: 600000
 

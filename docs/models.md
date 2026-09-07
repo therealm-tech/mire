@@ -98,6 +98,41 @@ That first list is one model covering both shapes of an endpoint that serves
 them on two routes, and the trace names which one answered — see
 [`config/models/qwen3-staged.yaml`](../config/models/qwen3-staged.yaml).
 
+### Which stop reasons mean *done*
+
+`finish_reason` says where to read the stop reason. `terminal_reasons` says which
+of its values mean the model has finished talking, which is what the [agent
+loop](agent-loop.md) stops on:
+
+```yaml
+decode:
+  finish_reason:
+    - $.choices[0].finish_reason
+  terminal_reasons:
+    - stop
+    - length
+    - content_filter
+```
+
+It sits here rather than under `agent:` because it is a fact about the endpoint's
+vocabulary, not about the run: OpenAI says `tool_calls` when the turn is asking
+for a tool and `stop` when it is not, Anthropic says `tool_use` and `end_turn`,
+Gemini says `STOP` for both. Naming a built-in decode brings the right list with
+it, so a model that says `from: [openai-chat]` gets a loop that stops correctly
+without writing a word about stop reasons.
+
+An empty list means the loop does not read the stop reason at all, and that is the
+only honest setting for a shape that cannot tell the two states apart — which is
+why `gemini-chat` leaves `STOP` out and `ollama-native-chat` leaves `stop` out.
+There, `stop_when.no_tool_calls` is what ends the run.
+
+It is the one field that does not behave like a cascade. Two decodes' lists are
+pooled rather than raced, because every value in them answers the same question
+and there is no first-one-wins to arbitrate. Which is worth knowing before
+pointing a model with `from: [openai-chat, ollama-native-chat]` at Ollama's own
+route: `stop` arrives from the first list and means nothing terminal on the
+second. A model that needs the loop right on both splits the decode per stage.
+
 One `decode:` field is not about the answer at all. `decode.error` points at
 whatever the **endpoint** says when there is no answer, and what comes back is
 normalised the same way everything else is:

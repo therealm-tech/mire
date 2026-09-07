@@ -14,6 +14,12 @@
 # the stream then closes on an empty `message_stop`. Both are listed, and the
 # first cannot match a frame the second describes, so the cascade is right either
 # way.
+#
+# Its vocabulary separates the two states an agent loop cares about: `tool_use`
+# is a turn still asking for something, and everything listed below is a turn
+# that has finished. `pause_turn` is deliberately absent — it is the one value
+# that means *keep going*, a long-running turn the API cut in half and expects
+# handed straight back.
 ---
 name: anthropic-chat
 kind: chat
@@ -27,6 +33,11 @@ decode:
   finish_reason:
     - $.stop_reason
     - $.delta.stop_reason
+  terminal_reasons:
+    - end_turn
+    - max_tokens
+    - stop_sequence
+    - refusal
   usage:
     - $.usage
   error:

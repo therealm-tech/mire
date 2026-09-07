@@ -8,6 +8,13 @@
 #
 # Streamed, this endpoint sends one whole object per line and keeps the text in
 # `message`, so `delta` and `content` are the same path.
+#
+# `done_reason` has no value meaning "still asking for a tool": the same model
+# that answers `finish_reason: tool_calls` on `/v1` answers `done_reason: stop`
+# here, on the very turn it is calling one. So `stop` is not terminal — reading it
+# as such ends an agent loop at turn one — and whether the turn is finished is
+# `no_tool_calls`'s question. `length` is what is left, and it is unambiguous: the
+# answer was cut off, and there is nothing to gain from another round.
 ---
 name: ollama-native-chat
 kind: chat
@@ -20,6 +27,8 @@ decode:
     - $.message.tool_calls
   finish_reason:
     - $.done_reason
+  terminal_reasons:
+    - length
   usage:
     - $
   error:

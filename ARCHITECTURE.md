@@ -114,9 +114,11 @@ binary, plus whatever `decodes/` layers over them — and flattens a reference i
 an ordinary cascade while the model loads, so nothing below that point knows a
 reference was ever involved.
 
-**[`agent`](src/agent.rs)** is the turn loop. It owns the stop conditions and the
-named outcomes, and answers the model's tool calls either from a model's own
-simulated `tools:` or from a real server through `mcp`.
+**[`agent`](src/agent.rs)** is the turn loop. It owns the named outcomes and the
+stop conditions that are about the run — turns, wall clock, an empty tool list, a
+call repeated verbatim — and reads the terminal stop reasons off the model's
+decode. It answers the model's tool calls either from a model's own simulated
+`tools:` or from a real server through `mcp`.
 
 **[`mcp`](src/mcp.rs)** is the client half of the Model Context Protocol:
 [`negotiate`](src/mcp/negotiate.rs) settles the revision,
@@ -311,6 +313,18 @@ that swallows an upstream failure and answers `200` with the complaint in the
 body is precisely the mismatch worth catching, so `decode.error` is read
 regardless of status. The rule runs the other way too: a cascade finding nothing
 under a `2xx` is not a miss, because there was nothing to find.
+
+**Which stop reasons mean *done* is a property of the shape, not of the run.**
+OpenAI says `tool_calls` for a turn still working and `stop` for one that is
+finished; Anthropic says `tool_use` and `end_turn`; Gemini says `STOP` for both.
+So `decode.terminal_reasons` sits beside the path that reads the value rather
+than under `agent:`, and naming a built-in decode is enough to get the loop right
+— including the shapes that cannot tell the two states apart, which declare
+nothing terminal and leave the question to `stop_when.no_tool_calls`. It is the
+one decode field that is a vocabulary rather than a cascade, so two named decodes
+pool their lists instead of racing them; the cost is that a model covering two
+routes at once inherits both vocabularies and has to split per stage when they
+disagree.
 
 **A decode describes the model's answer and nothing else.** The endpoint is the
 one piece of software in an exchange that `mire` is pointed at on purpose;

@@ -85,7 +85,8 @@ impl NamedDecode {
     }
 }
 
-/// A shared decode is a set of cascades and nothing else.
+/// A shared decode is cascades and the vocabulary that goes with them, nothing
+/// else.
 ///
 /// `script:` would take over the whole decode of every model naming it, and
 /// `from:` would make one reference two files deep. Both turn "which decode is
@@ -183,8 +184,10 @@ impl DecodeRegistry {
     ///
     /// Per field, the paths the model wrote itself come first and the named
     /// decodes follow in the order they were listed — most specific wins, which
-    /// is the same rule as everywhere else. `from:` is kept on the result rather
-    /// than consumed, so what ran can still be traced back to what asked for it.
+    /// is the same rule as everywhere else. `terminal_reasons` is the one field
+    /// that unions instead: it is a vocabulary, not a cascade. `from:` is kept
+    /// on the result rather than consumed, so what ran can still be traced back
+    /// to what asked for it.
     ///
     /// # Errors
     ///
@@ -221,6 +224,7 @@ impl DecodeRegistry {
             append(&mut resolved.usage, &from.usage);
             append(&mut resolved.error, &from.error);
             append(&mut resolved.vectors, &from.vectors);
+            append_values(&mut resolved.terminal_reasons, &from.terminal_reasons);
         }
 
         Ok(resolved)
@@ -320,6 +324,18 @@ fn append(cascade: &mut Vec<JsonPathExpr>, extra: &[JsonPathExpr]) {
     for path in extra {
         if !cascade.iter().any(|held| held.source() == path.source()) {
             cascade.push(path.clone());
+        }
+    }
+}
+
+/// The terminal `finish_reason` values, merged the same way — a union rather
+/// than a cascade, because every one of them is an answer to "is the model
+/// done?" and there is no first-one-wins to arbitrate. A model naming two
+/// decodes gets both vocabularies, which is the point of naming two.
+fn append_values(values: &mut Vec<String>, extra: &[String]) {
+    for value in extra {
+        if !values.iter().any(|held| held == value) {
+            values.push(value.clone());
         }
     }
 }
@@ -483,6 +499,41 @@ mod tests {
             .map(crate::model::JsonPathExpr::source)
             .collect();
         assert_eq!(sources, ["$.error"]);
+    }
+
+    /// The one field that is a vocabulary rather than a cascade, so a model
+    /// naming two shapes reads both — and neither contributes a value meaning
+    /// "the model is asking for a tool", which is what makes the loop right.
+    #[test]
+    fn the_terminal_stop_reasons_of_two_decodes_are_pooled() {
+        let registry = DecodeRegistry::builtin();
+        let resolved = registry
+            .resolve(
+                &spec("from: [openai-chat, ollama-native-chat]"),
+                ModelKind::Chat,
+            )
+            .unwrap();
+
+        assert_eq!(
+            resolved.terminal_reasons,
+            ["stop", "length", "content_filter"]
+        );
+        assert!(!resolved.terminal_reasons.iter().any(|r| r == "tool_calls"));
+    }
+
+    /// Gemini answers `STOP` on the turn that asks for a function and on the turn
+    /// that finishes, and Ollama's own API answers `stop` on both too. A decode
+    /// claiming either is terminal would end every agent run at turn one.
+    #[test]
+    fn a_shape_that_cannot_tell_the_two_apart_claims_no_terminal_stop_reason() {
+        let registry = DecodeRegistry::builtin();
+
+        let gemini = &registry.get("gemini-chat").unwrap().decode;
+        assert!(!gemini.terminal_reasons.iter().any(|r| r == "STOP"));
+        assert!(gemini.terminal_reasons.iter().any(|r| r == "MAX_TOKENS"));
+
+        let ollama = &registry.get("ollama-native-chat").unwrap().decode;
+        assert_eq!(ollama.terminal_reasons, ["length"]);
     }
 
     #[test]
