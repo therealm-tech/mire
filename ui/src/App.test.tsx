@@ -10,6 +10,7 @@ import {
   statusTone,
   type VerdictItem,
 } from './conversation'
+import { configStream } from './test-setup'
 
 const MODELS = {
   models: [
@@ -4111,6 +4112,124 @@ describe('a model that declares stages', () => {
     expect(JSON.parse(window.localStorage.getItem('mire.stages') ?? '{}')).toEqual({
       qwen3: 'prod',
     })
+  })
+})
+
+describe('a configuration reload', () => {
+  /**
+   * The listings the page is holding, which a reload replaces. Mutated in place
+   * because `mockApi` reads the map per request, which is exactly what a file
+   * being edited under a running tab looks like.
+   */
+  function editableApi(): Record<string, unknown> {
+    const routes: Record<string, unknown> = {
+      'api/models': MODELS,
+      'api/auth': AUTH,
+      'api/mcp': MCP,
+      'api/prompts': PROMPTS,
+    }
+    vi.stubGlobal('fetch', mockApi(routes))
+    return routes
+  }
+
+  it('picks up a model added to the directory, and says why the list moved', async () => {
+    const routes = editableApi()
+    render(<App />)
+    await screen.findByRole('button', { name: /guarded/ })
+    expect(screen.queryByRole('button', { name: /latecomer/ })).not.toBeInTheDocument()
+
+    routes['api/models'] = {
+      ...MODELS,
+      models: [
+        ...MODELS.models,
+        {
+          id: 'latecomer',
+          name: 'latecomer',
+          isDefault: true,
+          kind: 'chat',
+          url: 'https://models.internal/v1/latecomer',
+          auth: null,
+          source: '/tmp/latecomer.yaml',
+          hasPrompt: true,
+          hasDecode: true,
+          requiresUpload: false,
+        },
+      ],
+    }
+    configStream().announce(1)
+
+    expect(await screen.findByRole('button', { name: /latecomer/ })).toBeInTheDocument()
+    // A page that rearranged itself in silence would read as a bug in the page.
+    expect(screen.getByText('Configuration reloaded')).toBeInTheDocument()
+  })
+
+  /**
+   * The selection is a name in this tab's storage, and the file behind it can go
+   * away while the tab is open. Coming back to a model that no longer exists
+   * would be an empty page with nothing on it saying why.
+   */
+  it('falls back to another model when the selected one is deleted', async () => {
+    const routes = editableApi()
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: /guarded/ }))
+    expect(bar()).toHaveTextContent('http://127.0.0.1:11435/v1/messages')
+
+    routes['api/models'] = {
+      ...MODELS,
+      models: MODELS.models.filter((model) => model.id !== 'guarded'),
+    }
+    configStream().announce(2)
+
+    await waitFor(() =>
+      expect(bar()).toHaveTextContent('https://models.internal/v1/chat/completions'),
+    )
+  })
+
+  /** The one it is still pointing at stays put, whatever else moved. */
+  it('keeps the selected model when its file is untouched', async () => {
+    const routes = editableApi()
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: /guarded/ }))
+
+    routes['api/prompts'] = { prompts: [{ name: 'later', text: 'ping' }], issues: [] }
+    configStream().announce(3)
+
+    await waitFor(() => expect(screen.getByText('later')).toBeInTheDocument())
+    expect(bar()).toHaveTextContent('http://127.0.0.1:11435/v1/messages')
+  })
+
+  /**
+   * A stream that dropped is a gap: reloads that happened while it was down were
+   * announced to nobody, and the tab cannot know how many. Reconnecting is
+   * therefore a reason to re-read, not just to start listening again.
+   */
+  it('re-reads after the stream reconnects', async () => {
+    const routes = editableApi()
+    render(<App />)
+    await screen.findByRole('button', { name: /guarded/ })
+
+    const stream = configStream()
+    stream.connect()
+
+    routes['api/prompts'] = { prompts: [{ name: 'while away', text: 'ping' }], issues: [] }
+    stream.connect()
+
+    expect(await screen.findByText('while away')).toBeInTheDocument()
+  })
+
+  it('stops watching when the page goes away', async () => {
+    editableApi()
+    const page = render(<App />)
+    await screen.findByRole('button', { name: /guarded/ })
+    const stream = configStream()
+
+    page.unmount()
+
+    expect(stream.closed).toBe(true)
   })
 })
 

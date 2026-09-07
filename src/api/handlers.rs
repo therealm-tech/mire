@@ -1,6 +1,7 @@
 //! Request handlers. No logic beyond shaping: the work lives in [`crate::exec`].
 
 use std::convert::Infallible;
+use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Multipart, Path, Query, State};
@@ -8,6 +9,7 @@ use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, Response};
 use futures_core::Stream;
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 use url::Url;
@@ -15,8 +17,8 @@ use validator::Validate;
 
 use super::AppState;
 use super::dto::{
-    AgentEvent, AgentRequest, AuthPath, AuthResponse, CallRequest, CallbackQuery, LoginRequest,
-    LoginResponse, LogoutResponse, McpPath, McpResponse, McpToolsResponse, ModelPath,
+    AgentEvent, AgentRequest, AuthPath, AuthResponse, CallRequest, CallbackQuery, ConfigEvent,
+    LoginRequest, LoginResponse, LogoutResponse, McpPath, McpResponse, McpToolsResponse, ModelPath,
     ModelsResponse, PromptsResponse, StreamEvent, UploadResponse,
 };
 use super::sse::EventStream;
@@ -44,6 +46,55 @@ pub async fn list_models(State(state): State<AppState>) -> Json<ModelsResponse> 
 /// Every saved prompt, and every entry that failed to load.
 pub async fn list_prompts(State(state): State<AppState>) -> Json<PromptsResponse> {
     Json((&state.runner.config().snapshot().prompts).into())
+}
+
+/// Announces every configuration reload, as server-sent events.
+///
+/// The one thing `mire` pushes. Everything else a client knows, it asked for —
+/// and it still has to: this carries no configuration, only the news that the
+/// directories were re-read and that the listings may now answer differently.
+/// Working out *what* changed would mean diffing two snapshots here to save a
+/// client four requests it makes over loopback in a millisecond.
+///
+/// Never fails and never ends of its own accord. A client that loses it
+/// reconnects, which is what `EventSource` does unprompted — and reconnecting is
+/// also how a tab catches up with a `mire` that was restarted under it.
+pub async fn events(
+    State(state): State<AppState>,
+) -> EventStream<impl Stream<Item = Result<Event, Infallible>>> {
+    let config = Arc::clone(state.runner.config());
+    let mut changes = config.changes();
+
+    let stream = async_stream::stream! {
+        loop {
+            let generation = match changes.recv().await {
+                Ok(generation) => generation,
+                // A tab left open through a hundred reloads wants the current
+                // number, not the ninety-nine it slept through — they all say
+                // the same thing, and only the last one is still true.
+                Err(RecvError::Lagged(missed)) => {
+                    warn!(missed, "a configuration listener fell behind");
+                    config.generation()
+                }
+                // The store is gone, which means the process is on its way out.
+                Err(RecvError::Closed) => break,
+            };
+
+            let event = ConfigEvent::Config { generation };
+            yield Ok(Event::default().event(event.name()).json_data(&event).unwrap_or_else(
+                |error| {
+                    Event::default()
+                        .event("config")
+                        .data(format!(r#"{{"event":"config","error":"{error}"}}"#))
+                },
+            ));
+        }
+    };
+
+    EventStream::new(
+        Sse::new(stream).keep_alive(KeepAlive::default()),
+        "a `config` event per configuration reload, carrying the new generation",
+    )
 }
 
 /// One model, as declared.

@@ -64,3 +64,83 @@ Object.defineProperty(window, 'matchMedia', {
 beforeEach(() => {
   window.localStorage.clear()
 })
+
+/**
+ * The configuration stream, which jsdom does not implement.
+ *
+ * `EventSource` is missing from jsdom entirely, and the app opens one on mount —
+ * so without this every test renders against a `ReferenceError`. It is a stub
+ * with a handle rather than a silent no-op, because "the page follows a reload"
+ * is behaviour worth a test, and the only way to have one is to be able to
+ * announce a reload.
+ */
+class FakeEventSource {
+  readonly url: string
+  closed = false
+  private readonly listeners = new Map<string, Set<(event: Event) => void>>()
+
+  constructor(url: string) {
+    this.url = url
+    streams.push(this)
+  }
+
+  addEventListener(type: string, listener: (event: Event) => void): void {
+    const existing = this.listeners.get(type) ?? new Set()
+    existing.add(listener)
+    this.listeners.set(type, existing)
+  }
+
+  removeEventListener(type: string, listener: (event: Event) => void): void {
+    this.listeners.get(type)?.delete(listener)
+  }
+
+  close(): void {
+    this.closed = true
+  }
+
+  /** A reload landing, the way `mire` announces one. */
+  announce(generation: number): void {
+    this.emit(new MessageEvent('config', { data: JSON.stringify({ event: 'config', generation }) }))
+  }
+
+  /**
+   * The stream coming up.
+   *
+   * Called by hand rather than fired from the constructor, because the listeners
+   * are attached after it returns — and because a *re*connection is this a
+   * second time, which is the case worth testing: the tab was away, and cannot
+   * know what it missed.
+   */
+  connect(): void {
+    this.emit(new Event('open'))
+  }
+
+  private emit(event: Event): void {
+    for (const listener of this.listeners.get(event.type) ?? []) {
+      listener(event)
+    }
+  }
+}
+
+const streams: FakeEventSource[] = []
+
+/** The stream the page currently has open. */
+export function configStream(): FakeEventSource {
+  const open = streams.filter((stream) => !stream.closed)
+  const latest = open[open.length - 1]
+  if (!latest) {
+    throw new Error('the page has no configuration stream open')
+  }
+  return latest
+}
+
+Object.defineProperty(window, 'EventSource', {
+  configurable: true,
+  writable: true,
+  value: FakeEventSource,
+})
+
+// A stream one test opened is not a stream the next one inherits.
+beforeEach(() => {
+  streams.length = 0
+})

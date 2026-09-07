@@ -128,6 +128,37 @@ impl From<&PromptRegistry> for PromptsResponse {
     }
 }
 
+/// What `GET /api/events` streams, one per server-sent event.
+///
+/// One event, because there is one thing to say: the directories were re-read,
+/// and every listing above may now answer differently. What actually changed is
+/// deliberately absent — working it out here would mean diffing two snapshots to
+/// save a client four requests it can make in a millisecond over loopback.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(tag = "event", rename_all = "camelCase")]
+pub enum ConfigEvent {
+    /// A reload landed.
+    Config {
+        /// Which reading of the directories is now current.
+        ///
+        /// Counts from zero at startup and only ever goes up — *within one
+        /// process*. A client that reconnects to a number below the one it held
+        /// is talking to a `mire` that has been restarted under it, which is
+        /// another reason to re-read everything rather than a contradiction.
+        generation: u64,
+    },
+}
+
+impl ConfigEvent {
+    /// The server-sent event name.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Config { .. } => "config",
+        }
+    }
+}
+
 /// Every auth provider the UI can offer.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

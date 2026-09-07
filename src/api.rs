@@ -61,6 +61,7 @@ pub fn normalise_base_path(raw: &str) -> String {
 /// The documented product surface, kept apart so `router` stays readable.
 fn documented(api: &mut OpenApi) -> Router<AppState> {
     ApiRouter::new()
+        .merge(config_routes())
         .merge(model_routes())
         .merge(prompt_routes())
         .merge(auth_routes())
@@ -106,6 +107,32 @@ fn upload_routes() -> ApiRouter<AppState> {
         // come back as a `413` naming the limit, which is our error, rather than
         // as the router quietly cutting the body off.
         .layer(DefaultBodyLimit::max(uploads::MAX_BYTES + 1024 * 1024))
+}
+
+/// Hearing about the configuration directory, rather than asking.
+fn config_routes() -> ApiRouter<AppState> {
+    ApiRouter::new().api_route(
+        "/api/events",
+        get_with(handlers::events, |op| {
+            op.summary("Watch the configuration for changes")
+                .description(
+                    "A server-sent event stream that emits one `config` event every time \
+                     the file watcher reloads the configuration directories, carrying the \
+                     new `generation` — a counter that starts at zero and only goes up.\n\n\
+                     It carries no configuration. A client that receives one re-reads \
+                     `GET /api/models`, `/api/prompts`, `/api/auth` and `/api/mcp`, which \
+                     stay the only places the contents come from. The counter is per \
+                     process: reconnecting to a number *below* the one you held means \
+                     `mire` was restarted under you, which is one more reason to re-read \
+                     rather than a contradiction.\n\n\
+                     The stream never ends on its own and never emits a failure — a reload \
+                     that fails keeps the previous configuration, so there is nothing to \
+                     announce. Reconnect if it drops.",
+                )
+                .tag("config")
+                .response::<200, String>()
+        }),
+    )
 }
 
 /// Reading the configuration directory.

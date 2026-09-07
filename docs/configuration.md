@@ -286,7 +286,8 @@ claiming one name is still what it always was — a mistake, reported as a load
 issue, with the first file keeping the name.
 
 Every listed directory is watched, so editing your layer reloads exactly as
-editing a single directory always did. All of them must exist: a directory you
+editing a single directory always did — and an open browser tab follows the
+reload, whichever layer the file was in. All of them must exist: a directory you
 named and `mire` cannot read is a typo worth stopping for, and the startup error
 says which one.
 

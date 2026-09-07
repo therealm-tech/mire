@@ -154,6 +154,15 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   of floats. A multi-vector answer stays grouped under the input it belongs to,
   with only the first few of each item's vectors drawn.
 
+**The page follows the files.** Save a model, a provider, a server or a prompt in
+your editor and the lists move under you a moment later, load errors included —
+the tab is subscribed to the same reload the rest of the process acts on, so it
+never shows the directory as it was when you opened it. A short *Configuration
+reloaded* note in the corner says why something moved. The one thing that
+survives the reload is what you had selected, as long as its file still declares
+it: a model deleted under an open tab drops back to the first one rather than
+leaving the page pointing at nothing.
+
 A credential typed into the UI lives in that tab and nowhere else: it is sent
 with the call and never stored, never logged, never echoed back. A credential
 `mire` fetched for you never reaches the tab at all — the browser sees a
