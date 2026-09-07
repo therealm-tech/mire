@@ -313,11 +313,12 @@ fn call_routes() -> ApiRouter<AppState> {
                          told `stream` is true — write `\"stream\": {{ stream }}` in it, since \
                          nothing here makes an endpoint chunk its answer on its own — and \
                          `decode.delta` says where the text sits inside a chunk.\n\n\
-                         Emits an `open` event as soon as the response head arrives (a `401` \
-                         shows up there, before any body), one `delta` per chunk carrying \
-                         text, then a `done` event holding the same outcome the \
-                         non-streaming endpoint returns. `failed` means the call could not \
-                         be made.\n\n\
+                         Emits a `sent` event the moment the request goes out, carrying \
+                         the rendered request and its `curl`; an `open` event as soon as \
+                         the response head arrives (a `401` shows up there, before any \
+                         body); one `delta` per chunk carrying text; then a `done` event \
+                         holding the same outcome the non-streaming endpoint returns. \
+                         `failed` means the call could not be made.\n\n\
                          `response.http.ttftMs` is time to first *token* — the first chunk \
                          that carried text, not the first byte. `response.stream` says how \
                          many chunks arrived and whether the endpoint ended the stream or \
@@ -335,11 +336,15 @@ fn call_routes() -> ApiRouter<AppState> {
                         "Renders, calls, decodes; if the model's stop condition is not \
                          met, answers the tool calls with their simulated results and goes \
                          round again.\n\n\
-                         Streams server-sent events: one `turn` event per turn as it \
-                         happens, then a single `done` event carrying the whole trace and \
-                         how the loop ended. A `failed` event means the run could not \
-                         continue — a loop that ended badly is a `stop` outcome inside \
-                         `done`, not a failure.\n\n\
+                         Streams server-sent events as the run happens: `setup` for the \
+                         MCP traffic the tool listing cost, then per turn a `sent` when the \
+                         request goes out, a `delta` per chunk when the run streams, and a \
+                         `protocol`, `hook` and `tool` event each time one of those lands. \
+                         A `turn` event closes each turn and repeats all of it, so a client \
+                         that reads turns alone loses nothing; a single `done` event \
+                         carries the whole trace and how the loop ended. A `failed` event \
+                         means the run could not continue — a loop that ended badly is a \
+                         `stop` outcome inside `done`, not a failure.\n\n\
                          Nothing is ever executed: the tools are simulated, and what is \
                          being checked is that the model emits calls matching their schema \
                          and knows what to do with a result.",

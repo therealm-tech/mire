@@ -16,13 +16,21 @@
 | `POST /api/auth/{id}/logout` | Forget the session `mire` holds |
 | `POST /api/call` | Render, authenticate, send, decode |
 | `POST /api/call/stream` | The same, read chunk by chunk, with time to first token |
-| `POST /api/agent` | The same, in a loop, served as server-sent events — one turn at a time, and with `"stream": true` one chunk at a time as well |
+| `POST /api/agent` | The same, in a loop, served as server-sent events — every wire announced as it happens, and with `"stream": true` one chunk at a time as well |
 | `POST /api/uploads` | Store one attached file; returns the id a call names it by |
 | `GET /auth/callback` | Where the identity provider sends the browser back |
 | `GET /healthz` | Liveness |
 
 `/auth/callback` and `/healthz` are the two routes outside the OpenAPI document:
 one is a page for a human, the other is ops plumbing. Neither is API surface.
+
+Both streaming routes say what went out before saying what came back. `POST
+/api/call/stream` opens with a `sent` event carrying the rendered request and its
+`curl`, then `open`, then the deltas. `POST /api/agent` emits `setup` for the MCP
+traffic the tool listing cost, then per turn a `sent`, a `delta` per chunk when
+the run streams, and a `protocol`, `hook` or `tool` event each time one of those
+lands — and closes the turn with a `turn` event repeating all of it. A client
+that reads `turn` and `done` alone therefore loses nothing but the wait.
 
 A `4xx` or `5xx` **from the endpoint under test** is a successful call: read
 `response.http.status`. The API only returns an error when `mire` itself could

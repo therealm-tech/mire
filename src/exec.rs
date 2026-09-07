@@ -94,6 +94,38 @@ pub struct RequestView {
     pub parts: Vec<PartView>,
 }
 
+/// What went out, the moment it went out.
+///
+/// The half of a [`CallOutcome`] that is knowable before the endpoint has said
+/// anything, handed to a caller that is watching rather than waiting: the
+/// request, the `curl` that reproduces it, and who it went as. The outcome
+/// repeats all of it when the answer lands, so a caller that ignores this loses
+/// nothing but the wait.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Sent {
+    /// Model that is running.
+    pub model: String,
+    /// Auth provider that is running.
+    pub auth: String,
+    /// The rendered request, as it went on the wire.
+    pub request: RequestView,
+    /// The `curl` equivalent.
+    pub curl: String,
+}
+
+impl Sent {
+    /// Assembles the announcement out of pieces the call has already built.
+    fn new(model: &Model, auth: &str, request: &RequestView, curl: &str) -> Self {
+        Self {
+            model: model.id(),
+            auth: auth.to_owned(),
+            request: request.clone(),
+            curl: curl.to_owned(),
+        }
+    }
+}
+
 /// One part of a form, as the trace describes it.
 ///
 /// A file's bytes are named, never repeated: they went out on the wire, and a
@@ -211,12 +243,20 @@ impl Runner {
 
     /// Runs one call.
     ///
+    /// `on_event` hears [`CallEvent::Sent`] and nothing else — a whole body is
+    /// read in one go, so there is nothing else to say before the outcome. It is
+    /// there so a caller can show what it is waiting on.
+    ///
     /// # Errors
     ///
     /// Fails when the model or auth provider is unknown, the credential cannot
     /// be produced, the template does not render, or the exchange itself fails. A
     /// `4xx`/`5xx` from the endpoint is **not** an error: it is the answer.
-    pub async fn call(&self, input: CallInput) -> Result<CallOutcome, ExecError> {
+    pub async fn call(
+        &self,
+        input: CallInput,
+        mut on_event: impl FnMut(CallEvent),
+    ) -> Result<CallOutcome, ExecError> {
         // One snapshot for the whole call: the model and the auth registry it
         // refers to must come from the same view of the directory.
         let config = self.config.snapshot();
@@ -262,6 +302,12 @@ impl Runner {
         };
         let view = request_view(&request, &redactor);
         let curl = request.to_curl(&redactor);
+
+        // Before the send, not after: the whole point is that it is the wait
+        // that is being described.
+        on_event(CallEvent::Sent(Box::new(Sent::new(
+            model, &auth_name, &view, &curl,
+        ))));
 
         let mut raw = transport::send(&self.client, &request, model.timeout()).await?;
         let mut retried = false;
@@ -320,10 +366,11 @@ impl Runner {
 
     /// Runs one call, streaming.
     ///
-    /// `on_event` is called as things happen: once when the response head is in,
-    /// then once per text delta. The returned outcome is the same shape a
-    /// non-streamed call produces, so everything downstream — the decode trace,
-    /// the curl equivalent, the UI — works unchanged.
+    /// `on_event` is called as things happen: once when the request goes out,
+    /// once when the response head is in, then once per text delta. The returned
+    /// outcome is the same shape a non-streamed call produces, so everything
+    /// downstream — the decode trace, the curl equivalent, the UI — works
+    /// unchanged.
     ///
     /// # Errors
     ///
@@ -375,6 +422,10 @@ impl Runner {
         };
         let view = request_view(&request, &redactor);
         let curl = request.to_curl(&redactor);
+
+        on_event(CallEvent::Sent(Box::new(Sent::new(
+            model, &auth_name, &view, &curl,
+        ))));
 
         let mut open = transport::open(&self.client, &request, model.timeout()).await?;
         let mut retried = false;
@@ -505,13 +556,20 @@ impl Runner {
     }
 }
 
-/// What happens while a streamed call is in flight.
+/// What happens while a call is in flight.
 ///
-/// Only the two things a caller cannot wait for. Everything else — the decode
-/// trace, the counters, the curl — is in the [`CallOutcome`] at the end, because
-/// none of it is knowable before the stream closes.
+/// Only the things a caller cannot wait for. Everything else — the decode trace,
+/// the counters — is in the [`CallOutcome`] at the end, because none of it is
+/// knowable before the answer is in.
 #[derive(Debug, Clone)]
 pub enum CallEvent {
+    /// The request left. Everything about it is settled by now: it was rendered,
+    /// the credential was applied, and this is the body that went out.
+    ///
+    /// The only event a non-streamed call has, and the reason it has a callback
+    /// at all: a reader watching a slow endpoint should see what is being waited
+    /// on rather than an empty panel.
+    Sent(Box<Sent>),
     /// The response head arrived. A `401` is known here, long before any body.
     Open {
         /// HTTP status.

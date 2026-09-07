@@ -14,7 +14,7 @@ use validator::Validate;
 use crate::agent::{AgentInput, Trace, Turn};
 use crate::auth::registry::AuthDescriptor;
 use crate::config::{Config, layout};
-use crate::exec::{CallEvent, CallInput, CallOutcome};
+use crate::exec::{CallEvent, CallInput, CallOutcome, Sent};
 use crate::issue::LoadIssue;
 use crate::message::Message;
 use crate::model::loader::ModelSet;
@@ -692,14 +692,17 @@ impl From<AgentRequest> for AgentInput {
 
 /// What `POST /api/call/stream` streams, one per server-sent event.
 ///
-/// The two live events carry only what cannot wait: the head, and the text. The
-/// `done` event is the same [`CallOutcome`] the non-streaming endpoint returns,
-/// so a client can ignore the deltas entirely and still get the full answer —
-/// which is what makes this endpoint a superset of `POST /api/call` rather than
-/// a separate thing to support.
+/// The live events carry only what cannot wait: the request, the head, and the
+/// text. The `done` event is the same [`CallOutcome`] the non-streaming endpoint
+/// returns, so a client can ignore the rest entirely and still get the full
+/// answer — which is what makes this endpoint a superset of `POST /api/call`
+/// rather than a separate thing to support.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(tag = "event", rename_all = "camelCase")]
 pub enum StreamEvent {
+    /// The request went out. First, and before the endpoint has said anything:
+    /// what a reader is waiting on is knowable long before the answer is.
+    Sent(Box<Sent>),
     /// The response head arrived, long before the body. A `401` shows up here.
     Open {
         /// HTTP status.
@@ -728,6 +731,7 @@ impl StreamEvent {
     #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
+            Self::Sent(_) => "sent",
             Self::Open { .. } => "open",
             Self::Delta { .. } => "delta",
             Self::Done(_) => "done",
@@ -739,6 +743,7 @@ impl StreamEvent {
 impl From<CallEvent> for StreamEvent {
     fn from(event: CallEvent) -> Self {
         match event {
+            CallEvent::Sent(sent) => Self::Sent(sent),
             CallEvent::Open { status, headers } => Self::Open { status, headers },
             CallEvent::Delta { text } => Self::Delta { text },
         }
@@ -771,7 +776,40 @@ pub enum AgentEvent {
         /// The text of this chunk alone, not the aggregate.
         text: String,
     },
+    /// A turn's request went out. Named while the wait is still happening, which
+    /// is the only moment at which saying so is worth anything.
+    Sent {
+        /// The turn that sent it, counting from one.
+        turn: u32,
+        /// What went out: the request, the `curl`, and who it went as.
+        #[serde(flatten)]
+        sent: Box<crate::exec::Sent>,
+    },
+    /// One JSON-RPC round trip landed, mid-turn.
+    Protocol {
+        /// The turn it happened in.
+        turn: u32,
+        /// The round trip.
+        exchange: Box<crate::mcp::McpExchange>,
+    },
+    /// One hook fired, mid-turn.
+    Hook {
+        /// The turn it happened in.
+        turn: u32,
+        /// What the hook was asked, and what it answered.
+        record: Box<crate::mcp::HookRecord>,
+    },
+    /// One tool was answered, mid-turn.
+    Tool {
+        /// The turn it happened in.
+        turn: u32,
+        /// The call and its result.
+        invocation: Box<crate::agent::ToolInvocation>,
+    },
     /// A turn completed. Sent as it happens, not at the end.
+    ///
+    /// Repeats everything the four live events above already said, so a client
+    /// that listens for turns alone still gets the whole run.
     Turn(Box<Turn>),
     /// The loop ended. Carries the whole trace, so a client that missed events
     /// still gets everything.
@@ -793,6 +831,10 @@ impl AgentEvent {
         match self {
             Self::Setup { .. } => "setup",
             Self::Delta { .. } => "delta",
+            Self::Sent { .. } => "sent",
+            Self::Protocol { .. } => "protocol",
+            Self::Hook { .. } => "hook",
+            Self::Tool { .. } => "tool",
             Self::Turn(_) => "turn",
             Self::Done(_) => "done",
             Self::Failed { .. } => "failed",
