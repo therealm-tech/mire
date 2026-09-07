@@ -21,6 +21,7 @@ use super::dto::{
     ConfigResponse, LoginRequest, LoginResponse, LogoutResponse, McpPath, McpResponse,
     McpToolsResponse, ModelPath, ModelsResponse, PromptsResponse, StreamEvent, UploadResponse,
 };
+use super::negotiate::{Negotiated, wants_yaml};
 use super::sse::EventStream;
 use super::ui;
 use crate::agent::{self, AgentError, AgentInput};
@@ -110,23 +111,37 @@ pub async fn events(
     )
 }
 
-/// One model, as declared.
+/// One model, in the representation the caller asked for.
+///
+/// JSON by default, and with `Accept: application/yaml` the same model as a
+/// `models/` file — see [`Model::to_document`] for what that document is and is
+/// not.
 ///
 /// # Errors
 ///
-/// `404` when no model carries that name.
+/// `404` when no model carries that name, `500` when it cannot be written as
+/// YAML — which would mean a field the format cannot hold.
 pub async fn get_model(
     State(state): State<AppState>,
     Path(path): Path<ModelPath>,
-) -> Result<Json<Model>, ApiError> {
-    state
-        .runner
-        .config()
-        .snapshot()
-        .models
-        .get(&path.id)
-        .map(|model| Json(model.as_ref().clone()))
-        .ok_or_else(|| ApiError::not_found("unknown_model", format!("unknown model `{}`", path.id)))
+    headers: HeaderMap,
+) -> Result<Negotiated<Model>, ApiError> {
+    let snapshot = state.runner.config().snapshot();
+    let model = snapshot.models.get(&path.id).ok_or_else(|| {
+        ApiError::not_found("unknown_model", format!("unknown model `{}`", path.id))
+    })?;
+
+    if !wants_yaml(&headers) {
+        return Ok(Negotiated::Json(Json(model.as_ref().clone())));
+    }
+
+    model.to_document().map(Negotiated::Yaml).map_err(|error| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "unwritable_model",
+            format!("model `{}` cannot be written as YAML: {error}", path.id),
+        )
+    })
 }
 
 /// Works out the callback the identity provider must redirect to.

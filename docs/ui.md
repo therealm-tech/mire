@@ -132,6 +132,27 @@ editor's — and it holds no logic of its own: it shows what the API returns.
   are spoken in is not asked here — it is `protocol_version:` in `mcp/`, per
   server, and a run does not get to differ from the file. More in
   [MCP](mcp.md).
+- **Configuration**, opened from **Config** on the bar, beside **MCP** and for
+  the same reason: the bar says where the next call goes, this says what decided
+  it. Three blocks and nothing else — the request template, the decode cascades,
+  and when the loop stops. No summary of the URL and the identity, because they
+  are the line above.
+
+  **What it shows is resolved rather than copied.** `${ stage.… }` is already
+  substituted, so the template is the one that goes out at the stage that is
+  pressed rather than the one written in the file. `decode.from` is already
+  flattened, so the shapes a model is built on are a list of paths per field, in
+  the order they are tried — the same order a call's decode trace names its
+  winner in. More on where those paths come from in [naming a
+  shape](models.md#name-a-shape-instead-of-spelling-it-out). A model that declares no `agent:`
+  still gets the block, saying what the loop does without one: an absent block is
+  not an absent answer.
+
+  **YAML** hands the same model over as a file, written the way `models/` reads
+  it. Saved there it loads the same endpoint back, which is also how a stage
+  becomes a model of its own. It is the model's own route asked for in YAML, so
+  `curl -H 'accept: application/yaml' …/api/models/qwen3 > models/qwen3.yaml` is
+  that act without the tab.
 - **Input**, for embedding models. One text per line, a run count, and a
   checkbox for the full vectors. There is no second turn of an embedding, so
   there is no conversation and no loop.

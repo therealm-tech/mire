@@ -81,6 +81,54 @@ export const modelsResponseSchema = z.object({
 })
 
 /**
+ * One model as `mire` resolved it: the recipe, the reading, and the loop.
+ *
+ * The only schema here whose keys are `snake_case`, and deliberately so. Every
+ * other response is a DTO the API invented for this UI; this one is the model
+ * file's own vocabulary, and `timeout_ms` shown as `timeoutMs` would be a field
+ * name that exists in no file anybody can edit.
+ *
+ * What comes back is resolved rather than copied — `${ stage.… }` substituted,
+ * `decode.from` flattened into the cascades — which is the point of showing it
+ * at all: what the endpoint *is*, not what the file typed. Anything the model
+ * does not declare is simply absent, so every list defaults to empty here.
+ */
+export const modelConfigSchema = z.object({
+  name: z.string(),
+  stage: z.string().nullish(),
+  request: z.object({
+    template: z.string().optional(),
+    script: z.string().optional(),
+    multipart: z.record(z.string(), z.unknown()).optional(),
+  }),
+  decode: z
+    .object({
+      /** The named shapes the cascades below were built from. */
+      from: z.array(z.string()).default([]),
+      script: z.string().optional(),
+      content: z.array(z.string()).default([]),
+      delta: z.array(z.string()).default([]),
+      tool_calls: z.array(z.string()).default([]),
+      finish_reason: z.array(z.string()).default([]),
+      usage: z.array(z.string()).default([]),
+      error: z.array(z.string()).default([]),
+      vectors: z.array(z.string()).default([]),
+    })
+    .optional(),
+  agent: z
+    .object({
+      stop_when: z.object({
+        no_tool_calls: z.boolean(),
+        finish_reason_in: z.array(z.string()).default([]),
+        repeated_call: z.boolean(),
+      }),
+      default_max_turns: z.number(),
+      max_duration_ms: z.number().nullish(),
+    })
+    .nullish(),
+})
+
+/**
  * One saved prompt, as `prompts/` declares it.
  *
  * A name and its text, and nothing else: what a message becomes on the wire is
@@ -670,6 +718,7 @@ export type ConfigResponse = z.infer<typeof configResponseSchema>
 export type ModelKind = z.infer<typeof modelKindSchema>
 export type ModelSummary = z.infer<typeof modelSummarySchema>
 export type ModelsResponse = z.infer<typeof modelsResponseSchema>
+export type ModelConfig = z.infer<typeof modelConfigSchema>
 export type Prompt = z.infer<typeof promptSchema>
 export type PromptsResponse = z.infer<typeof promptsResponseSchema>
 export type AuthDescriptor = z.infer<typeof authDescriptorSchema>
@@ -790,6 +839,46 @@ async function request<T>(path: string, schema: z.ZodType<T>, init?: RequestInit
 
 export function fetchModels(): Promise<ModelsResponse> {
   return request('api/models', modelsResponseSchema)
+}
+
+export function fetchModelConfig(id: string): Promise<ModelConfig> {
+  return request(`api/models/${encodeURIComponent(id)}`, modelConfigSchema)
+}
+
+/**
+ * The same model as the file it would be, for pasting into `models/`.
+ *
+ * The same URL as `fetchModelConfig`, because it is the same model — the
+ * representation is `Accept`'s to choose, not the path's. Text rather than JSON,
+ * so what is copied is a document and not a JSON string with its newlines
+ * written out. `mire` renders it, not this: the UI holding a YAML writer would
+ * be a second answer to "what does this model look like", and the two would
+ * drift the first time a field is added.
+ */
+export async function fetchModelDocument(id: string): Promise<string> {
+  const url = endpoint(`api/models/${encodeURIComponent(id)}`)
+  const response = await fetch(url, { headers: { accept: 'application/yaml' } })
+  const text = await response.text()
+  logger.debug('api.response', { url, status: response.status, bytes: text.length })
+
+  if (!response.ok) {
+    // A refusal is JSON even on a route that answers YAML — unless it came from
+    // something in front of `mire`, which owes us no shape at all.
+    let payload: unknown
+    try {
+      payload = JSON.parse(text)
+    } catch {
+      payload = null
+    }
+    const parsed = errorBodySchema.safeParse(payload)
+    throw new ApiError(
+      response.status,
+      parsed.success
+        ? parsed.data
+        : { code: 'unexpected_error', message: `${url} answered ${response.status}` },
+    )
+  }
+  return text
 }
 
 export function fetchPrompts(): Promise<PromptsResponse> {

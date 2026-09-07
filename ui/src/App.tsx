@@ -10,14 +10,18 @@ import {
   call,
   callbackUri,
   type Embedding,
+  type ErrorBody,
   fetchAuth,
   fetchConfig,
   fetchMcp,
+  fetchModelConfig,
+  fetchModelDocument,
   fetchModels,
   fetchPrompts,
   logout,
   type McpResponse,
   type Message,
+  type ModelConfig,
   type ModelsResponse,
   type PromptsResponse,
   runAgent,
@@ -33,6 +37,7 @@ import { EmbeddingRequest } from './components/EmbeddingRequest'
 import { Failure } from './components/Failure'
 import { Mark } from './components/Mark'
 import { McpPanel } from './components/McpPanel'
+import { ModelConfig as ModelConfigPanel } from './components/ModelConfig'
 import { ModelList } from './components/ModelList'
 import { Preflight } from './components/Preflight'
 import { Badge, Button, Panel, Spinner } from './components/primitives'
@@ -244,6 +249,16 @@ export function App() {
   // The servers, the same way and for the same reason: read when it is the
   // question, folded away when it is not.
   const [mcpOpen, setMcpOpen] = useState(false)
+  // The model's own configuration, the same way: read when the answer coming
+  // back is surprising, folded away the rest of the time.
+  const [configOpen, setConfigOpen] = useState(false)
+  /** The model that block is about, whole: what was read, and which model it was read for. */
+  const [detail, setDetail] = useState<{
+    id: string
+    config: ModelConfig
+    document: string
+  } | null>(null)
+  const [modelConfigError, setModelConfigError] = useState<ErrorBody | null>(null)
   const [stopped, setStopped] = useState(false)
   // Laptop or phone. The list is a column on one and a disclosure on the other,
   // which is two different sets of controls rather than two stylesheets.
@@ -446,7 +461,62 @@ export function App() {
     return () => window.clearTimeout(timer)
   }, [reloadedAt])
 
+  /**
+   * The selected model in full, while the block that shows it is open.
+   *
+   * Two requests, and only once somebody asks: the listing carries what the
+   * page needs to pick a model, and the template, the cascades and the loop are
+   * a second question that most sends never ask.
+   *
+   * It re-reads on every reload that lands, which is what the `models`
+   * dependency is doing here — the block is open precisely while somebody edits
+   * the file it is showing, and a template that stayed at what it said when the
+   * block was opened would be the one lie this panel cannot afford.
+   */
+  useEffect(() => {
+    if (
+      !configOpen ||
+      selectedModel === null ||
+      !(models?.models.some((entry) => entry.id === selectedModel) ?? false)
+    ) {
+      return
+    }
+
+    let current = true
+    setModelConfigError(null)
+    Promise.all([fetchModelConfig(selectedModel), fetchModelDocument(selectedModel)])
+      .then(([config, document]) => {
+        if (current) {
+          setDetail({ id: selectedModel, config, document })
+        }
+      })
+      .catch((error: unknown) => {
+        if (!current) {
+          return
+        }
+        const body =
+          error instanceof ApiError
+            ? error.body
+            : {
+                code: 'unreadable',
+                message: error instanceof Error ? error.message : String(error),
+              }
+        logger.error('model.config_failed', { model: selectedModel, message: body.message })
+        setModelConfigError(body)
+      })
+
+    return () => {
+      current = false
+    }
+  }, [configOpen, selectedModel, models])
+
   const model = models?.models.find((candidate) => candidate.id === selectedModel)
+
+  // What was fetched, and only while it is still about the model on screen. The
+  // id travels with the answer rather than being reset on the way to the next
+  // model: a reset would blank the block on every reload, and this way the last
+  // reading stays up until the new one lands — but never under another name.
+  const detailShown = detail?.id === model?.id ? detail : null
 
   /**
    * The identity this model calls with. `auth:` when it names one, otherwise
@@ -1071,6 +1141,7 @@ export function App() {
           {ready ? (
             <Preflight
               state={ready}
+              configOpen={configOpen}
               mcpOpen={mcpOpen}
               showMcp={usesMcp}
               token={token}
@@ -1078,7 +1149,23 @@ export function App() {
               onToken={setToken}
               onSignIn={signIn}
               onSignOut={signOut}
+              onOpenConfig={() => setConfigOpen((open) => !open)}
               onOpenMcp={() => setMcpOpen((open) => !open)}
+            />
+          ) : null}
+
+          {/*
+            What the bar above is reading from: the template that builds the
+            request, the cascades the answer is read with, and when the loop
+            stops. Resolved rather than copied out of the file, which is the
+            difference that matters on a staged model.
+          */}
+          {configOpen && model !== undefined ? (
+            <ModelConfigPanel
+              id={model.id}
+              config={detailShown?.config ?? null}
+              document={detailShown?.document ?? null}
+              error={modelConfigError}
             />
           ) : null}
 

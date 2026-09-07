@@ -17,6 +17,7 @@ import { Badge, Button, INPUT_CLASSES } from './primitives'
  */
 export function Preflight({
   state,
+  configOpen,
   mcpOpen,
   showMcp,
   token,
@@ -24,9 +25,11 @@ export function Preflight({
   onToken,
   onSignIn,
   onSignOut,
+  onOpenConfig,
   onOpenMcp,
 }: {
   state: PreflightState
+  configOpen: boolean
   mcpOpen: boolean
   /** False on a run that will not speak to a server — see `usesMcp` in `App`. */
   showMcp: boolean
@@ -36,6 +39,7 @@ export function Preflight({
   onToken: (token: string) => void
   onSignIn: (provider: string, prompt?: string) => void
   onSignOut: (provider: string) => void
+  onOpenConfig: () => void
   onOpenMcp: () => void
 }) {
   return (
@@ -51,13 +55,21 @@ export function Preflight({
         */}
         <span className="min-w-0 truncate font-mono text-muted">{state.url}</span>
 
-        {showMcp ? (
-          <span className="ml-auto">
+        {/*
+          Two blocks that open from the same bar, because they answer the two
+          halves of the same question. The bar says where the next call goes;
+          **Config** says what decided that, and **MCP** which servers it reaches.
+        */}
+        <span className="ml-auto flex items-center gap-1">
+          <Button aria-expanded={configOpen} onClick={onOpenConfig}>
+            {configOpen ? 'Hide config' : 'Config'}
+          </Button>
+          {showMcp ? (
             <Button aria-expanded={mcpOpen} onClick={onOpenMcp}>
               {mcpOpen ? 'Hide MCP' : 'MCP'}
             </Button>
-          </span>
-        ) : null}
+          ) : null}
+        </span>
       </div>
 
       <ul className="mt-2 space-y-1.5">
