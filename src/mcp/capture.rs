@@ -16,15 +16,14 @@
 //! `hooks:` that read what it captures:
 //!
 //! ```yaml
-//! servers:
-//!   - name: dev
-//!     url: https://dev.internal/mcp
-//!     capture:
-//!       - tools:
-//!           - create_session
-//!         vars:
-//!           session:
-//!             - $.sessionId
+//! name: dev
+//! url: https://dev.internal/mcp
+//! capture:
+//!   - tools:
+//!       - create_session
+//!     vars:
+//!       session:
+//!         - $.sessionId
 //! ```
 //!
 //! Every chat model that reaches that server captures the same thing, because
