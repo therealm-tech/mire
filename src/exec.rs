@@ -18,12 +18,12 @@ use crate::auth::{ANONYMOUS, AuthError, AuthProvider, Retry};
 use crate::config::ConfigStore;
 use crate::decode::embedding::{CheckOutcome, EmbeddingChecks, Vectors};
 use crate::decode::error::DecodedError;
-use crate::decode::stream::{Delta, Frame, FrameParser, Framing, Resolved, StreamView};
+use crate::decode::stream::{Delta, Frame, FrameParser, Framing, Resolved, StreamView, ToolCalls};
 use crate::decode::{
     Completion, DecodeTrace, Decoded, EmbeddingResult, HttpMeta, Usage, chat, embedding, error,
     script, stream,
 };
-use crate::message::{Message, ToolCall};
+use crate::message::Message;
 use crate::model::{DecodeSpec, HttpMethod, Model, ModelKind};
 use crate::redact::{Redactor, Secret};
 use crate::render::{
@@ -550,7 +550,7 @@ struct StreamAccumulator<'a> {
     started: std::time::Instant,
     ttft_ms: Option<u64>,
     text: String,
-    tool_calls: Vec<ToolCall>,
+    tool_calls: ToolCalls,
     finish_reason: Option<String>,
     usage: Option<Usage>,
     resolved: Resolved,
@@ -582,7 +582,7 @@ impl<'a> StreamAccumulator<'a> {
             started,
             ttft_ms: None,
             text: String::new(),
-            tool_calls: Vec::new(),
+            tool_calls: ToolCalls::default(),
             finish_reason: None,
             usage: None,
             resolved: Resolved::default(),
@@ -644,9 +644,10 @@ impl<'a> StreamAccumulator<'a> {
                 // stream with a chunk that carries only the stop reason and the
                 // counters. Reading the tail alone decodes that as a model that
                 // called nothing.
-                if let Some(calls) = chat::read_tool_calls(&value, self.spec, &mut self.trace) {
+                // Every chunk feeds the same accumulator rather than producing
+                // calls of its own: one call can be spread over a dozen of them.
+                if self.tool_calls.push(&value, self.spec, &mut self.trace) {
                     self.resolved.tool_calls = true;
-                    self.tool_calls.extend(calls);
                 }
 
                 // The stop reason and the counters, from every chunk for the
@@ -687,7 +688,7 @@ impl<'a> StreamAccumulator<'a> {
         // against one privileged chunk, so nothing in the trace claims it did.
         let completion = Completion {
             content: (!self.text.is_empty()).then(|| std::mem::take(&mut self.text)),
-            tool_calls: std::mem::take(&mut self.tool_calls),
+            tool_calls: std::mem::take(&mut self.tool_calls).finish(&mut self.trace),
             finish_reason: self.finish_reason.take(),
             usage: self.usage.take(),
         };
