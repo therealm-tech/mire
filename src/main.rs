@@ -6,11 +6,13 @@ mod settings;
 use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
 use mire::api::{AppState, normalise_base_path, router};
 use mire::config::{self, ConfigStore};
 use mire::exec::Runner;
+use mire::shutdown::Shutdown;
 use mire::transport::{self, TransportOptions};
 use mire::uploads::UploadStore;
 use tracing::{debug, error, info, warn};
@@ -92,11 +94,13 @@ async fn run(settings: Settings) -> Result<(), StartupError> {
     let _watcher = config::watch(Arc::clone(&config))?;
 
     let base_path = normalise_base_path(&settings.base_path);
+    let shutdown = Shutdown::new();
     let state = AppState {
         runner: Runner::new(config, client),
         uploads: Arc::new(UploadStore::new(&settings.uploads)),
         base_path: base_path.clone().into(),
         public_url: settings.public_url.clone().map(Into::into),
+        shutdown: shutdown.clone(),
     };
 
     let address = SocketAddr::new(settings.host, settings.port);
@@ -110,31 +114,61 @@ async fn run(settings: Settings) -> Result<(), StartupError> {
     info!(url = %format!("http://{bound}{base_path}/"), "mire is up");
     info!(url = %format!("http://{bound}{base_path}/docs"), "API reference");
 
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .map_err(StartupError::Serve)?;
+    let server = axum::serve(listener, router(state))
+        .with_graceful_shutdown(shutdown_signal(shutdown.clone()));
+
+    // The drain is bounded, because what it waits for is not: a call to an
+    // endpoint that never answers would otherwise hold the process here until
+    // the orchestrator loses patience and sends `SIGKILL`.
+    tokio::select! {
+        result = server => result.map_err(StartupError::Serve)?,
+        () = drain_deadline(&shutdown) => warn!(
+            seconds = DRAIN_GRACE.as_secs(),
+            "a call is still running, stopping anyway"
+        ),
+    }
 
     info!("mire stopped");
     Ok(())
 }
 
-/// Completes on `SIGTERM` or `SIGINT`.
-async fn shutdown_signal() {
+/// How long a call in flight has to finish once a signal has landed.
+///
+/// Under Docker the process is `SIGKILL`ed ten seconds after the `SIGTERM`, so
+/// stopping short of that is what makes the difference between exiting and being
+/// killed.
+const DRAIN_GRACE: Duration = Duration::from_secs(8);
+
+/// Completes once the drain has had [`DRAIN_GRACE`] and the process should go
+/// regardless.
+async fn drain_deadline(shutdown: &Shutdown) {
+    shutdown.begun().await;
+    tokio::time::sleep(DRAIN_GRACE).await;
+}
+
+/// Completes on `SIGTERM` or `SIGINT`, telling the rest of the process on the
+/// way out — the streams `mire` pushes end on nothing else, and a connection
+/// held by one is a connection the drain waits for.
+async fn shutdown_signal(shutdown: Shutdown) {
     use tokio::signal::unix::{SignalKind, signal};
 
     let mut interrupt = match signal(SignalKind::interrupt()) {
         Ok(stream) => stream,
         Err(error) => {
-            error!(%error, "cannot install the SIGINT handler");
-            return;
+            // Returning would mean "stop now": the server reads this future
+            // completing as the signal itself, so a handler that will not install
+            // would take the process down the moment it came up. Waiting for
+            // nothing leaves `SIGKILL` as the way out, which is the better of the
+            // two.
+            error!(%error, "cannot install the SIGINT handler; stop mire with SIGKILL");
+            return std::future::pending().await;
         }
     };
     let mut terminate = match signal(SignalKind::terminate()) {
         Ok(stream) => stream,
         Err(error) => {
-            error!(%error, "cannot install the SIGTERM handler");
-            return;
+            error!(%error, "cannot install the SIGTERM handler; stop mire with SIGKILL");
+            return std::future::pending().await;
         }
     };
 
@@ -142,6 +176,8 @@ async fn shutdown_signal() {
         _ = interrupt.recv() => info!("SIGINT received, draining"),
         _ = terminate.recv() => info!("SIGTERM received, draining"),
     }
+
+    shutdown.begin();
 }
 
 /// Why `mire` could not start.

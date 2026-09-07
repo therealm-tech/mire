@@ -145,6 +145,11 @@ embedded front end and rewrites its base URL under a path prefix.
 
 **[`uploads`](src/uploads.rs)** is the one component that writes to disk.
 
+**[`shutdown`](src/shutdown.rs)** is a single flag, raised when a signal lands
+and read by the handlers whose streams have no end of their own. It is what
+separates the two kinds of open connection: a call in flight is drained, and a
+subscription is dropped.
+
 **[`ui/`](ui/)** is a React + TypeScript front end, built by Vite and embedded
 into the binary. It renders what the API returns and holds the conversation; it
 has no model of its own and edits no configuration. It follows what the process
@@ -439,6 +444,10 @@ run by something that already has one.
 - **A file's stages load together or not at all.** One that does not expand takes
   the entry with it, so a stage missing from the picker is never explained only
   by a line in the log.
+- **A signal stops the process, whatever is connected.** `SIGINT` and `SIGTERM`
+  end the streams `mire` pushes — they carry news, and there is no news left —
+  and give a call in flight eight seconds to finish before the process goes
+  anyway. Nothing a client holds open can keep `mire` alive.
 - **A stage is an identity of its own.** Two stages of one credential hold two
   token caches and two browser sessions, and two stages of one MCP server
   negotiate and keep two sessions — they share a file, and nothing else.
