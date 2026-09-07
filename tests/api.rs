@@ -240,6 +240,19 @@ impl Harness {
         (status, serde_json::from_str(&text).unwrap_or(Value::Null))
     }
 
+    /// `GET` a route asking for its YAML representation, as text.
+    async fn get_yaml(&self, route: &str) -> (u16, String) {
+        let response = self
+            .client
+            .get(format!("{}{route}", self.base))
+            .header("accept", "application/yaml")
+            .send()
+            .await
+            .expect("get");
+        let status = response.status().as_u16();
+        (status, response.text().await.expect("read body"))
+    }
+
     /// `GET` any route under the base path, as text. For the pages a browser
     /// lands on, which are HTML rather than JSON.
     async fn get_text(&self, route: &str) -> (u16, String) {
@@ -939,6 +952,181 @@ decode:
     assert_eq!(status, 200);
     assert_eq!(body["model"], "chat@dev");
     assert_eq!(body["response"]["decoded"]["content"], "from dev");
+}
+
+/// The document a stage exports is a `models/` file, and the proof is that
+/// dropping it back in loads the same endpoint.
+///
+/// Everything the loader added on the way in has to come back off on the way
+/// out — `stage` and `source` are not fields of the format, and `decode.from`
+/// has already been spent resolving the cascades below it. A document keeping
+/// any of the three is one `mire` reads differently, or refuses outright, and
+/// the failure would land on somebody who pasted it into their own repository.
+#[tokio::test]
+async fn a_model_is_exported_as_a_file_that_loads_back() {
+    let endpoint = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"content": "pong"}, "finish_reason": "stop"}]
+        })))
+        .mount(&endpoint)
+        .await;
+
+    let harness = Harness::start(&[(
+        "models/chat.yaml",
+        format!(
+            r#"
+name: chat
+kind: chat
+url: ${{ stage.base }}/v1/chat/completions
+timeout_ms: 5000
+default_stage: prod
+stages:
+  prod:
+    base: {}
+request:
+  template: '{{"model": "m", "messages": {{{{ messages | tojson }}}}}}'
+decode:
+  from: ["openai-chat"]
+"#,
+            endpoint.uri()
+        ),
+    )])
+    .await;
+
+    let (status, document) = harness.get_yaml("/api/models/chat@prod").await;
+    assert_eq!(status, 200);
+
+    // Resolved, not copied: the stage variable is gone and the named shape has
+    // become the cascade it stands for.
+    assert!(
+        document.contains(&format!("{}/v1/chat/completions", endpoint.uri())),
+        "{document}"
+    );
+    assert!(
+        document.contains("$.choices[0].message.content"),
+        "{document}"
+    );
+    for absent in ["stage:", "source:", "from:", "${"] {
+        assert!(
+            !document.contains(absent),
+            "`{absent}` survived:\n{document}"
+        );
+    }
+
+    // Dropping a key must not reorder the rest: a YAML mapping removes by
+    // swapping the last entry into the hole, which once put `error` where
+    // `content` belongs. The document is meant to be read and diffed.
+    assert!(
+        document.find("  content:") < document.find("  error:"),
+        "the fields came back out of order:\n{document}"
+    );
+
+    // The whole claim, exercised: written back under another name, it loads and
+    // answers exactly as the model it came from.
+    harness.write(
+        "models/pasted.yaml",
+        &document.replace("name: chat", "name: pasted"),
+    );
+    let listed = harness
+        .wait_for("/api/models", |body| {
+            body["models"].as_array().unwrap().len() == 2
+                || !body["issues"].as_array().unwrap().is_empty()
+        })
+        .await;
+    assert!(
+        listed["issues"].as_array().unwrap().is_empty(),
+        "the export did not load: {}\n{document}",
+        listed["issues"]
+    );
+
+    let (status, _, body) = harness
+        .call(json!({"model": "pasted", "prompt": "ping"}))
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["response"]["decoded"]["content"], "pong");
+}
+
+/// A form survives the round trip too, which is not the same claim.
+///
+/// `multipart:` is the one part of a model file read by hand rather than by
+/// derive — a mapping in, a list of ordered parts held — so writing it back out
+/// is its own code, and a document it cannot read again would be a document
+/// that looks right and loads as nothing.
+#[tokio::test]
+async fn a_form_is_exported_as_a_form() {
+    let harness = Harness::start(&[(
+        "models/transcribe.yaml",
+        r#"
+name: transcribe
+kind: chat
+has_prompt: false
+url: https://models.internal/v1/audio/transcriptions
+requires_upload: true
+request:
+  multipart:
+    file:
+      upload: '{{ uploads[0] }}'
+    model: whisper-1
+    response_format: json
+decode:
+  content: ["$.text"]
+"#
+        .to_owned(),
+    )])
+    .await;
+
+    let (status, document) = harness.get_yaml("/api/models/transcribe").await;
+    assert_eq!(status, 200);
+
+    // The fields a part does not use are absent rather than null: the document
+    // is meant to be read, and four `null`s per field is three too many.
+    assert!(!document.contains("null"), "{document}");
+
+    harness.write(
+        "models/pasted.yaml",
+        &document.replace("name: transcribe", "name: pasted"),
+    );
+    let listed = harness
+        .wait_for("/api/models", |body| {
+            body["models"].as_array().unwrap().len() == 2
+                || !body["issues"].as_array().unwrap().is_empty()
+        })
+        .await;
+    assert!(
+        listed["issues"].as_array().unwrap().is_empty(),
+        "the export did not load: {}\n{document}",
+        listed["issues"]
+    );
+
+    // The parts, in the order the form was written — which is the order they go
+    // out in, and the reason this type is a list rather than a map.
+    let pasted = harness.get("/api/models/pasted").await;
+    let fields: Vec<&str> = pasted["request"]["multipart"]
+        .as_object()
+        .expect("a form")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(fields, ["file", "model", "response_format"]);
+}
+
+/// A refusal is JSON whatever representation was asked for.
+///
+/// One error shape for the whole API: a client that asked for YAML has an error
+/// handler waiting for the answer, not a second parser.
+#[tokio::test]
+async fn a_refusal_is_json_even_when_yaml_was_asked_for() {
+    let harness = Harness::start(&[(
+        "models/chat.yaml",
+        openai_model("https://models.internal/v1"),
+    )])
+    .await;
+
+    let (status, body) = harness.get_yaml("/api/models/nope").await;
+    assert_eq!(status, 404);
+    assert!(body.contains("unknown_model"), "{body}");
 }
 
 /// Every listed directory is watched, not just the first: an override you have

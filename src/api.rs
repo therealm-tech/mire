@@ -10,6 +10,7 @@
 
 pub mod dto;
 pub mod handlers;
+pub mod negotiate;
 pub mod sse;
 pub mod ui;
 
@@ -178,9 +179,15 @@ fn model_routes() -> ApiRouter<AppState> {
             "/api/models/{id}",
             get_with(handlers::get_model, |op| {
                 op.summary("Fetch one model")
-                    .description("The model exactly as declared in YAML, field names included.")
+                    .description(
+                        "The model exactly as declared in YAML, field names included. \
+                         With `Accept: application/yaml`, the same model as a document \
+                         `models/` would load — stage variables substituted, named decodes \
+                         flattened into their cascades, defaults filled in — so saving it \
+                         there loads the same endpoint back.",
+                    )
                     .tag("models")
-                    .response::<200, Json<crate::model::Model>>()
+                    .response::<200, negotiate::Negotiated<crate::model::Model>>()
             }),
         )
 }

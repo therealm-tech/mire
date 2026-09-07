@@ -142,14 +142,14 @@ pub enum RequestSource<'a> {
 pub struct RequestSpec {
     /// `MiniJinja` template rendered against `messages`, `input`, `tools`, `model_id`
     /// and `params`. Must render to valid JSON.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
     /// Rhai script seeing the same variables and returning the body — a string,
     /// or a map or array that gets serialised to JSON.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script: Option<ScriptSource>,
     /// Form fields, in the order the file wrote them. See [`MultipartSpec`].
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multipart: Option<MultipartSpec>,
 }
 
@@ -405,16 +405,16 @@ impl JsonSchema for Scalar {
 #[serde(deny_unknown_fields)]
 struct LongPart {
     /// A text field's template.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     text: Option<Scalar>,
     /// A file field's templates, each naming uploads of the call. One, or a list.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     upload: Option<OneOrMany>,
     /// `content-type` of the part.
-    #[serde(default, rename = "type")]
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
     media_type: Option<String>,
     /// `filename` of the part. File fields only.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     filename: Option<String>,
 }
 
@@ -625,7 +625,7 @@ pub struct DecodeSpec {
     /// Resolved once, when the model is loaded: what runs is a flat cascade, and
     /// the decode trace names the winning path as it always has. The list is kept
     /// here afterwards to record where those paths came from.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub from: Vec<String>,
     /// Rhai script replacing the cascades entirely, for a response no set of
     /// paths can describe. It receives `raw`, `status` and `headers`, and returns
@@ -635,10 +635,10 @@ pub struct DecodeSpec {
     /// Never allowed on a decode a model reaches through `from:`: a script
     /// replaces the cascades, and one arriving from another file would make the
     /// rule below a question about two documents at once.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script: Option<ScriptSource>,
     /// Assistant text. `kind: chat`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub content: Vec<JsonPathExpr>,
     /// Assistant text inside **one chunk** of a streamed response. `kind: chat`.
     ///
@@ -649,13 +649,13 @@ pub struct DecodeSpec {
     ///
     /// A `decode.script` replaces the cascades for a whole body; it is not run
     /// per chunk, so a scripted model streams without text deltas.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub delta: Vec<JsonPathExpr>,
     /// Tool calls emitted by the model. `kind: chat`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<JsonPathExpr>,
     /// Why generation stopped. `kind: chat`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub finish_reason: Vec<JsonPathExpr>,
     /// The `finish_reason` values that mean the model is done talking, for the
     /// agent loop. `kind: chat`.
@@ -673,7 +673,7 @@ pub struct DecodeSpec {
     #[serde(default)]
     pub terminal_reasons: Vec<String>,
     /// Token accounting. Both kinds.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub usage: Vec<JsonPathExpr>,
     /// What the endpoint says went wrong. Both kinds.
     ///
@@ -682,10 +682,10 @@ pub struct DecodeSpec {
     /// back with the sentence normalised out of it instead of only as raw JSON.
     /// The status is not consulted: an endpoint answering `200` with an error in
     /// the body is precisely what this is for.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub error: Vec<JsonPathExpr>,
     /// The vectors themselves. `kind: embedding`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vectors: Vec<JsonPathExpr>,
 }
 
@@ -765,7 +765,7 @@ pub struct AgentSpec {
     #[validate(range(min = 1, max = 100))]
     pub default_max_turns: u32,
     /// Hard cap on wall-clock time for the whole loop.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_duration_ms: Option<u64>,
 }
 
@@ -792,17 +792,17 @@ pub struct ToolSpec {
     pub name: String,
     /// What the tool is for. Passed to the model, which is what makes it call
     /// the tool at the right moment.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// JSON Schema of the arguments, used both to advertise the tool and to
     /// check what the model sends back.
     pub schema: serde_json::Value,
     /// Canned result handed back to the model.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response: Option<String>,
     /// Rhai script producing the result, for a tool whose answer should depend
     /// on its arguments.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script: Option<ScriptSource>,
 }
 
@@ -862,10 +862,10 @@ pub struct Model {
     #[serde(default)]
     pub method: HttpMethod,
     /// Name of an entry in the auth registry. Absent means anonymous.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<String>,
     /// Extra headers sent verbatim. Never put a credential here.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
     /// Request timeout in milliseconds.
     #[serde(default = "default_timeout_ms")]
@@ -890,15 +890,15 @@ pub struct Model {
     #[validate(nested)]
     pub request: RequestSpec,
     /// How the response is read.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "DecodeSpec::is_empty")]
     #[validate(nested)]
     pub decode: DecodeSpec,
     /// Agent-loop configuration.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[validate(nested)]
     pub agent: Option<AgentSpec>,
     /// Simulated tools offered to the model. Nothing is executed.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[validate(nested)]
     pub tools: Vec<ToolSpec>,
     /// Stage this reading of the file belongs to, `None` when it declares none.
@@ -926,6 +926,39 @@ impl Model {
     #[must_use]
     pub fn timeout(&self) -> Duration {
         Duration::from_millis(self.timeout_ms)
+    }
+
+    /// This endpoint written back out as a `models/` file.
+    ///
+    /// Not a copy of the file on disk. What comes back is the model as `mire`
+    /// holds it — `${ stage.… }` already substituted, `decode.from` already
+    /// flattened into the cascades, the defaults filled in — which is the
+    /// question somebody staring at a surprising call is actually asking.
+    ///
+    /// Three keys are dropped, and each of them has to be for the document to
+    /// load again. [`Self::stage`] and [`Self::source`] are the loader's, and a
+    /// file that declares them is rejected — they are not fields of the format
+    /// (`deny_unknown_fields`). `decode.from` has already been resolved into the
+    /// cascades beside it, so keeping it would make a re-read append every named
+    /// shape's paths a second time.
+    ///
+    /// # Errors
+    ///
+    /// Returns whatever `serde_yaml_ng` could not represent.
+    pub fn to_document(&self) -> Result<String, serde_yaml_ng::Error> {
+        let mut document = serde_yaml_ng::to_value(self)?;
+        if let Some(fields) = document.as_mapping_mut() {
+            // `remove` is `swap_remove`: it fills the hole with the last entry,
+            // and dropping `from` would land `vectors` where `content` belongs.
+            // The order of these fields is the order this struct declares them,
+            // which is the order somebody reading the document expects.
+            fields.shift_remove("stage");
+            fields.shift_remove("source");
+            if let Some(decode) = fields.get_mut("decode").and_then(|d| d.as_mapping_mut()) {
+                decode.shift_remove("from");
+            }
+        }
+        serde_yaml_ng::to_string(&document)
     }
 }
 

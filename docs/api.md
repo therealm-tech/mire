@@ -7,7 +7,7 @@
 | `GET /api/events` | Server-sent events: one `config` event per configuration reload, so a client can re-read the listings instead of showing what was there when it connected |
 | `GET /api/config` | Every directory `mire` reads, how many entries each one provides and every file that did not load — the whole configuration in one request, and the only place `decodes/` issues appear |
 | `GET /api/models` | Every model, plus the files that failed to load and why |
-| `GET /api/models/{id}` | One model, as declared |
+| `GET /api/models/{id}` | One model, as declared. With `Accept: application/yaml`, the same model as a `models/` file — stages substituted, named decodes flattened, defaults filled in — so that saving it there loads the same endpoint back |
 | `GET /api/prompts` | Prompts declared in `prompts/`, plus the entries that did not load |
 | `GET /api/auth` | Auth providers, with session status |
 | `GET /api/mcp` | MCP servers declared in `mcp/` — what each one authenticates with, the hooks around its calls, and what it captures — plus the entries that did not load |

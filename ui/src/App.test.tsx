@@ -3192,6 +3192,81 @@ describe('preflight', () => {
   })
 })
 
+describe('the model behind the bar', () => {
+  /** The two routes the block reads, on top of the four listings. */
+  const DETAIL = {
+    'api/models/chat': {
+      name: 'chat',
+      request: { template: '{"model": "m", "messages": {{ messages | tojson }}}' },
+      decode: { from: ['openai-chat'], content: ['$.choices[0].message.content'] },
+    },
+  }
+
+  /**
+   * One URL, two representations: the block asks for both, and which one comes
+   * back is the `Accept` header's business rather than the path's.
+   */
+  function mockModel(routes: Record<string, unknown>) {
+    return vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      const accept = new Headers(init?.headers).get('accept')
+      if (url.endsWith('api/models/chat') && accept === 'application/yaml') {
+        return Promise.resolve(new Response('name: chat\nkind: chat\n'))
+      }
+      return mockApi(routes)(input, init)
+    })
+  }
+
+  it('is not read until somebody asks for it', async () => {
+    const fetching = mockModel({
+      ...DETAIL,
+      'api/models': MODELS,
+      'api/auth': AUTH,
+      'api/mcp': MCP,
+      'api/prompts': PROMPTS,
+    })
+    vi.stubGlobal('fetch', fetching)
+
+    const user = userEvent.setup()
+    render(<App />)
+    await screen.findByRole('button', { name: /^chat/ })
+
+    const asked = () =>
+      fetching.mock.calls.filter(([url]) => String(url).includes('api/models/chat')).length
+    expect(asked()).toBe(0)
+
+    await user.click(screen.getByRole('button', { name: 'Config' }))
+    await waitFor(() => expect(asked()).toBe(2))
+  })
+
+  it('shows the template, the cascade and the file to paste', async () => {
+    vi.stubGlobal(
+      'fetch',
+      mockModel({
+        ...DETAIL,
+        'api/models': MODELS,
+        'api/auth': AUTH,
+        'api/mcp': MCP,
+        'api/prompts': PROMPTS,
+      }),
+    )
+
+    const user = userEvent.setup()
+    render(<App />)
+    await user.click(await screen.findByRole('button', { name: 'Config' }))
+
+    expect(await screen.findByText(/"model": "m"/)).toBeInTheDocument()
+    expect(screen.getByText('from: openai-chat')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('tab', { name: 'YAML' }))
+    expect(screen.getByText(/kind: chat/)).toBeInTheDocument()
+
+    // The same button closes it, so the block is where it was opened from.
+    await user.click(screen.getByRole('button', { name: 'Hide config' }))
+    expect(screen.queryByRole('tab', { name: 'YAML' })).not.toBeInTheDocument()
+  })
+})
+
 describe('stopping a run', () => {
   it('drops the request and keeps what had already arrived', async () => {
     vi.stubGlobal(
