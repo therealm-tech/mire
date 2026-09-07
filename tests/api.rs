@@ -1106,6 +1106,113 @@ async fn the_prompt_listing_keeps_the_listing_order_and_names_the_entry_it_dropp
     assert!(models["issues"].as_array().unwrap().is_empty());
 }
 
+/// The one endpoint that answers "did my save land, and did it break anything"
+/// without stitching four listings together — and the only place `decodes/` has
+/// ever been able to complain, since it has no listing of its own.
+#[tokio::test]
+async fn the_configuration_endpoint_reports_every_directory_including_decodes() {
+    let harness = Harness::start(&[
+        (
+            "models/chat.yaml",
+            openai_model("https://models.internal/v1"),
+        ),
+        ("prompts/hollow.yaml", "name: hollow\n".to_owned()),
+        (
+            "decodes/openai-ish.yaml",
+            "name: openai-ish\nkind: chat\ncontent: [unclosed\n".to_owned(),
+        ),
+    ])
+    .await;
+
+    let body = harness.get("/api/config").await;
+    let directories = body["directories"].as_array().unwrap();
+
+    // All five, always, in the order the layout declares them: a directory that
+    // declares nothing is a zero rather than a gap to interpret.
+    let names: Vec<&str> = directories
+        .iter()
+        .map(|entry| entry["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["models", "auth", "mcp", "prompts", "decodes"]);
+
+    let of = |name: &str| {
+        directories
+            .iter()
+            .find(|entry| entry["name"] == name)
+            .unwrap()
+            .clone()
+    };
+
+    assert_eq!(of("models")["loaded"], 1);
+    assert!(of("models")["issues"].as_array().unwrap().is_empty());
+
+    // `anonymous` is built in and always there, with no file behind it.
+    assert_eq!(of("auth")["loaded"], 1);
+    assert_eq!(of("mcp")["loaded"], 0);
+
+    assert_eq!(of("prompts")["loaded"], 0);
+    let prompt_issues = of("prompts");
+    let prompt_issues = prompt_issues["issues"].as_array().unwrap();
+    assert_eq!(prompt_issues.len(), 1);
+    assert!(
+        prompt_issues[0]["file"]
+            .as_str()
+            .unwrap()
+            .ends_with("prompts/hollow.yaml")
+    );
+
+    // The built-in shapes are compiled in, so the broken file subtracts nothing
+    // from the count — it only adds a complaint.
+    let decodes = of("decodes");
+    assert!(decodes["loaded"].as_u64().unwrap() > 0);
+    let decode_issues = decodes["issues"].as_array().unwrap();
+    assert_eq!(decode_issues.len(), 1);
+    assert!(
+        decode_issues[0]["file"]
+            .as_str()
+            .unwrap()
+            .ends_with("decodes/openai-ish.yaml")
+    );
+    assert!(
+        decode_issues[0]["line"].is_number(),
+        "a YAML parse error carries its position across: {decode_issues:#?}"
+    );
+
+    // The listings still answer for their own directory, and they still cannot
+    // disagree with this: same snapshot, two projections.
+    let models = harness.get("/api/models").await;
+    assert!(models["issues"].as_array().unwrap().is_empty());
+    let prompts = harness.get("/api/prompts").await;
+    assert_eq!(prompts["issues"].as_array().unwrap().len(), 1);
+}
+
+/// The generation is the counter `GET /api/events` announces, so a client can
+/// tell which reading of the directories it is looking at.
+#[tokio::test]
+async fn the_configuration_endpoint_moves_its_generation_on_a_reload() {
+    let harness = Harness::start(&[(
+        "models/chat.yaml",
+        openai_model("https://models.internal/v1"),
+    )])
+    .await;
+
+    let before = harness.get("/api/config").await;
+    assert_eq!(before["generation"], 0, "nothing has been reloaded yet");
+
+    harness.write(
+        "models/second.yaml",
+        &openai_model("https://second.internal/v1").replace("name: chat", "name: second"),
+    );
+
+    let after = harness
+        .wait_for("/api/config", |body| body["directories"][0]["loaded"] == 2)
+        .await;
+    assert!(
+        after["generation"].as_u64().unwrap() > 0,
+        "a reload that landed is a generation that moved"
+    );
+}
+
 #[tokio::test]
 async fn editing_the_prompt_library_takes_effect_without_a_restart() {
     let harness = Harness::start(&[(

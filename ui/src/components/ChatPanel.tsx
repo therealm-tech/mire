@@ -794,12 +794,7 @@ function Composer({
             Above the box rather than beside **Send**: it fills the box, so it
             belongs on the same side of it as the thing it fills.
           */}
-          <SavedPrompts
-            prompts={prompts.prompts}
-            issues={prompts.issues}
-            disabled={busy}
-            onPick={onPrompt}
-          />
+          <SavedPrompts prompts={prompts.prompts} disabled={busy} onPick={onPrompt} />
 
           <textarea
             value={prompt}

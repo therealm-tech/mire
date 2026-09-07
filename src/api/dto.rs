@@ -13,6 +13,7 @@ use validator::Validate;
 
 use crate::agent::{AgentInput, Trace, Turn};
 use crate::auth::registry::AuthDescriptor;
+use crate::config::{Config, layout};
 use crate::exec::{CallEvent, CallInput, CallOutcome};
 use crate::issue::LoadIssue;
 use crate::message::Message;
@@ -124,6 +125,80 @@ impl From<&PromptRegistry> for PromptsResponse {
         Self {
             prompts: registry.prompts().to_vec(),
             issues: registry.issues().to_vec(),
+        }
+    }
+}
+
+/// One subdirectory of the configuration, and how its last read went.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigDirectory {
+    /// What the subdirectory is called: `models`, `auth`, `mcp`, `prompts`,
+    /// `decodes`.
+    pub name: String,
+    /// How many entries are usable under that name.
+    ///
+    /// Entries rather than files, because the two differ on purpose: one staged
+    /// file declares one entry per stage, and `decodes` counts the shapes
+    /// compiled into the binary alongside the ones the directories add.
+    pub loaded: usize,
+    /// The files that did not load, with the reason and the position.
+    pub issues: Vec<LoadIssue>,
+}
+
+/// The configuration directories as one answer: what loaded, and what did not.
+///
+/// A projection of the very snapshot the four listings are served from, so it
+/// cannot disagree with them. It exists because "did my save land, and did it
+/// break anything" is a question about the directories as a whole, and answering
+/// it meant stitching four responses together — and still missing `decodes/`,
+/// which no listing carries.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigResponse {
+    /// Which reading of the directories this describes, on the same counter
+    /// `GET /api/events` announces. The only place to ask which generation the
+    /// listings are currently answering from.
+    pub generation: u64,
+    /// One entry per subdirectory, always all five and always in this order —
+    /// a directory that declares nothing is `loaded: 0` rather than absent, so
+    /// a reader never has to tell "no models" from "no models key".
+    pub directories: Vec<ConfigDirectory>,
+}
+
+impl ConfigResponse {
+    /// Describes `config`, as read at `generation`.
+    #[must_use]
+    pub fn new(config: &Config, generation: u64) -> Self {
+        Self {
+            generation,
+            directories: vec![
+                ConfigDirectory {
+                    name: layout::MODELS.to_owned(),
+                    loaded: config.models.len(),
+                    issues: config.models.issues().to_vec(),
+                },
+                ConfigDirectory {
+                    name: layout::AUTH.to_owned(),
+                    loaded: config.registry.descriptors().len(),
+                    issues: config.registry.issues().to_vec(),
+                },
+                ConfigDirectory {
+                    name: layout::MCP.to_owned(),
+                    loaded: config.mcp.descriptors().len(),
+                    issues: config.mcp.issues().to_vec(),
+                },
+                ConfigDirectory {
+                    name: layout::PROMPTS.to_owned(),
+                    loaded: config.prompts.len(),
+                    issues: config.prompts.issues().to_vec(),
+                },
+                ConfigDirectory {
+                    name: layout::DECODES.to_owned(),
+                    loaded: config.decodes.len(),
+                    issues: config.decodes.issues().to_vec(),
+                },
+            ],
         }
     }
 }
