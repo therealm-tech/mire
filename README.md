@@ -72,12 +72,14 @@ binary, so that is the whole deployment:
 ```sh
 git clone https://github.com/therealm-tech/mire.git
 cd mire
-(cd ui && npm install && npm run build)
 cargo build --release
 ```
 
-The binary lands at `./target/release/mire`. Building without the front end works
-too: you get a placeholder page and a fully functional API.
+The binary lands at `./target/release/mire`. Building it needs Node as well as
+Rust: the front end is embedded, so `cargo build` runs the npm install and Vite
+on the way past. Running the binary needs neither. Without a Node toolchain,
+`MIRE_BUILD_UI=0 cargo build --release` still gets you a placeholder page and a
+fully functional API.
 
 ### Configuration
 

@@ -1,8 +1,15 @@
-# Saves an `export` when running anything through cargo.
+# Saves an `export` when running anything through cargo. These reach the
+# processes cargo spawns — `cargo build`, `cargo run`, `cargo test` — and not a
+# binary you start yourself. None of them is forced, so a value already in the
+# environment wins.
 #
 # Not a secret: `mire-dev-secret` is the development constant declared in
 # dev/keycloak/realm-mire.json and quoted in the README, for the Keycloak that
 # docker-compose.yaml starts on localhost. It buys access to nothing else.
 # A real credential belongs in your shell, or in a file `auth.yaml` points at.
 [env]
+# `build.rs` builds the front end before it compiles. `0` opts out, for a build
+# with no Node toolchain or one whose `ui/dist` came from elsewhere — which is
+# what the image build and the `cargo test` CI job pass.
+MIRE_BUILD_UI = "1"
 OIDC_CLIENT_SECRET = "mire-dev-secret"

@@ -77,10 +77,21 @@ npm --prefix ui run dev
 ```
 
 Vite serves the front end with hot reload and proxies `/api` to a `mire` already
-running on its default port. In a debug build the assets are read from `ui/dist`
-at runtime, so `npm --prefix ui run build` alone is enough to see a change in the
-real binary — [`build.rs`](build.rs) writes a placeholder there when the front
-end has not been built, which is why `cargo test` needs no Node toolchain.
+running on its default port.
+
+To see a change in the real binary, `cargo build` is enough:
+[`build.rs`](build.rs) runs Vite before compiling, and `npm ci` ahead of it when
+the lockfile has moved since the last install. `rust-embed` reads `ui/dist` at
+compile time, so the bundle is an input to the build rather than a step to
+remember — which is also why a front end that fails to build fails `cargo build`,
+Vite's error underneath. In a debug build the assets are read from `ui/dist` at
+runtime, so `npm --prefix ui run build` also refreshes a binary that is already
+compiled.
+
+`MIRE_BUILD_UI=0` skips all of that, for a build that has a bundle already or
+none at all: the image build sets it, because its Node stage produced `ui/dist`
+and the Rust stage carries no npm, and so does the `cargo test` job, which needs
+no front end and gets the placeholder page the script writes instead.
 
 The palette is the logo and nothing else, and
 [`ui/src/index.css`](ui/src/index.css) holds all of it: a brand scale sampled
