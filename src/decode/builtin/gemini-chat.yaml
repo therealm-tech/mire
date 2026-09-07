@@ -9,6 +9,15 @@
 # the same answer is skipped here and read by `tool_calls` instead. Streamed —
 # `streamGenerateContent?alt=sse` — each frame carries this same shape, which is
 # why `delta` and `content` are the same path.
+#
+# `STOP` is missing from the terminal values on purpose, and it is the one thing
+# to know about this shape: Gemini answers `STOP` on the turn that asks for a
+# function exactly as it does on the turn that finishes, so a loop treating it as
+# terminal ends at turn one and looks like a model refusing to use its tools.
+# Whether the turn is finished is `no_tool_calls`'s question here. What is left is
+# the set of reasons the answer stopped being produced at all — truncated,
+# filtered, or emitted as a call nothing can parse — and none of those is worth
+# another round.
 ---
 name: gemini-chat
 kind: chat
@@ -21,6 +30,15 @@ decode:
     - "$.candidates[0].content.parts[?(@.functionCall)].functionCall"
   finish_reason:
     - $.candidates[0].finishReason
+  terminal_reasons:
+    - MAX_TOKENS
+    - SAFETY
+    - RECITATION
+    - BLOCKLIST
+    - PROHIBITED_CONTENT
+    - SPII
+    - MALFORMED_FUNCTION_CALL
+    - OTHER
   usage:
     - $.usageMetadata
   error:

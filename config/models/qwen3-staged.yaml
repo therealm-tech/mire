@@ -90,6 +90,12 @@ request:
 # a decode block of its own, which is the half of a duplicated model file that
 # quietly stops matching.
 #
+# `terminal_reasons` is the one field these two do not merge as a cascade — it is
+# a vocabulary, so both decodes' values apply at once. Worth knowing before you
+# run the agent loop on `@ollama`: `stop` arrives from `openai-chat`, and Ollama's
+# own API says `done_reason: "stop"` on the turn it is asking for a tool. A file
+# that needs the loop right on both routes splits the decode per stage.
+#
 decode:
   from:
     - openai-chat

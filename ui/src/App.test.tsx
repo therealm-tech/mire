@@ -928,7 +928,7 @@ describe('describeStop', () => {
   it('says an unevaluable predicate was unfalsifiable, not slow', () => {
     const { tone, text } = describeStop({
       outcome: 'predicateNeverEvaluable',
-      predicate: 'stop_when.finish_reason_in',
+      predicate: 'decode.terminal_reasons',
       turns: 3,
     })
     expect(tone).toBe('bad')

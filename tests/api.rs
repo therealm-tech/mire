@@ -2663,6 +2663,62 @@ async fn an_agent_answers_a_tool_call_and_stops_when_the_model_is_done() {
     assert_eq!(done["turns"].as_array().unwrap().len(), 2);
 }
 
+/// The vocabulary comes with the shape: `from: [openai-chat]` and nothing under
+/// `agent:` is enough to end the loop on `finish_reason`, and the turn that says
+/// `tool_calls` is not mistaken for one.
+#[tokio::test]
+async fn a_built_in_decode_brings_the_stop_reasons_that_end_the_loop() {
+    let server = MockServer::start().await;
+    let mut asking = wants_tool("Paris");
+    asking["choices"][0]["finish_reason"] = json!("tool_calls");
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(asking))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    // No tool calls *and* a terminal reason, so only the reason it names tells
+    // the two predicates apart.
+    let mut done = final_answer("It is 21 degrees in Paris.");
+    done["choices"][0]["message"]["tool_calls"] = json!([{
+        "id": "call_done",
+        "type": "function",
+        "function": {"name": "get_weather", "arguments": "{\"city\": \"Lyon\"}"}
+    }]);
+    done["choices"][0]["finish_reason"] = json!("stop");
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(done))
+        .mount(&server)
+        .await;
+
+    let model = format!(
+        r#"
+name: agent
+kind: chat
+url: {}/v1
+timeout_ms: 5000
+request:
+  template: |
+    {{"model": "m", "messages": {{{{ messages | tojson }}}}}}
+decode:
+  from: [openai-chat]
+"#,
+        server.uri()
+    );
+    let harness = Harness::start(&[("models/agent.yaml", model)]).await;
+
+    let (_, events) = harness
+        .agent(json!({"model": "agent", "prompt": "weather in Paris?"}))
+        .await;
+
+    // `tool_calls` on turn 1 kept the loop going; `stop` on turn 2 ended it even
+    // though that turn was still asking for a tool.
+    let (_, trace) = events.last().unwrap();
+    assert_eq!(trace["stop"]["outcome"], "stopped");
+    assert_eq!(trace["stop"]["reason"]["predicate"], "finishReason");
+    assert_eq!(trace["stop"]["reason"]["value"], "stop");
+    assert_eq!(trace["turns"].as_array().unwrap().len(), 2);
+}
+
 #[tokio::test]
 async fn a_model_asking_for_the_same_thing_twice_is_stopped_when_the_model_asks() {
     let server = MockServer::start().await;
@@ -2813,10 +2869,15 @@ async fn a_backend_that_never_reports_a_finish_reason_is_called_out_rather_than_
         .mount(&server)
         .await;
 
-    // Stop only on `finish_reason`, which this endpoint never sends.
+    // Stop only on `finish_reason`, which this endpoint never sends. The
+    // terminal values sit on the decode, so they go in rather than after it.
     let model = agent_model(
         &format!("{}/v1", server.uri()),
-        "agent:\n  default_max_turns: 3\n  stop_when:\n    no_tool_calls: false\n    finish_reason_in: [stop, end_turn]\n",
+        "agent:\n  default_max_turns: 3\n  stop_when:\n    no_tool_calls: false\n",
+    )
+    .replace(
+        "  finish_reason: [\"$.choices[0].finish_reason\"]",
+        "  finish_reason: [\"$.choices[0].finish_reason\"]\n  terminal_reasons: [stop, end_turn]",
     );
     let harness = Harness::start(&[("models/agent.yaml", model)]).await;
 
@@ -2827,7 +2888,7 @@ async fn a_backend_that_never_reports_a_finish_reason_is_called_out_rather_than_
     let (_, done) = events.last().unwrap();
     // Not `maxTurns`: the loop was not slow, it was unfalsifiable.
     assert_eq!(done["stop"]["outcome"], "predicateNeverEvaluable");
-    assert_eq!(done["stop"]["predicate"], "stop_when.finish_reason_in");
+    assert_eq!(done["stop"]["predicate"], "decode.terminal_reasons");
     assert_eq!(done["stop"]["turns"], 3);
 }
 

@@ -125,6 +125,8 @@ decode:
     - $.result.answer
   finish_reason:
     - $.result.stop
+  terminal_reasons:
+    - finished
   error:
     - $.error
 ```

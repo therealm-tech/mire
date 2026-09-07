@@ -40,10 +40,11 @@ in the transcript where it happened and in full in
 model call that asked for it.
 
 ```yaml
+decode:
+  from: [openai-chat]            # brings `terminal_reasons: [stop, length, …]`
 agent:
   stop_when:
     no_tool_calls: true          # the default, and almost always what you want
-    finish_reason_in: [stop, end_turn]
     repeated_call: true          # off by default: stop on the same call twice
   default_max_turns: 6
   max_duration_ms: 600000
@@ -58,6 +59,14 @@ tools:
       required: [city]
     response: '{"temp": 21, "conditions": "clear"}'
 ```
+
+The third predicate is not in that block. Stopping on the model's stop reason
+needs the list of values that mean *finished*, and that list is a property of the
+endpoint's vocabulary rather than of the run — OpenAI says `tool_calls` for a turn
+still working and `stop` for one that is done, Gemini says `STOP` for both. So it
+travels with the shape that defines it, as
+[`decode.terminal_reasons`](models.md#which-stop-reasons-mean-done), and naming a
+built-in decode is all it takes to get it right.
 
 These tools capture nothing: `capture:` is declared on an MCP server, and a
 simulated tool belongs to none. See [keeping something a tool call
@@ -91,7 +100,7 @@ under `setup`, so a client that only reads the trace still has it.
 There is no silent loop. The one worth spelling out:
 
 ```json
-{"outcome": "predicateNeverEvaluable", "predicate": "stop_when.finish_reason_in", "turns": 3}
+{"outcome": "predicateNeverEvaluable", "predicate": "decode.terminal_reasons", "turns": 3}
 ```
 
 A model that stops only on `finish_reason`, pointed at an endpoint that never
