@@ -21,6 +21,8 @@
 //! * [`exec`] — the four steps above, wired together.
 //! * [`agent`] — the same four steps, in a loop, answering simulated tools.
 //! * [`api`] — the HTTP surface the UI talks to.
+//! * [`shutdown`] — the flag that ends the streams `mire` pushes, so a signal
+//!   stops the process instead of waiting on a stream that never ends.
 //! * [`redact`] — credentials, and the guarantee they do not leave the process.
 //! * [`uploads`] — the one thing here that writes to disk, and the rules that
 //!   keep it from writing anywhere it was not pointed at.
@@ -51,6 +53,7 @@ pub mod prompt;
 pub mod redact;
 pub mod render;
 pub mod script;
+pub mod shutdown;
 pub mod transport;
 pub mod uploads;
 pub mod vars;

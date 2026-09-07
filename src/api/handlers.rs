@@ -70,7 +70,7 @@ pub async fn list_prompts(State(state): State<AppState>) -> Json<PromptsResponse
 /// Working out *what* changed would mean diffing two snapshots here to save a
 /// client four requests it makes over loopback in a millisecond.
 ///
-/// Never fails and never ends of its own accord. A client that loses it
+/// Never fails, and ends only when the process does. A client that loses it
 /// reconnects, which is what `EventSource` does unprompted — and reconnecting is
 /// also how a tab catches up with a `mire` that was restarted under it.
 pub async fn events(
@@ -78,10 +78,20 @@ pub async fn events(
 ) -> EventStream<impl Stream<Item = Result<Event, Infallible>>> {
     let config = Arc::clone(state.runner.config());
     let mut changes = config.changes();
+    let shutdown = state.shutdown.clone();
 
     let stream = async_stream::stream! {
         loop {
-            let generation = match changes.recv().await {
+            let received = tokio::select! {
+                received = changes.recv() => received,
+                // There is nothing to drain here — this stream only ever pushes.
+                // Ending it is what lets the graceful shutdown finish: an open
+                // stream holds its connection open, and an open connection holds
+                // the whole process there.
+                () = shutdown.begun() => break,
+            };
+
+            let generation = match received {
                 Ok(generation) => generation,
                 // A tab left open through a hundred reloads wants the current
                 // number, not the ninety-nine it slept through — they all say

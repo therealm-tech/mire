@@ -27,6 +27,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::error::ApiError;
 use crate::exec::Runner;
+use crate::shutdown::Shutdown;
 use crate::uploads::{self, UploadStore};
 
 /// What the handlers need.
@@ -43,6 +44,8 @@ pub struct AppState {
     /// Only the OIDC browser login needs it, and only when the UI's own answer is
     /// wrong — see [`handlers::resolve_redirect_uri`].
     pub public_url: Option<Arc<str>>,
+    /// Raised when the process is stopping, so the streams that never end can.
+    pub shutdown: Shutdown,
 }
 
 /// Normalises a user-supplied base path.
@@ -150,9 +153,9 @@ fn config_routes() -> ApiRouter<AppState> {
                      process: reconnecting to a number *below* the one you held means \
                      `mire` was restarted under you, which is one more reason to re-read \
                      rather than a contradiction.\n\n\
-                     The stream never ends on its own and never emits a failure — a reload \
-                     that fails keeps the previous configuration, so there is nothing to \
-                     announce. Reconnect if it drops.",
+                     The stream never emits a failure — a reload that fails keeps the \
+                     previous configuration, so there is nothing to announce — and the only \
+                     thing that ends it is `mire` stopping. Reconnect if it drops.",
                     )
                     .tag("config")
                     .response::<200, String>()

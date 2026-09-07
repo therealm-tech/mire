@@ -8,6 +8,7 @@ use std::time::Duration;
 use mire::api::{AppState, router};
 use mire::config::ConfigStore;
 use mire::exec::Runner;
+use mire::shutdown::Shutdown;
 use mire::transport::{self, TransportOptions};
 use mire::uploads::UploadStore;
 use serde_json::{Value, json};
@@ -38,6 +39,10 @@ struct Harness {
     dirs: Vec<TempDir>,
     /// Where `POST /api/uploads` writes. Held so it outlives the server.
     uploads: TempDir,
+    /// Raising it drains the server, exactly as a signal does.
+    shutdown: Shutdown,
+    /// Completes when the drain is done — which is the whole point of one test.
+    server: tokio::task::JoinHandle<()>,
     /// Dropping this stops the file watcher, so it has to be held.
     _watcher: notify::RecommendedWatcher,
 }
@@ -76,6 +81,7 @@ impl Harness {
         // as a model that failed to parse.
         let uploads = TempDir::new().expect("uploads dir");
 
+        let shutdown = Shutdown::new();
         let state = AppState {
             runner: Runner::new(config, http),
             uploads: std::sync::Arc::new(UploadStore::new(uploads.path())),
@@ -83,14 +89,23 @@ impl Harness {
             // Unset on purpose: the tests exercise the path a browser actually
             // takes, where the callback comes from the request.
             public_url: None,
+            shutdown: shutdown.clone(),
         };
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
         let address = listener.local_addr().expect("local addr");
-        tokio::spawn(async move {
-            axum::serve(listener, router(state)).await.expect("serve");
+        // Served the way `main` serves it, graceful shutdown included: it is the
+        // combination of the two that once hung.
+        let server = tokio::spawn({
+            let shutdown = shutdown.clone();
+            async move {
+                axum::serve(listener, router(state))
+                    .with_graceful_shutdown(async move { shutdown.begun().await })
+                    .await
+                    .expect("serve");
+            }
         });
 
         Self {
@@ -99,6 +114,8 @@ impl Harness {
             client: reqwest::Client::new(),
             dirs,
             uploads,
+            shutdown,
+            server,
             _watcher: watcher,
         }
     }
@@ -1232,6 +1249,36 @@ async fn a_reload_is_announced_on_the_event_stream() {
         })
         .await;
     assert_eq!(body["models"][1]["url"], "https://second.internal/v1");
+}
+
+/// A tab left open on the event stream used to be enough to make a `SIGINT` do
+/// nothing at all: the stream never ended, so the drain never did either.
+#[tokio::test]
+async fn a_signal_stops_the_server_with_an_event_stream_open() {
+    let harness = Harness::start(&[(
+        "models/chat.yaml",
+        openai_model("https://models.internal/v1"),
+    )])
+    .await;
+
+    let stream = harness
+        .client
+        .get(format!("{}/api/events", harness.base))
+        .send()
+        .await
+        .expect("open the event stream");
+    assert_eq!(stream.status().as_u16(), 200);
+
+    harness.shutdown.begin();
+
+    tokio::time::timeout(Duration::from_secs(10), harness.server)
+        .await
+        .expect("the server never drained")
+        .expect("the server panicked");
+
+    // Held until here on purpose: the connection has to still be open for the
+    // drain above to mean anything.
+    drop(stream);
 }
 
 #[tokio::test]
