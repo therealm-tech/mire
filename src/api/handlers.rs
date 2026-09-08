@@ -547,6 +547,9 @@ fn escape(text: &str) -> String {
 /// Session status is stitched in here rather than stored in the descriptor: the
 /// registry is rebuilt on every config reload and sessions are not, so the only
 /// place the two are consistent is at read time.
+///
+/// Keyed by the **id**, never the name: a staged provider signs in on its own,
+/// and reading `sandbox` for `sandbox@pp` finds a session nobody ever stored.
 pub async fn list_auth(State(state): State<AppState>) -> Json<AuthResponse> {
     let config = state.runner.config().snapshot();
     let sessions = state.runner.config().sessions();
@@ -558,8 +561,8 @@ pub async fn list_auth(State(state): State<AppState>) -> Json<AuthResponse> {
         .map(|descriptor| {
             let mut descriptor = descriptor.clone();
             if descriptor.needs_login {
-                descriptor.session = sessions.view(&descriptor.name);
-                descriptor.last_error = sessions.last_failure(&descriptor.name);
+                descriptor.session = sessions.view(&descriptor.id);
+                descriptor.last_error = sessions.last_failure(&descriptor.id);
             }
             descriptor
         })
