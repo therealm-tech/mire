@@ -3991,6 +3991,77 @@ async fn a_new_attempt_clears_the_previous_complaint() {
     assert!(provider.get("lastError").is_none(), "{provider}");
 }
 
+/// A staged provider is its own identity down to its session, and the listing is
+/// where that stops being true if the two stages are read under the shared name.
+///
+/// The symptom is not a missing badge: the UI polls this listing to find out
+/// whether the login landed, so a session it cannot see is a sign-in that
+/// reports "the sign-in tab closed before a session appeared" while the tokens
+/// sit in the store.
+#[tokio::test]
+async fn a_staged_provider_keeps_its_session_under_its_own_stage() {
+    let idp = browser_idp().await;
+    token_answer(&idp, "authorization_code", "the-access-token", 300, true).await;
+
+    let harness = Harness::start(&[(
+        "auth/sandbox.yaml",
+        format!(
+            r"
+name: sandbox
+kind: oidc_browser
+issuer: {}/realms/mire
+client_id: ${{ stage.client }}
+scope:
+  - profile
+default_stage: dev
+stages:
+  dev:
+    client: mire-dev
+  pp:
+    client: mire-pp
+",
+            idp.uri()
+        ),
+    )])
+    .await;
+
+    let callback = "http://127.0.0.1:8787/auth/callback";
+    let (status, login) = harness
+        .post(
+            "/api/auth/sandbox@pp/login",
+            json!({"redirectUri": callback}),
+        )
+        .await;
+    assert_eq!(status, 200, "{login}");
+
+    let (status, page) = harness
+        .get_text(&format!(
+            "/auth/callback?code=the-code&state={}",
+            login["state"].as_str().unwrap()
+        ))
+        .await;
+    assert_eq!(status, 200);
+    assert!(page.contains("Signed in"), "{page}");
+
+    let providers = harness.get("/api/auth").await;
+    let providers = providers["providers"].as_array().unwrap().clone();
+    let stage = |id: &str| {
+        providers
+            .iter()
+            .find(|entry| entry["id"] == id)
+            .unwrap_or_else(|| panic!("`{id}` in {providers:?}"))
+            .clone()
+    };
+
+    let signed_in = stage("sandbox@pp");
+    assert_eq!(signed_in["session"]["subject"], "gleroy", "{signed_in}");
+
+    // And the other stage of the same file is still signed out: one file, two
+    // identities, and a token that reached only the one that fetched it.
+    let other = stage("sandbox@dev");
+    assert!(other.get("session").is_none(), "{other}");
+}
+
 // ---------------------------------------------------------------------------
 // MCP — tools the agent really calls
 // ---------------------------------------------------------------------------
