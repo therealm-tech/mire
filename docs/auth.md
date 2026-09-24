@@ -37,6 +37,26 @@ where that credential may be sent, refused before anything goes out, and it is
 also what keeps the UI from offering a provider against a model pointing
 somewhere it is not allowed to go.
 
+## A username and a password
+
+For an endpoint behind HTTP Basic, `kind: basic` sends
+`Authorization: Basic base64(username:password)`:
+
+```yaml
+# auth/legacy-gateway.yaml
+---
+name: legacy-gateway
+kind: basic
+username: mire
+password:
+  env: GATEWAY_PASSWORD
+```
+
+The username is not a secret and sits in the file; the password is read exactly
+like a token's `value` â€” `env`, or a `file` re-read on every call, and with
+neither the UI asks for it. A username cannot contain `:`, which the scheme
+reserves as the separator.
+
 ## Testing with a workload identity
 
 The third mode is the one that reproduces what a pod actually does. `mire`
@@ -121,7 +141,7 @@ exactly once with a fresh one. A token minted for that very call is left alone â
 the `401` is then about something else (a missing scope, an audience mismatch),
 and replaying would only hide it.
 
-Since the same model can be pointed at all three modes without touching its
+Since the same model can be pointed at every mode without touching its
 model, the matrix is two `POST /api/call` bodies apart:
 
 ```sh

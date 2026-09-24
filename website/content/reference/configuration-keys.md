@@ -244,7 +244,7 @@ Every kind takes these:
 | Key | Type | Default | What it does |
 | --- | --- | --- | --- |
 | `name` | string | *required* | How a model's `auth:` names it. No `@` |
-| `kind` | `anonymous` \| `token` \| `oidc` \| `oidc_browser` | *required* | What it sends |
+| `kind` | `anonymous` \| `token` \| `basic` \| `oidc` \| `oidc_browser` | *required* | What it sends |
 | `allowed_hosts` | list of string | `[]` | Hosts this credential may be sent to. Empty means anywhere. Checked against the **resolved** URL, after a templated one has been rendered |
 
 ### `kind: anonymous`
@@ -265,6 +265,18 @@ A static credential, read fresh on every call.
 
 **Both `value` fields absent means the UI prompts for it**, and what is typed
 stays in that tab.
+
+### `kind: basic`
+
+HTTP Basic: `Authorization: Basic base64(username:password)`, rebuilt on every call.
+
+| Key | Type | Default | What it does |
+| --- | --- | --- | --- |
+| `username` | string | *required* | Sent as is. Cannot contain `:` |
+| `password.env` | string | *(none)* | Environment variable holding the password, read on every call |
+| `password.file` | path | *(none)* | File holding the password, re-read on every call |
+
+**Both `password` fields absent means the UI prompts for it**, as for a token.
 
 ### `kind: oidc`
 

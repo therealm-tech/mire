@@ -223,7 +223,7 @@ function identity(model: ModelSummary, provider: AuthDescriptor | undefined, tok
   const from = provider.valueSource
   return {
     key: 'identity',
-    label: 'token',
+    label: provider.kind === 'basic' ? 'basic' : 'token',
     tone: 'neutral',
     subject: provider.id,
     detail: from ? named(from) : '',

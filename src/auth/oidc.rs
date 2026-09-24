@@ -273,21 +273,7 @@ impl OidcAuth {
     /// environment, never from a cache — that is what makes rotation work.
     fn read_client_credential(&self) -> Result<Secret, AuthError> {
         match &self.credential {
-            ClientCredential::Secret(value) => {
-                if let Some(variable) = &value.env {
-                    let raw = std::env::var(variable).map_err(|_| AuthError::MissingEnv {
-                        provider: self.name.clone(),
-                        variable: variable.clone(),
-                    })?;
-                    return Ok(Secret::new(raw.trim()));
-                }
-                if let Some(path) = &value.file {
-                    return read_trimmed(&self.name, path);
-                }
-                Err(AuthError::NoCredential {
-                    provider: self.name.clone(),
-                })
-            }
+            ClientCredential::Secret(value) => value.read(&self.name),
             ClientCredential::Assertion { file } => read_trimmed(&self.name, file),
         }
     }

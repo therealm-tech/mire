@@ -168,6 +168,15 @@ describe('preflight', () => {
     expect(identity(state)?.detail).toBe('file: /var/run/sa/token')
   })
 
+  it('says where a basic password is read from', () => {
+    const state = run({
+      provider: { kind: 'basic', valueSource: { from: 'env', name: 'LEGACY_PASSWORD' } },
+    })
+    expect(identity(state)?.label).toBe('basic')
+    expect(identity(state)?.detail).toBe('env: LEGACY_PASSWORD')
+    expect(blocking(state)).toHaveLength(0)
+  })
+
   it('blocks on an identity no provider declares', () => {
     const state = run({ provider: undefined, model: { auth: 'ghost' } })
     expect(blocking(state)).toHaveLength(1)

@@ -1,0 +1,15 @@
+# HTTP Basic against the compose stack, whose gateway only checks that an
+# `Authorization` header is present — so any password gets through.
+#
+#   export MODEL_PASSWORD=anything
+#
+# The username is not a secret and lives here; the password is read from the
+# environment on every call, and never written in this file.
+---
+name: basic
+kind: basic
+username: mire
+password:
+  env: MODEL_PASSWORD
+allowed_hosts:
+  - 127.0.0.1

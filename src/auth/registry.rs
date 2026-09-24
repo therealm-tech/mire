@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 use url::Url;
 
+use super::basic::BasicAuth;
 use super::browser::{OidcBrowserAuth, OidcBrowserConfig};
 use super::oidc::{ClientCredential, OidcAuth, OidcConfig};
 use super::session::{SessionStore, SessionView};
@@ -45,6 +46,8 @@ pub enum AuthKind {
     Anonymous,
     /// Sends a static token.
     Token,
+    /// Sends a username and a password.
+    Basic,
     /// Fetches an access token with `client_credentials`.
     Oidc,
     /// Obtains an access token by sending a human through their browser.
@@ -133,8 +136,9 @@ impl AuthDescriptor {
         }
     }
 
-    /// Where a static token comes from: the source by name, or — when the
-    /// registry named none — a prompt, since only the UI can supply one.
+    /// Where a static token or a basic password comes from: the source by name,
+    /// or — when the registry named none — a prompt, since only the UI can
+    /// supply one.
     fn reading_value(mut self, value: &TokenValue) -> Self {
         match source_of(value) {
             Some(source) => self.value_source = Some(source),
@@ -385,19 +389,13 @@ fn build(
             scheme,
             value,
             allowed_hosts,
-        } => {
-            let header = header_name(path, &name, &header)?;
-            let descriptor = AuthDescriptor::new(&name, stage, AuthKind::Token, &allowed_hosts)
-                .reading_value(&value);
-            let provider = Auth::Token(TokenAuth::new(
-                descriptor.id.clone(),
-                header,
-                scheme,
-                value,
-                allowed_hosts,
-            ));
-            Ok((provider, descriptor))
-        }
+        } => build_token(path, &name, stage, &header, scheme, value, allowed_hosts),
+        ProviderConfig::Basic {
+            name,
+            username,
+            password,
+            allowed_hosts,
+        } => build_basic(path, &name, stage, username, password, allowed_hosts),
         ProviderConfig::Oidc {
             name,
             issuer,
@@ -475,6 +473,55 @@ fn build(
     }
 }
 
+/// A static token provider, refusing a header name HTTP could not carry.
+fn build_token(
+    path: &Path,
+    name: &str,
+    stage: Option<&str>,
+    header: &str,
+    scheme: Option<String>,
+    value: TokenValue,
+    allowed_hosts: Vec<String>,
+) -> Result<(Auth, AuthDescriptor), LoadIssue> {
+    let header = header_name(path, name, header)?;
+    let descriptor =
+        AuthDescriptor::new(name, stage, AuthKind::Token, &allowed_hosts).reading_value(&value);
+    let provider = Auth::Token(TokenAuth::new(
+        descriptor.id.clone(),
+        header,
+        scheme,
+        value,
+        allowed_hosts,
+    ));
+    Ok((provider, descriptor))
+}
+
+/// A basic provider, refusing a username RFC 7617 could not encode.
+fn build_basic(
+    path: &Path,
+    name: &str,
+    stage: Option<&str>,
+    username: String,
+    password: TokenValue,
+    allowed_hosts: Vec<String>,
+) -> Result<(Auth, AuthDescriptor), LoadIssue> {
+    if username.contains(':') {
+        return Err(LoadIssue::new(
+            path,
+            format!("auth `{name}`: a basic `username` cannot contain `:`"),
+        ));
+    }
+    let descriptor =
+        AuthDescriptor::new(name, stage, AuthKind::Basic, &allowed_hosts).reading_value(&password);
+    let provider = Auth::Basic(BasicAuth::new(
+        descriptor.id.clone(),
+        username,
+        password,
+        allowed_hosts,
+    ));
+    Ok((provider, descriptor))
+}
+
 /// Picks the one client credential an OIDC provider is allowed to declare.
 fn client_credential(
     path: &Path,
@@ -549,6 +596,14 @@ enum ProviderConfig {
         #[serde(default)]
         allowed_hosts: Vec<String>,
     },
+    Basic {
+        name: String,
+        username: String,
+        #[serde(default)]
+        password: TokenValue,
+        #[serde(default)]
+        allowed_hosts: Vec<String>,
+    },
     Oidc {
         name: String,
         issuer: Url,
@@ -602,6 +657,7 @@ impl ProviderConfig {
         match self {
             Self::Anonymous { name, .. }
             | Self::Token { name, .. }
+            | Self::Basic { name, .. }
             | Self::Oidc { name, .. }
             | Self::OidcBrowser { name, .. } => name,
         }
@@ -882,6 +938,61 @@ stages:
         // Nothing to name: the value comes from the tab, and the tab is not a
         // source the server could describe.
         assert!(descriptor.value_source.is_none());
+    }
+
+    #[test]
+    fn parses_a_basic_provider() {
+        let dir = write_provider(
+            "basic",
+            "legacy",
+            "name: legacy\nkind: basic\nusername: alice\npassword:\n  env: LEGACY_PASSWORD\n",
+        );
+        let registry = load(&dir);
+
+        assert!(registry.issues().is_empty(), "{:?}", registry.issues());
+        assert!(matches!(registry.get("legacy"), Some(Auth::Basic(_))));
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|d| d.name == "legacy")
+            .unwrap();
+        assert_eq!(descriptor.kind, AuthKind::Basic);
+        assert!(!descriptor.needs_value);
+        assert!(matches!(
+            &descriptor.value_source,
+            Some(ValueSource::Env(variable)) if variable == "LEGACY_PASSWORD"
+        ));
+    }
+
+    #[test]
+    fn a_basic_provider_without_a_password_source_asks_the_ui_for_one() {
+        let dir = write_provider(
+            "basic-prompt",
+            "legacy",
+            "name: legacy\nkind: basic\nusername: alice\n",
+        );
+        let registry = load(&dir);
+
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|d| d.name == "legacy")
+            .unwrap();
+        assert!(descriptor.needs_value);
+        assert!(descriptor.value_source.is_none());
+    }
+
+    #[test]
+    fn a_basic_username_with_a_colon_is_refused() {
+        let dir = write_provider(
+            "basic-colon",
+            "legacy",
+            "name: legacy\nkind: basic\nusername: \"a:b\"\n",
+        );
+        let registry = load(&dir);
+
+        assert!(registry.get("legacy").is_none());
+        assert!(registry.issues()[0].message.contains("cannot contain `:`"));
     }
 
     #[test]
