@@ -283,7 +283,7 @@ impl OidcBrowserAuth {
             scrub.add(secret);
         }
         if let Some(value) = &self.client_secret {
-            let secret = read_client_secret(&self.name, value)?;
+            let secret = value.read(&self.name)?;
             scrub.add(&secret);
             form.push(("client_secret".to_owned(), secret.expose().to_owned()));
         }
@@ -361,28 +361,6 @@ impl OidcBrowserAuth {
         *self.discovery.write().expect("discovery lock") = Some(endpoints.clone());
         Ok(endpoints)
     }
-}
-
-/// Reads the client secret, from the environment or a file, on every exchange.
-fn read_client_secret(provider: &str, value: &TokenValue) -> Result<Secret, AuthError> {
-    if let Some(variable) = &value.env {
-        let raw = std::env::var(variable).map_err(|_| AuthError::MissingEnv {
-            provider: provider.to_owned(),
-            variable: variable.clone(),
-        })?;
-        return Ok(Secret::new(raw.trim()));
-    }
-    if let Some(path) = &value.file {
-        let raw = std::fs::read_to_string(path).map_err(|source| AuthError::TokenFile {
-            provider: provider.to_owned(),
-            path: path.display().to_string(),
-            source,
-        })?;
-        return Ok(Secret::new(raw.trim()));
-    }
-    Err(AuthError::NoCredential {
-        provider: provider.to_owned(),
-    })
 }
 
 impl AuthProvider for OidcBrowserAuth {

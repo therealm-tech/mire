@@ -87,7 +87,8 @@ and is only ever read; a file that does not load is skipped and reported rather
 than fatal.
 
 **[`auth`](src/auth.rs)** is the credential registry — [`token`](src/auth/token.rs),
-[`oidc`](src/auth/oidc.rs) (`client_credentials`), [`browser`](src/auth/browser.rs)
+[`basic`](src/auth/basic.rs), [`oidc`](src/auth/oidc.rs) (`client_credentials`),
+[`browser`](src/auth/browser.rs)
 (authorization code with PKCE) and [`anonymous`](src/auth/anonymous.rs), behind
 one [`registry`](src/auth/registry.rs). It answers "what credential, and where
 does it go" and nothing else; it never decides *whether* a call happens.

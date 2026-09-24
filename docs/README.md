@@ -12,7 +12,7 @@ directory by [`website/`](../website/README.md).
 | --- | --- |
 | [configuration.md](configuration.md) | The options file, configuration directories and how they layer, stages (`dev`/`preprod`/`prod` in one file), containers, notebook path proxies |
 | [models.md](models.md) | Turning a `curl` into a model file: templates, decode cascades, Rhai scripts, `multipart/form-data` endpoints |
-| [auth.md](auth.md) | Credential providers: static tokens, OIDC workload identities, browser logins, `allowed_hosts` |
+| [auth.md](auth.md) | Credential providers: static tokens, HTTP Basic, OIDC workload identities, browser logins, `allowed_hosts` |
 | [mcp.md](mcp.md) | Real tool calls: declaring servers, protocol revisions, per-run selection, header templates, hooks, captured variables |
 | [agent-loop.md](agent-loop.md) | The turn loop, simulated tools, stop conditions and named outcomes |
 | [streaming.md](streaming.md) | Streaming a call or a loop, and time to first token |

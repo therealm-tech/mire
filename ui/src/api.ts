@@ -219,7 +219,7 @@ export const authDescriptorSchema = z.object({
   name: z.string(),
   /** The stage this reading of the file belongs to. */
   stage: z.string().optional(),
-  kind: z.enum(['anonymous', 'token', 'oidc', 'oidc_browser']),
+  kind: z.enum(['anonymous', 'token', 'basic', 'oidc', 'oidc_browser']),
   needsValue: z.boolean(),
   /** Absent where there is nothing to read: `anonymous`, a browser flow, and the `needsValue` case. */
   valueSource: valueSourceSchema.optional(),

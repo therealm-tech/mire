@@ -28,6 +28,36 @@ pub struct TokenValue {
     pub file: Option<PathBuf>,
 }
 
+impl TokenValue {
+    /// Reads the value from `env`, else `file`, on every call so that rotation
+    /// is picked up. `provider` only names the owner in an error.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::MissingEnv`], [`AuthError::TokenFile`], or
+    /// [`AuthError::NoCredential`] when neither source is declared.
+    pub fn read(&self, provider: &str) -> Result<Secret, AuthError> {
+        if let Some(variable) = &self.env {
+            let raw = std::env::var(variable).map_err(|_| AuthError::MissingEnv {
+                provider: provider.to_owned(),
+                variable: variable.clone(),
+            })?;
+            return Ok(Secret::new(raw.trim()));
+        }
+        if let Some(path) = &self.file {
+            let raw = std::fs::read_to_string(path).map_err(|source| AuthError::TokenFile {
+                provider: provider.to_owned(),
+                path: path.display().to_string(),
+                source,
+            })?;
+            return Ok(Secret::new(raw.trim()));
+        }
+        Err(AuthError::NoCredential {
+            provider: provider.to_owned(),
+        })
+    }
+}
+
 /// Sends a fixed credential in a configurable header.
 #[derive(Debug, Clone)]
 pub struct TokenAuth {
@@ -69,24 +99,7 @@ impl TokenAuth {
         if let Some(secret) = supplied.filter(|secret| !secret.is_empty()) {
             return Ok(secret.clone());
         }
-        if let Some(variable) = &self.value.env {
-            let raw = std::env::var(variable).map_err(|_| AuthError::MissingEnv {
-                provider: self.name.clone(),
-                variable: variable.clone(),
-            })?;
-            return Ok(Secret::new(raw.trim()));
-        }
-        if let Some(path) = &self.value.file {
-            let raw = std::fs::read_to_string(path).map_err(|source| AuthError::TokenFile {
-                provider: self.name.clone(),
-                path: path.display().to_string(),
-                source,
-            })?;
-            return Ok(Secret::new(raw.trim()));
-        }
-        Err(AuthError::NoCredential {
-            provider: self.name.clone(),
-        })
+        self.value.read(&self.name)
     }
 }
 

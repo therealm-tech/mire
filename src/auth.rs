@@ -9,6 +9,7 @@
 //! route with no credential and getting a `401` is a *passing* check.
 
 pub mod anonymous;
+pub mod basic;
 pub mod browser;
 pub mod oidc;
 pub mod registry;
@@ -23,6 +24,7 @@ use url::Url;
 use crate::redact::Redactor;
 
 pub use anonymous::Anonymous;
+pub use basic::BasicAuth;
 pub use browser::{CALLBACK_PATH, OidcBrowserAuth, OidcBrowserConfig};
 pub use oidc::{ClientCredential, OidcAuth, OidcConfig};
 pub use registry::{ANONYMOUS, AuthRegistry};
@@ -90,6 +92,8 @@ pub enum Auth {
     Anonymous(Anonymous),
     /// A static token from an environment variable, a file, or the UI.
     Token(TokenAuth),
+    /// A username and a password, as `Authorization: Basic …`.
+    Basic(BasicAuth),
     /// An access token fetched with `client_credentials`, the mode that
     /// reproduces what a workload actually does.
     Oidc(Box<OidcAuth>),
@@ -102,6 +106,7 @@ impl AuthProvider for Auth {
         match self {
             Self::Anonymous(provider) => provider.name(),
             Self::Token(provider) => provider.name(),
+            Self::Basic(provider) => provider.name(),
             Self::Oidc(provider) => provider.name(),
             Self::OidcBrowser(provider) => provider.name(),
         }
@@ -116,6 +121,7 @@ impl AuthProvider for Auth {
         match self {
             Self::Anonymous(provider) => provider.apply(headers, target, supplied).await,
             Self::Token(provider) => provider.apply(headers, target, supplied).await,
+            Self::Basic(provider) => provider.apply(headers, target, supplied).await,
             Self::Oidc(provider) => provider.apply(headers, target, supplied).await,
             Self::OidcBrowser(provider) => provider.apply(headers, target, supplied).await,
         }
@@ -129,6 +135,7 @@ impl AuthProvider for Auth {
         match self {
             Self::Anonymous(provider) => provider.credential(target, supplied).await,
             Self::Token(provider) => provider.credential(target, supplied).await,
+            Self::Basic(provider) => provider.credential(target, supplied).await,
             Self::Oidc(provider) => provider.credential(target, supplied).await,
             Self::OidcBrowser(provider) => provider.credential(target, supplied).await,
         }
@@ -138,6 +145,7 @@ impl AuthProvider for Auth {
         match self {
             Self::Anonymous(provider) => provider.invalidate().await,
             Self::Token(provider) => provider.invalidate().await,
+            Self::Basic(provider) => provider.invalidate().await,
             Self::Oidc(provider) => provider.invalidate().await,
             Self::OidcBrowser(provider) => provider.invalidate().await,
         }
